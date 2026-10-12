@@ -37,12 +37,23 @@ The app is signed ad hoc and not notarized, so macOS blocks it the first time:
 2. Open System Settings → Privacy & Security, scroll to Security, and click **Open Anyway** next to
    the message about AI Notch. The button is there for about an hour after the attempt.
 3. Confirm with your login password, then **Open**.
+4. If the setup window then says **macOS is blocking AI Notch's helper**, copy the command it
+   shows, run it in Terminal, and click **Check Again**. For the usual place that is:
+
+   ```sh
+   xattr -dr com.apple.quarantine "/Applications/AINotch.app"
+   ```
+
+   It removes the download's quarantine from AI Notch only. The app never does this itself.
 
 Right-click → Open no longer skips this check for apps that are not notarized.
 
 ## Set Up
 
-The first launch shows a setup window. Nothing is written until you click **Set Up**, which:
+The first launch shows a setup window. Nothing is written until you click **Set Up**. It first
+checks that macOS lets the helper run (`ai-notch-hook --probe`, which exits at once and touches
+nothing; no answer within 3 seconds counts as blocked). While it is blocked, Set Up connects
+nothing and shows the command above. Then it:
 
 - adds the hook to 13 Claude Code events in `~/.claude/settings.json` (the permission event waits
   up to 1800 s for a click in the notch) and wraps your status line as
@@ -60,6 +71,9 @@ as they were. Each file it changes is first backed up as `<file>.bak-setup-<time
 atomically; a file that would not change is not touched. Run from the disk image or from a
 quarantined copy macOS has moved to a temporary folder, it writes nothing and asks you to move it
 to Applications first.
+
+If the helper of a copy that is already connected stops running, the window opens at launch with
+the same command, and **Disconnect…** to take the hooks out meanwhile.
 
 Reopen the window from the panel's footer (**Setup**) or by opening the app again. Only one copy
 runs: a second launch hands over to the running one and quits.

@@ -19,10 +19,14 @@
   `~/.claude/settings.json` and `~/.cursor/hooks.json`, only read): Set Up, Set Up again (no
   change), Disconnect (the original, byte for byte), moving `claude-notch-hook` entries (the old
   name) and other copies' entries in place, user hooks kept, no duplicates, Disconnect with no
-  hooks writing nothing, broken JSON, symlinks. Prints diffs.
+  hooks writing nothing, broken JSON, symlinks, and a hook that does not run (stand-ins that
+  hang or exit 1: status says `hook blocked`, apply exits 4 and writes nothing; the real hook back:
+  apply connects; Disconnect never runs the hook). Prints diffs.
 - `CLAUDE_NOTCH_SETUP_HOME=<dir>` — tests only: setup reads and writes `<dir>/.claude`,
   `<dir>/.cursor` and `<dir>/Library/LaunchAgents` instead of your home.
-  `AINotch --setup-cli status|apply|disconnect` runs it without the window;
+  `AINotch --setup-cli status|apply|disconnect` runs it without the window (status and apply
+  probe the hook first; exit codes: 1 a file failed, 2 usage, 3 disk image or translocated copy,
+  4 hook blocked);
   `AINotch --setup-preview [--theme light|dark]` opens the window alone (no notch, no socket)
   and prints `setup-window <number> <x> <y> <w> <h>` (AppKit points) for `screencapture -l` and
   clicks. Run it from an assembled `.app` for the real icon and the notification status.

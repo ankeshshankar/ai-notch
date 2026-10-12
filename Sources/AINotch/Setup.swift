@@ -68,10 +68,156 @@ struct AppLocation {
     }
 }
 
+/// Whether macOS lets the hook run. Claude Code and Cursor execute `Contents/MacOS/ai-notch-hook`
+/// directly, and a copy downloaded without notarization keeps the helper quarantined even after
+/// Open Anyway approves the app: its exec then hangs until the hook's timeout (30 minutes on
+/// PermissionRequest). Setup runs `ai-notch-hook --probe` (exits at once, touches nothing) with a
+/// hard timeout and connects nothing unless it ran. The app never removes the quarantine itself.
+enum HookProbe {
+    enum Result: Equatable {
+        case runs(seconds: Double)
+        case blocked(Why)
+
+        var runs: Bool { if case .runs = self { true } else { false } }
+    }
+
+    enum Why: Equatable {
+        /// No exit within the timeout (the process is killed later, at `killAfter`).
+        case timedOut(Double)
+        case exited(Int32)
+        case signaled(Int32)
+        case couldNotStart(String)
+    }
+
+    /// How long a caller waits for the probe's answer: no exit by then counts as blocked.
+    static let timeout: Double = 3
+    /// When a probe still running is killed. Not at `timeout`: Gatekeeper takes 7–10 s to judge
+    /// a quarantined helper, and a probe killed before it decides leaves the helper undecided,
+    /// so every later probe is judged again from the start and cut off again, even after the
+    /// quarantine is removed (measured: four 3-s probes in a row failed after `xattr -dr`; with
+    /// the verdict left to finish, the next probe ran in 0.08 s).
+    static let killAfter: Double = 15
+
+    /// One probe process: started at once, answered within `timeout`, killed at `killAfter`.
+    final class Run: @unchecked Sendable {
+        private let lock = NSLock()
+        private let finished = DispatchSemaphore(value: 0)
+        private let process = Process()
+        private let start = Date()
+        private var launchError: String?
+        private var done = false
+
+        init(_ hook: URL) {
+            process.executableURL = hook
+            process.arguments = ["--probe"]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { [self] _ in markDone() }
+            // The spawn on a thread of its own: even an exec that stalls inside the spawn cannot
+            // hold the caller past `timeout`.
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                do {
+                    try process.run()
+                } catch {
+                    lock.lock(); launchError = error.localizedDescription; lock.unlock()
+                    markDone()
+                    return
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + HookProbe.killAfter) { [self] in
+                    if isRunning { kill(process.processIdentifier, SIGKILL) }
+                }
+            }
+        }
+
+        private func markDone() {
+            lock.lock()
+            let first = !done
+            done = true
+            lock.unlock()
+            process.terminationHandler = nil
+            if first { finished.signal() }
+        }
+
+        var isRunning: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return !done
+        }
+
+        /// Waits up to `seconds` (blocking: off the main thread) for the probe's answer.
+        func result(within seconds: Double = HookProbe.timeout) -> Result {
+            if finished.wait(timeout: .now() + seconds) == .success { finished.signal() } else {
+                return .blocked(.timedOut(HookProbe.timeout))
+            }
+            lock.lock()
+            let launchError = launchError
+            lock.unlock()
+            if let launchError { return .blocked(.couldNotStart(launchError)) }
+            switch (process.terminationReason, process.terminationStatus) {
+            case (.exit, 0): return .runs(seconds: Date().timeIntervalSince(start))
+            case (.exit, let code): return .blocked(.exited(code))
+            case (_, let signal): return .blocked(.signaled(signal))
+            }
+        }
+
+        /// Before the process exits (the CLI): a probe still running is waited for until
+        /// `killAfter`, then killed, so none outlives it.
+        func finish() {
+            guard isRunning else { return }
+            let left = HookProbe.killAfter - Date().timeIntervalSince(start)
+            if finished.wait(timeout: .now() + max(0, left)) == .success { finished.signal(); return }
+            lock.lock(); let running = !done; lock.unlock()
+            if running, process.processIdentifier > 0 { kill(process.processIdentifier, SIGKILL) }
+        }
+    }
+
+    /// One probe, answered within `timeout`.
+    static func run(_ hook: URL) -> (Result, Run) {
+        let probe = Run(hook)
+        return (probe.result(), probe)
+    }
+
+    /// The file's `com.apple.quarantine` value (`flags;time;agent;id`), if it has one. Read for
+    /// the message only.
+    static func quarantine(_ url: URL) -> String? {
+        let name = "com.apple.quarantine"
+        let size = getxattr(url.path, name, nil, 0, 0, 0)
+        guard size > 0 else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard getxattr(url.path, name, &buffer, size, 0, 0) == size else { return nil }
+        return String(decoding: buffer, as: UTF8.self).trimmingCharacters(in: .controlCharacters)
+    }
+
+    /// The one command that frees this copy, for the window and the CLI.
+    static func unquarantineCommand(_ bundle: URL) -> String {
+        "xattr -dr com.apple.quarantine " + Shell.doubleQuote(bundle.path)
+    }
+
+    static func describe(_ why: Why) -> String {
+        switch why {
+        case .timedOut(let s): "no answer in \(Int(s)) s"
+        case .exited(let code): "exited with code \(code)"
+        case .signaled(let signal): "stopped by signal \(signal)"
+        case .couldNotStart(let why): "could not start: \(why)"
+        }
+    }
+}
+
 /// Just enough of the shell to read and write the hook commands.
 enum Shell {
     /// Single-quoted, always.
     static func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    /// Double-quoted, for a command shown to be pasted into Terminal (reads like the usual
+    /// `"/Applications/…"`).
+    static func doubleQuote(_ s: String) -> String {
+        var out = "\""
+        for c in s {
+            if "\"\\$`".contains(c) { out.append("\\") }
+            out.append(c)
+        }
+        return out + "\""
+    }
 
     /// Bare when nothing in it is special to the shell (the usual `/Applications/…` path), so the
     /// command reads as it always has; else single-quoted.
@@ -556,11 +702,16 @@ enum Setup {
         var errors: [String: String] = [:]
     }
 
-    /// Writes the required items. Nothing is written for a copy hooks must not point at.
-    static func connect(_ location: AppLocation) -> Outcome {
+    /// Writes the required items. Nothing is written for a copy hooks must not point at, nor
+    /// while its hook does not run (`probe`: a `HookProbe.run` of this copy's hook just before).
+    static func connect(_ location: AppLocation, probe: HookProbe.Result) -> Outcome {
         var outcome = Outcome()
         guard location.problem == nil else {
             outcome.errors["app"] = "Move the app to Applications first"
+            return outcome
+        }
+        guard probe.runs else {
+            outcome.errors["hook"] = "macOS is blocking ai-notch-hook"
             return outcome
         }
         let hook = location.hook.path
@@ -596,6 +747,9 @@ enum Setup {
     /// `AINotch --setup-cli status|apply|disconnect`: the window's logic, without the window.
     /// `CLAUDE_NOTCH_SETUP_HOME` points it at a copy of a home folder (tests); without it, it works
     /// on the real home (the Homebrew cask's uninstall runs `disconnect`, a no-op without hooks).
+    /// `status` and `apply` probe the hook first; `disconnect` never runs it, so it works while
+    /// macOS blocks it. Exit codes: 0 done, 1 a file failed, 2 usage, 3 a copy hooks must not
+    /// point at (disk image, translocated, no hook), 4 the hook is blocked (nothing written).
     static func runCLI(_ command: String) -> Int32 {
         let location = AppLocation.current()
         func line(_ name: String, _ value: String) { print(name.padding(toLength: 8, withPad: " ", startingAt: 0) + value) }
@@ -609,7 +763,7 @@ enum Setup {
             }
         }
         func report(_ outcome: Outcome) {
-            if outcome.written.isEmpty { line("wrote", location.problem == nil ? "nothing (already as wanted)" : "nothing") }
+            if outcome.written.isEmpty { line("wrote", outcome.errors.isEmpty ? "nothing (already as wanted)" : "nothing") }
             for w in outcome.written {
                 line("wrote", SetupPaths.short(w.file) + (w.backup.map { " (backup \(SetupPaths.short($0)))" } ?? ""))
             }
@@ -619,20 +773,36 @@ enum Setup {
         line("app", location.bundle.path)
         line("hook", location.hook.path)
         if let problem = location.problem { line("blocked", "\(problem)") }
+        guard ["status", "apply", "disconnect"].contains(command) else {
+            FileHandle.standardError.write(Data("usage: AINotch --setup-cli status|apply|disconnect\n".utf8))
+            return 2
+        }
+        var probe = HookProbe.Result.blocked(.couldNotStart("not probed"))
+        var probeRun: HookProbe.Run?
+        // A probe still running when this returns is waited for (up to `killAfter`), then killed.
+        defer { probeRun?.finish() }
+        if command != "disconnect", location.problem == nil {
+            (probe, probeRun) = HookProbe.run(location.hook)
+            switch probe {
+            case .runs(let seconds): line("probe", String(format: "hook runs (%.2f s)", seconds))
+            case .blocked(let why):
+                let mark = HookProbe.quarantine(location.hook).map { "quarantine \($0)" } ?? "no quarantine flag"
+                line("probe", "hook blocked (\(HookProbe.describe(why)); \(mark))")
+                line("fix", HookProbe.unquarantineCommand(location.bundle))
+            }
+        }
         switch command {
         case "apply":
-            let outcome = connect(location)
+            let outcome = connect(location, probe: probe)
             report(outcome)
             if location.problem != nil { return 3 }
+            if !probe.runs { return 4 }
             if !outcome.errors.isEmpty { return 1 }
         case "disconnect":
             let outcome = disconnect()
             report(outcome)
             if !outcome.errors.isEmpty { return 1 }
-        case "status": break
-        default:
-            FileHandle.standardError.write(Data("usage: AINotch --setup-cli status|apply|disconnect\n".utf8))
-            return 2
+        default: break
         }
         line("claude", describe(claudeStatus(location)))
         line("cursor", hasCursor ? describe(cursorStatus(location)) : "no ~/.cursor")

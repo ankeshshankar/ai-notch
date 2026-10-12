@@ -19,8 +19,15 @@ Scenarios:
   nocursor no ~/.cursor: Cursor is left alone and not created
   broken   settings.json that is not JSON: an error, the file untouched
   symlink  settings.json a symlink: its target is written, the link stays
+  blocked  a copy whose hook does not run (stand-ins: one that hangs, as a hook macOS holds in
+           quarantine does, and one that exits 1): status says `hook blocked` and gives the
+           xattr command; apply exits 4 and writes nothing (no hooks, status line, login item);
+           no probe process outlives the CLI
+  unblocked the same copy once its hook runs (the real hook back in place): apply connects it
+  blockeddisconnect hooks pointing at a hook that hangs: Disconnect never runs it, takes them
+           out (the original, byte for byte) and returns at once
 """
-import argparse, difflib, json, os, shlex, shutil, subprocess, sys, tempfile
+import argparse, difflib, json, os, shlex, shutil, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HOME = os.path.expanduser("~")
@@ -134,9 +141,9 @@ def hook_up(settings, cursor, hook):
     return s, c
 
 
-def run(home, command, expect_code=0):
+def run(home, command, expect_code=0, app=None):
     env = dict(os.environ, CLAUDE_NOTCH_SETUP_HOME=home)
-    p = subprocess.run([args.app, "--setup-cli", command], env=env, capture_output=True, text=True)
+    p = subprocess.run([app or args.app, "--setup-cli", command], env=env, capture_output=True, text=True)
     if not args.quiet:
         for l in p.stdout.splitlines():
             print("        " + l.replace(home, "$HOME"))
@@ -240,6 +247,7 @@ def scenario_fresh(tmp, base_settings, base_cursor, hook, exe):
           f"original has no notch hooks and its own status line ({(original.get('statusLine') or {}).get('command')!r})")
     out = run(home, "status")
     check("claude  not set up" in out and "cursor  not set up" in out and "login   not set up" in out, "status before: all not set up")
+    check("probe   hook runs" in out, "status probes the hook: it runs")
 
     run(home, "apply")
     after, cursor_after = read(settings), read(cursor)
@@ -361,6 +369,84 @@ def scenario_symlink(tmp, base_settings):
     check(read(target) == before, "Disconnect restores the target exactly")
 
 
+def stand_in_copy(tmp, name, script):
+    """A copy of the app's executable beside a stand-in `ai-notch-hook`, as a bundle's
+    Contents/MacOS holds them. The stand-in notes each run in `<dir>/ran`."""
+    d = os.path.join(tmp, name)
+    os.makedirs(d)
+    exe = os.path.join(d, "AINotch")
+    shutil.copy2(args.app, exe)
+    hook = os.path.join(d, "ai-notch-hook")
+    with open(hook, "w") as f:
+        f.write(f"#!/bin/sh\necho run >> {shlex.quote(os.path.join(d, 'ran'))}\n{script}\n")
+    os.chmod(hook, 0o755)
+    return d, exe, hook
+
+
+def runs_of(d):
+    p = os.path.join(d, "ran")
+    return len(open(p).read().splitlines()) if os.path.exists(p) else 0
+
+
+def leftover(hook):
+    return subprocess.run(["pgrep", "-f", hook], capture_output=True, text=True).stdout.split()
+
+
+def scenario_blocked(tmp, base_settings, base_cursor):
+    print("\n== blocked: the hook does not run (a stand-in that hangs, one that exits 1)")
+    real_hook = os.path.join(os.path.dirname(os.path.realpath(args.app)), "ai-notch-hook")
+    # Hangs past the probe's 3 s answer, then exits by itself before the 15 s kill.
+    d, exe, hook = stand_in_copy(tmp, "app-hangs", "exec sleep 6")
+    home, settings, cursor = make_home(tmp, "blocked")
+    open(settings, "w").write(dump(strip_claude(base_settings)))
+    open(cursor, "w").write(dump(strip_cursor(base_cursor)))
+    before = snapshot(home)
+    t = time.time()
+    out = run(home, "status", app=exe)
+    took = time.time() - t
+    check("probe   hook blocked (no answer in 3 s" in out, "status: hook blocked (no answer in 3 s)")
+    check(f'fix     xattr -dr com.apple.quarantine "{os.path.realpath(d)}"' in out, "status: gives the xattr command for this copy")
+    check(runs_of(d) == 1, f"status ran the probe once ({runs_of(d)})")
+    check(3 <= took < 10, f"status answers after the 3 s probe timeout and waits out the stand-in ({took:.1f} s)")
+    check(not leftover(hook), "no probe process left after status")
+    t = time.time()
+    out = run(home, "apply", expect_code=4, app=exe)
+    check("wrote   nothing" in out and "error   hook: macOS is blocking ai-notch-hook" in out, "apply: refuses, says so")
+    check(snapshot(home) == before, "apply wrote nothing: no hooks, no status line, no login item, no backup")
+    check(not leftover(hook), f"no probe process left after apply ({time.time() - t:.1f} s)")
+
+    d2, exe2, hook2 = stand_in_copy(tmp, "app-fails", "exit 1")
+    out = run(home, "apply", expect_code=4, app=exe2)
+    check("probe   hook blocked (exited with code 1" in out, "a hook that exits 1 counts as blocked")
+    check(snapshot(home) == before, "apply wrote nothing")
+
+    print("\n== unblocked: the same copy once its hook runs")
+    shutil.copy2(real_hook, hook)  # what xattr -dr does for a quarantined hook: it runs again
+    out = run(home, "status", app=exe)
+    check("probe   hook runs" in out and "fix" not in out, "status: hook runs, no command")
+    run(home, "apply", app=exe)
+    check_claude_connected(settings, os.path.realpath(hook), strip_claude(base_settings))
+    check_cursor_connected(cursor, os.path.realpath(hook), strip_cursor(base_cursor))
+    out = run(home, "status", app=exe)
+    check("claude  done" in out and "cursor  done" in out and "login   done" in out, "status after: all done")
+
+
+def scenario_blocked_disconnect(tmp, base_settings, base_cursor):
+    print("\n== blockeddisconnect: Disconnect while the hook hangs")
+    d, exe, hook = stand_in_copy(tmp, "app-hangs-2", "exec sleep 30")
+    home, settings, cursor = make_home(tmp, "blockeddisconnect")
+    s, c = hook_up(base_settings, base_cursor, os.path.realpath(hook))
+    open(settings, "w").write(dump(s)); open(cursor, "w").write(dump(c))
+    t = time.time()
+    out = run(home, "disconnect", app=exe)
+    took = time.time() - t
+    check("probe" not in out, "disconnect does not probe")
+    check(runs_of(d) == 0, "the hook never ran")
+    check(took < 2, f"disconnect returns at once ({took:.2f} s)")
+    check(read(settings).decode() == dump(strip_claude(s)), "settings.json: notch entries out, status line unwrapped")
+    check(read(cursor).decode() == dump(strip_cursor(c)), "hooks.json: notch entries out")
+
+
 def main():
     global args
     p = argparse.ArgumentParser()
@@ -387,6 +473,8 @@ def main():
         scenario_nocursor(tmp, base_settings)
         scenario_broken(tmp)
         scenario_symlink(tmp, base_settings)
+        scenario_blocked(tmp, base_settings, base_cursor)
+        scenario_blocked_disconnect(tmp, base_settings, base_cursor)
     finally:
         if args.keep:
             print(f"kept {tmp}")

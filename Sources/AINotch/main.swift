@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DistributedNotificationCenter.default().addObserver(forName: showSetupNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { SetupWindowController.shared.show() }
         }
-        if firstLaunch { setup.show() }
+        if firstLaunch { setup.show() } else if !args.contains("--preview") { setup.checkHookAtLaunch() }
     }
 
     /// Opening the app again (Finder, Spotlight, `open`) shows the setup window: the app has no

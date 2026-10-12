@@ -1,16 +1,20 @@
 -- Lays out the mounted disk image's Finder window: icon view, no toolbar, sidebar or status bar,
 -- 128-point icons on the background picture, the app on the left and Applications on the right.
---   osascript layout.applescript <volume name> <app item name> <width> <window height, title bar included> <app x> <apps x> <icons y>
+-- The volume is named by its mount point, not its name: another volume of the same name may be
+-- mounted (an older AI Notch disk image), and Finder's `disk "<name>"` would pick either.
+--   osascript layout.applescript <mount point> <app item name> <width> <window height, title bar included> <app x> <apps x> <icons y>
 on run argv
-	set volumeName to item 1 of argv
+	set mountPoint to item 1 of argv
 	set appName to item 2 of argv
 	set contentWidth to (item 3 of argv) as integer
 	set contentHeight to (item 4 of argv) as integer
 	set appX to (item 5 of argv) as integer
 	set applicationsX to (item 6 of argv) as integer
 	set iconsY to (item 7 of argv) as integer
+	set volumeRoot to (POSIX file mountPoint) as alias
+	set backgroundFile to (POSIX file (mountPoint & "/.background/background.tiff")) as alias
 	tell application "Finder"
-		tell disk volumeName
+		tell folder volumeRoot
 			open
 			set theWindow to container window
 			set current view of theWindow to icon view
@@ -29,7 +33,7 @@ on run argv
 			set label position of viewOptions to bottom
 			set shows item info of viewOptions to false
 			set shows icon preview of viewOptions to true
-			set background picture of viewOptions to file ".background:background.tiff"
+			set background picture of viewOptions to backgroundFile
 			set position of item appName of theWindow to {appX, iconsY}
 			set position of item "Applications" of theWindow to {applicationsX, iconsY}
 			close

@@ -10,6 +10,10 @@ import NotchCore
 // Cursor's own agent runs it too (`ai-notch-hook cursor`, from ~/.cursor/hooks.json), on
 // the events that act on nothing it answers; see the Cursor section below.
 
+// `ai-notch-hook --probe`: the app's setup runs this to learn whether macOS lets the hook run at
+// all (a quarantined helper hangs in exec). It reads nothing, writes nothing, prints nothing.
+if CommandLine.arguments.dropFirst().first == "--probe" { exit(0) }
+
 let now = Date().timeIntervalSince1970
 let maxAgents = 20
 /// Ended subagents stay listed this long.

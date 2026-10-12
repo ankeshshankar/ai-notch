@@ -22,11 +22,6 @@ ICONS_Y=196
 # Finder's bounds include the title bar (32 points on macOS 26 and 27).
 TITLEBAR=32
 
-if [ -e "/Volumes/$VOLUME" ]; then
-  echo "A volume named \"$VOLUME\" is mounted; eject it first." >&2
-  exit 1
-fi
-
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ai-notch-dmg.XXXXXX")"
 DEVICE=""
 cleanup() {
@@ -55,11 +50,14 @@ tiffutil -cathidpicheck "$WORK/background.png" "$WORK/background@2x.png" -out "$
 
 # A writable image to lay out, with room for Finder's .DS_Store.
 hdiutil create -quiet -srcfolder "$STAGE" -volname "$VOLUME" -fs HFS+ -format UDRW -size 80m "$WORK/layout.dmg"
-DEVICE="$(hdiutil attach -readwrite -noverify -noautoopen "$WORK/layout.dmg" | awk '/Apple_HFS/ { print $1; exit }')"
-MOUNT="/Volumes/$VOLUME"
-[ -d "$MOUNT" ] || { echo "The image did not mount at $MOUNT." >&2; exit 1; }
+# Mounted at a folder of its own, so another volume named "AI Notch" (an older image left mounted)
+# is neither in the way nor laid out by mistake.
+MOUNT="$WORK/mount"
+mkdir -p "$MOUNT"
+DEVICE="$(hdiutil attach -readwrite -noverify -noautoopen -mountpoint "$MOUNT" "$WORK/layout.dmg" 2>/dev/null | awk '/Apple_HFS/ { print $1; exit }')"
+[ -n "$DEVICE" ] && [ -f "$MOUNT/.background/background.tiff" ] || { echo "The image did not mount at $MOUNT." >&2; exit 1; }
 
-osascript "$ROOT/scripts/dmg/layout.applescript" "$VOLUME" "$APP_NAME" "$WIDTH" "$((HEIGHT + TITLEBAR))" "$APP_X" "$APPS_X" "$ICONS_Y"
+osascript "$ROOT/scripts/dmg/layout.applescript" "$MOUNT" "$APP_NAME" "$WIDTH" "$((HEIGHT + TITLEBAR))" "$APP_X" "$APPS_X" "$ICONS_Y"
 # Finder writes the layout to .DS_Store a moment after the window closes.
 i=0
 while [ ! -s "$MOUNT/.DS_Store" ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done

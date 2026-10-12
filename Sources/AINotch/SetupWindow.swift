@@ -21,12 +21,25 @@ final class SetupModel: ObservableObject {
     /// The last Set Up's or Disconnect's errors, by item.
     @Published private(set) var errors: [String: String] = [:]
     @Published private(set) var backups: [String] = []
+    /// The last probe of this copy's hook (nil: not probed yet) and the hook's quarantine flag
+    /// then. Probed when the window opens, on Set Up and on Check Again; never on the timer.
+    @Published private(set) var probe: HookProbe.Result?
+    @Published private(set) var quarantine: String?
+    @Published private(set) var probing = false
+    private var probedAt = Date.distantPast
+    private var pendingProbe: HookProbe.Run?
     private var timer: Timer?
 
-    var requiredDone: Bool { location.problem == nil && claude.isDone && (cursor?.isDone ?? true) && login.isDone }
+    var hookBlocked: Bool { probe.map { !$0.runs } ?? false }
+    var requiredDone: Bool { location.problem == nil && !hookBlocked && claude.isDone && (cursor?.isDone ?? true) && login.isDone }
+    /// Hooks in the user's files point at this copy (all of them or some).
+    var connected: Bool { claude == .done || claude == .incomplete || cursor == .done || cursor == .incomplete }
+    var unquarantineCommand: String { HookProbe.unquarantineCommand(location.bundle) }
 
     func start() {
         refresh()
+        // A probe from the launch check a moment ago stands; otherwise check again.
+        if Date().timeIntervalSince(probedAt) > 5 { checkHook() }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -54,8 +67,47 @@ final class SetupModel: ObservableObject {
         if self[keyPath: key] != value { self[keyPath: key] = value }
     }
 
+    /// Probes the hook off the main thread (answered within `HookProbe.timeout`) and calls `then`
+    /// on the main thread with whether it ran.
+    func checkHook(then: ((Bool) -> Void)? = nil) {
+        guard location.problem == nil else { return }
+        guard !probing else { return }
+        probing = true
+        let hook = location.hook
+        // A probe macOS is still judging is waited on, not stacked with another (see killAfter).
+        let run = pendingProbe.flatMap { $0.isRunning ? $0 : nil } ?? HookProbe.Run(hook)
+        pendingProbe = run
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = run.result()
+            let mark = HookProbe.quarantine(hook)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.note(result, quarantine: mark)
+                    then?(result.runs)
+                }
+            }
+        }
+    }
+
+    /// A probe's outcome, from `checkHook` or the launch check.
+    func note(_ result: HookProbe.Result, quarantine: String?) {
+        probing = false
+        probedAt = Date()
+        probe = result
+        self.quarantine = quarantine
+    }
+
+    /// Set Up and Check Again: the hook must run first; only then is anything written.
     func setUp() {
-        let outcome = Setup.connect(location)
+        checkHook { [weak self] runs in
+            guard runs, let self, let probe = self.probe else { return }
+            self.connect(probe)
+        }
+    }
+
+    private func connect(_ probe: HookProbe.Result) {
+        let outcome = Setup.connect(location, probe: probe)
         errors = outcome.errors
         backups = outcome.written.compactMap { $0.backup.map(SetupPaths.short) }
         UserDefaults.standard.set(location.bundle.path, forKey: SetupWindowController.seenKey)
@@ -119,6 +171,22 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         }
         let path = location.bundle.path
         return defaults.string(forKey: Self.seenKey) != path || defaults.string(forKey: Self.connectedKey) == path
+    }
+
+    /// A launch that does not show the window by itself: when the hooks point at this copy, its
+    /// hook is probed in the background, and one macOS now blocks shows the window with that
+    /// state (as hooks gone from under it do).
+    func checkHookAtLaunch() {
+        let location = AppLocation.current()
+        guard location.problem == nil else { return }
+        let here: [ItemStatus] = [.done, .incomplete]
+        let connected = here.contains(Setup.claudeStatus(location))
+            || (Setup.hasCursor && here.contains(Setup.cursorStatus(location)))
+            || UserDefaults.standard.string(forKey: Self.connectedKey) == location.bundle.path
+        guard connected else { return }
+        model.checkHook { [weak self] runs in
+            if !runs { self?.show() }
+        }
     }
 
     func show() {
@@ -199,7 +267,7 @@ struct SetupView: View {
             }
             .padding(.top, 8)
 
-            if let problem = model.location.problem { blocked(problem) }
+            if let problem = model.location.problem { blocked(problem) } else if model.hookBlocked { hookBlocked }
 
             section("Connect") {
                 row("Claude Code", icon: "terminal.fill", tint: Color(red: 0.85, green: 0.47, blue: 0.34),
@@ -268,6 +336,20 @@ struct SetupView: View {
                         .keyboardShortcut(.defaultAction)
                         .controlSize(.large)
                         .buttonStyle(.borderedProminent)
+                } else if model.location.problem == nil && model.hookBlocked {
+                    Button("Not Now", action: close)
+                        .controlSize(.large)
+                    // Hooks already pointing at a blocked helper stall every event: offer to take them out.
+                    if model.connected {
+                        Button("Disconnect…", action: confirmDisconnect)
+                            .controlSize(.large)
+                    }
+                    Spacer()
+                    Button(model.probing ? "Checking…" : "Check Again", action: model.setUp)
+                        .keyboardShortcut(.defaultAction)
+                        .controlSize(.large)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.probing)
                 } else {
                     Button("Not Now", action: close)
                         .controlSize(.large)
@@ -276,7 +358,7 @@ struct SetupView: View {
                         .keyboardShortcut(.defaultAction)
                         .controlSize(.large)
                         .buttonStyle(.borderedProminent)
-                        .disabled(model.location.problem != nil)
+                        .disabled(model.location.problem != nil || model.probing)
                 }
             }
         }
@@ -308,6 +390,37 @@ struct SetupView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.14)))
+    }
+
+    /// The helper does not run: the one command that frees it, to copy, and Check Again below.
+    private var hookBlocked: some View {
+        var info = "Claude Code and Cursor run AI Notch's helper (Contents/MacOS/ai-notch-hook) directly, and macOS does not let it run"
+            + (model.quarantine != nil ? ": it still carries the download's quarantine" : "")
+            + ", so every hook event would stall until macOS stops it. The command removes the quarantine from this copy of AI Notch only. Set Up connects nothing until the helper runs. Right after the command, macOS can take a little while to let it run; click Check Again once more."
+        if case .blocked(let why) = model.probe { info += "\n\nCheck: \(HookProbe.describe(why))." }
+        if let mark = model.quarantine { info += " Quarantine flag: \(mark)" }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Text("macOS is blocking AI Notch's helper.").font(.system(size: 13, weight: .medium))
+                InfoMark(text: info)
+                Spacer(minLength: 0)
+            }
+            Text(model.unquarantineCommand)
+                .font(.system(size: 11, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 9).padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
+            HStack(spacing: 8) {
+                Text("Run it in Terminal, then Check Again.").font(.system(size: 12)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                CopyButton(text: model.unquarantineCommand)
+            }
+        }
+        .padding(12)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.14)))
     }
 
@@ -378,6 +491,24 @@ struct SetupView: View {
             Toggle("", isOn: wants).toggleStyle(.checkbox).labelsHidden()
                 .help(wants.wrappedValue ? "Set Up asks for this." : "Set Up skips this.")
         }
+    }
+}
+
+/// Copies a command; says "Copied" for a moment after.
+private struct CopyButton: View {
+    var text: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+        } label: {
+            Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+        }
+        .controlSize(.small)
     }
 }
 
