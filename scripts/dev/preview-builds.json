@@ -1,0 +1,179 @@
+{
+  "health": { "eas": null, "bitbucket": "degraded", "bitbucketDetail": "Sample: Partially Degraded Service" },
+  "eas": {
+    "status": null,
+    "cliUser": "sample-user",
+    "builds": [
+      {
+        "id": "00000000-aaaa-4000-8000-000000000101",
+        "status": "IN_PROGRESS",
+        "platform": "ANDROID",
+        "buildProfile": "preview",
+        "distribution": "INTERNAL",
+        "appVersion": "1.4.0",
+        "appBuildVersion": "42",
+        "gitCommitHash": "5a1e0c0ffee0000000000000000000000000beef",
+        "message": "PR #17: 5a1e0c0f bb:acme/mobile-app#215",
+        "createdAtAgo": 240,
+        "workerStartedAtAgo": 200,
+        "phase": "Run gradlew",
+        "usualDuration": 840,
+        "app": { "slug": "mobile-app", "ownerAccount": { "name": "acme" } }
+      },
+      {
+        "id": "00000000-aaaa-4000-8000-000000000102",
+        "status": "IN_QUEUE",
+        "platform": "IOS",
+        "buildProfile": "preview",
+        "distribution": "INTERNAL",
+        "appVersion": "1.4.0",
+        "appBuildVersion": "42",
+        "gitCommitHash": "5a1e0c0ffee0000000000000000000000000beef",
+        "message": "PR #17: 5a1e0c0f bb:acme/mobile-app#215",
+        "createdAtAgo": 235,
+        "queuePosition": 3,
+        "estimatedWaitTimeLeftSeconds": 300,
+        "app": { "slug": "mobile-app", "ownerAccount": { "name": "acme" } }
+      },
+      {
+        "id": "00000000-aaaa-4000-8000-000000000103",
+        "status": "FINISHED",
+        "platform": "IOS",
+        "buildProfile": "preview",
+        "distribution": "INTERNAL",
+        "appVersion": "1.3.9",
+        "appBuildVersion": "41",
+        "createdAtAgo": 900,
+        "completedAtAgo": 60,
+        "expirationDateAgo": -7689600,
+        "initiatingActor": { "__typename": "User", "displayName": "sample-user" },
+        "message": "Local preview build",
+        "app": { "slug": "mobile-app", "ownerAccount": { "name": "acme" } }
+      },
+      {
+        "id": "00000000-aaaa-4000-8000-000000000104",
+        "status": "ERRORED",
+        "platform": "ANDROID",
+        "buildProfile": "production",
+        "distribution": "STORE",
+        "appVersion": "1.3.9",
+        "appBuildVersion": "40",
+        "createdAtAgo": 1200,
+        "completedAtAgo": 90,
+        "error": {
+          "errorCode": "EAS_BUILD_UNKNOWN_GRADLE_ERROR",
+          "message": "Gradle build failed with unknown error. See logs for the \"Run gradlew\" phase for more information.",
+          "docsUrl": "https://docs.expo.dev/build-reference/troubleshooting/"
+        },
+        "initiatingActor": { "__typename": "User", "displayName": "sample-user" },
+        "message": "Release candidate",
+        "app": { "slug": "mobile-app", "ownerAccount": { "name": "acme" } }
+      }
+    ]
+  },
+  "bitbucket": {
+    "status": null,
+    "owner": { "uuid": "{sample-user}", "name": "Sample User", "how": "fixture" },
+    "runs": [
+      {
+        "workspace": "acme",
+        "repo": "mobile-app",
+        "uuid": "{run-215}",
+        "build_number": 215,
+        "created_onAgo": 300,
+        "state": { "name": "IN_PROGRESS", "stage": { "name": "RUNNING" } },
+        "target": {
+          "source": "feature/onboarding",
+          "destination": "main",
+          "pullrequest": { "id": 17 },
+          "commit": { "hash": "5a1e0c0ffee0000000000000000000000000beef" },
+          "selector": { "type": "custom", "pattern": "eas-preview" }
+        },
+        "trigger": { "name": "MANUAL" },
+        "creator": { "display_name": "Sample User", "uuid": "{sample-user}" },
+        "usualDuration": 1080,
+        "logLine": "Waiting for EAS builds to finish (1 of 2 done)",
+        "steps": [
+          { "uuid": "{s1}", "name": "Lint and typecheck", "state": { "name": "COMPLETED", "result": { "name": "SUCCESSFUL" } }, "started_onAgo": 295, "completed_onAgo": 250 },
+          { "uuid": "{s2}", "name": "EAS build", "state": { "name": "IN_PROGRESS" }, "started_onAgo": 248 },
+          { "uuid": "{s3}", "name": "Post preview comment", "state": { "name": "PENDING" } }
+        ]
+      },
+      {
+        "workspace": "acme",
+        "repo": "api",
+        "uuid": "{run-88}",
+        "build_number": 88,
+        "created_onAgo": 420,
+        "completed_onAgo": 30,
+        "state": { "name": "COMPLETED", "result": { "name": "FAILED" } },
+        "target": {
+          "source": "fix/rate-limits",
+          "destination": "main",
+          "pullrequest": { "id": 31 },
+          "commit": { "hash": "c0de000000000000000000000000000000000a11" },
+          "selector": { "type": "pull-requests", "pattern": "**" }
+        },
+        "trigger": { "name": "PUSH" },
+        "creator": { "display_name": "Sample User", "uuid": "{sample-user}" },
+        "steps": [
+          { "uuid": "{f1}", "name": "Build", "state": { "name": "COMPLETED", "result": { "name": "SUCCESSFUL" } }, "started_onAgo": 410, "completed_onAgo": 300 },
+          { "uuid": "{f2}", "name": "Tests", "state": { "name": "COMPLETED", "result": { "name": "FAILED" } }, "started_onAgo": 290, "completed_onAgo": 35 }
+        ],
+        "testCases": {
+          "pagelen": 100,
+          "values": [
+            { "name": "returns 429 after the limit", "suite_name": "RateLimiter", "status": "FAILED" },
+            { "fully_qualified_name": "Session › refreshes the token", "result": { "name": "ERROR" } },
+            { "name": "passes", "suite_name": "Health", "status": "PASSED" }
+          ]
+        },
+        "logTail": [
+          "FAIL test/rate-limiter.test.ts",
+          "  ● RateLimiter › returns 429 after the limit",
+          "    expect(received).toBe(expected)",
+          "export API_TOKEN=sample0123456789abcdefSAMPLE0123456789",
+          "Tests: 2 failed, 57 passed, 59 total"
+        ]
+      },
+      {
+        "workspace": "acme",
+        "repo": "infra",
+        "uuid": "{run-61}",
+        "build_number": 61,
+        "created_onAgo": 1800,
+        "state": { "name": "IN_PROGRESS", "stage": { "name": "PAUSED" } },
+        "target": {
+          "ref_name": "main",
+          "commit": { "hash": "1fa0000000000000000000000000000000000000" },
+          "selector": { "type": "branches", "pattern": "main" }
+        },
+        "trigger": { "name": "PUSH" },
+        "creator": { "display_name": "Sample User", "uuid": "{sample-user}" },
+        "steps": [
+          { "uuid": "{p1}", "name": "Plan", "state": { "name": "COMPLETED", "result": { "name": "SUCCESSFUL" } }, "started_onAgo": 1790, "completed_onAgo": 1700 },
+          { "uuid": "{p2}", "name": "Apply to staging", "trigger": { "type": "pipeline_step_trigger_manual" }, "state": { "name": "PENDING", "stage": { "name": "PAUSED" } } }
+        ]
+      },
+      {
+        "workspace": "acme",
+        "repo": "web",
+        "uuid": "{run-402}",
+        "build_number": 402,
+        "created_onAgo": 150,
+        "state": { "name": "IN_PROGRESS", "stage": { "name": "RUNNING" } },
+        "target": {
+          "ref_name": "main",
+          "commit": { "hash": "abc0000000000000000000000000000000000000" },
+          "selector": { "type": "branches", "pattern": "main" }
+        },
+        "trigger": { "name": "PUSH" },
+        "creator": { "display_name": "Another Person", "uuid": "{another-person}" },
+        "usualDuration": 420,
+        "steps": [
+          { "uuid": "{w1}", "name": "Build and deploy", "state": { "name": "IN_PROGRESS" }, "started_onAgo": 140 }
+        ]
+      }
+    ]
+  }
+}

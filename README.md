@@ -14,6 +14,8 @@ single-choice questions from the notch.
   OpenCode, and your Claude Code and Codex plan limits.
 - The Code panel shows the lines Claude Code wrote: a grid of lines added per day, and each
   repository's lines beside what was committed to git there.
+- Optionally, a Pipelines section shows your EAS builds and Bitbucket Pipelines runs as they
+  queue, run, wait and finish (see [Builds and pipelines](#builds-and-pipelines)).
 
 Requires macOS 15 (Sequoia) or later and is made for MacBooks with a notch.
 
@@ -164,6 +166,136 @@ stays warm.
 are left alone, because an answer there can block or allow an action. So Cursor rows show the last
 finished tool rather than the one in flight, subagents once they stop, and no approval waits.
 
+### Builds and pipelines
+
+Under the agents, a **Pipelines** section shows EAS builds and Bitbucket Pipelines runs that are
+queued or running, waiting (at a manual step or for a deployment lock), finished in the last 3
+minutes, or failed since you last opened the notch. Each row (and the running summary in its
+header) opens the run on the web. The notch never starts, cancels or reruns anything. The two
+sources are separate: each has its own poller, pace and state, and one failing never stalls the
+other. Nothing is read until you set it up; until then the section stays hidden.
+
+#### Setting it up
+
+1. Write `~/.claude/notch/builds.json`, leaving out the part you don't use (Setup → Builds →
+   **How** shows the same example, with Copy):
+
+   ```json
+   {
+     "eas": {
+       "account": "acme",
+       "slug": "mobile-app",
+       "projectId": "00000000-0000-0000-0000-000000000000",
+       "cli": "~/Code/mobile-app/node_modules/.bin/eas"
+     },
+     "bitbucket": {
+       "workspace": "acme",
+       "repos": ["mobile-app", "api", "other-workspace/web"],
+       "searchRoots": ["~/Code"]
+     },
+     "me": { "emails": ["you@example.com"] }
+   }
+   ```
+
+   - `eas`: the Expo account that owns the project, the project's slug and its ID
+     (`extra.eas.projectId` in the app config). `cli` is optional: an eas-cli 24 or later to fall
+     back on when the GraphQL API fails; without it, an `eas` on nvm's or Homebrew's path.
+   - `bitbucket`: the workspace, and the repositories as `"name"` (in that workspace),
+     `"workspace/name"` or `{"workspace": …, "repo": …, "path": …}`. `searchRoots` (optional) adds
+     every local clone under those folders, up to three levels down, that has a bitbucket.org
+     remote and a `bitbucket-pipelines.yml`; it is read from each clone's `.git/config`, never run.
+     Either `repos` or `searchRoots` is enough.
+   - `me` (optional): the commit emails that make a run yours. Without it, your git `user.email`
+     (`~/.gitconfig`, and the clones' own).
+
+   AI Notch reads the file again within seconds of a change; no restart.
+2. EAS: sign in with `eas login` (AI Notch reads that login), or store an `EXPO_TOKEN` as the
+   Keychain item `ai-notch.expo`.
+3. Bitbucket: in Atlassian account settings → Security → API tokens, create an API token with the
+   Bitbucket scopes `read:repository` and `read:pipeline`. Copy this into Terminal with the
+   token's expiry date, then copy the token and press Return. It reads the token from the
+   clipboard and clears it; typing the token at the `-w` prompt instead silently keeps only 128 of
+   its 192 characters.
+
+   ```sh
+   security add-generic-password -U -s ai-notch.bitbucket -a api-token -j "expires YYYY-MM-DD" -w "$(pbpaste)" && pbcopy < /dev/null
+   ```
+
+   The notch warns 14 days before the date in the comment. Setup → Builds → **Check Again**
+   picks it up at once.
+
+#### What it shows
+
+- **Mine / All**: the switch in the header, remembered across restarts (Mine by default). A
+  Bitbucket run is mine when its creator is the token's owner: the account that pushed (for push
+  and pull-request runs) or clicked Run. `GET /2.0/user` needs a scope the read-only token lacks,
+  so the owner is the Bitbucket user behind commits made with your email (`me.emails`, else your
+  git `user.email`; last resort: the git user name against the creator's name). An EAS build is mine when it is linked to
+  one of my runs, or was started from the CLI's login; that login may be a shared account, so the
+  ⓘ calls this match weak. Only mine notify, once per finish; All is for looking.
+- **Pin, mute, branch**: right-click a row to pin it (shown until you unpin it), mute its
+  repository or show only its branch; the filter menu in the header undoes them.
+- **Each row** shows where it is: the running step and an ETA (the median of the last ten
+  successful runs of the same repository and selector, from their timestamps), a queued EAS
+  build's place and expected wait, a building one's phase (from its log while the notch is open)
+  and ETA (the last ten finished builds of the same platform and profile), and while the notch is
+  open, a running step's last log line. A paused run says what it waits for and, after two hours
+  with no step change, stops keeping the fast poll going and shows its age instead of a clock; it
+  shows for a week while it is the newest run on its branch. Only running and queued runs count
+  in the live line and the spinner.
+- **Install**: a finished internal EAS build has **Install**, a QR code for its page on expo.dev
+  (not the raw artifact), until its artifacts expire.
+- **Copy failure** copies what failed and the last 100 lines of the failing part's log. EAS: the
+  platform, profile, version, commit, the error code and message, EAS's docs link when it gives
+  one, and the first phase that ended `failed`. Bitbucket: the repo, branch and pull request,
+  commit, run, the failed step, its failed tests (at most 20) when the step published a test
+  report, and the end of its log. Anything that looks like a secret (bearer tokens, JWTs, AWS keys,
+  long hex or base64 runs, credentials in URLs, `*_TOKEN=` / `*_SECRET=` / `PASSWORD=` values,
+  private keys) is masked first.
+- **Status**: `status.expo.dev` (the EAS Build component) and `bitbucket.status.atlassian.com`
+  every 10 minutes; a small "EAS degraded" or "Bitbucket degraded" badge shows only while one is
+  not operational.
+- **EAS**: Expo's GraphQL API (`https://api.expo.dev/graphql`, the queries and BuildFragment
+  fields eas-cli 24 uses: `app.byId.builds` for the list, `builds.byId` for a build in flight),
+  for the project in `builds.json`, with an `EXPO_TOKEN` from the Keychain item `ai-notch.expo` if
+  one exists, else the CLI's login from `~/.expo/state.json` (only its session secret and user name are read; the secret goes only
+  into the request header). It is not a documented API, so each answer is checked; an auth or
+  schema error falls back to `eas build:list --json` (run in `~/.claude/notch/eas`, a minimal
+  project folder written from `builds.json`) for 10 minutes and says so in `notch.log`.
+  A list call takes about 0.5 s over GraphQL against about 2 s for the CLI. A build in flight
+  every 25 s; the list every 25 s while one of my Bitbucket pipelines runs or waits for a runner
+  (not one paused or stale, nor in a muted repository), so a build it queues shows within about
+  25 s (every minute on the CLI fallback, and while a build is already in flight); every minute
+  while any other build or pipeline runs, else every 5 minutes. The boost lapses two minutes
+  after the Bitbucket side stops confirming it, so a Bitbucket failure never keeps EAS fast.
+- **Bitbucket**: one workspace request (`/repositories/{ws}?q=updated_on>…` for the listed
+  repositories) every 2 minutes tells which were pushed to; a pushed repository, and one with a
+  running run, is read every 25 s (stretched so all of it stays under ~360 requests an hour, hard
+  cap 390: one running run polls about every 28 s, two in different repositories about every
+  53 s), and every repository every 5 minutes, because manual, scheduled and rerun pipelines do
+  not move `updated_on`. Opening the notch also reads every unmuted repository not read in the
+  last minute (two minutes or more while slowed down), so a pipeline started by hand shows when
+  you look. A waiting run that has dropped off its repository's first page is read by itself on
+  a sweep at most every 15 minutes. With nothing running that is about 120 requests an hour for
+  7 repositories (the gate 30, the sweep 12 per repository, a waiting run 4). Requests ask only for the fields shown (`fields=`) and send
+  If-None-Match, so an unchanged answer is a 304 with no body. A 429 pauses for its Retry-After,
+  and a 429, `X-RateLimit-NearLimit: true` or our own count passing 80% of the cap slows
+  everything for 15 minutes. The header's ⓘ shows the count for the last hour. The token is read
+  from the Keychain item `ai-notch.bitbucket` (sent as Bearer; read through `/usr/bin/security`,
+  never written to a file or a log). After a 401 the Keychain is read again on the next poll and
+  then every minute, so a re-saved token is picked up without a restart; a rejected token of
+  exactly 128 characters is reported as truncated. The repositories are `bitbucket` in
+  `builds.json` (see above).
+- Both pause while the screen is locked with nothing running (for EAS, a pipeline of mine running
+  counts), and refresh data older than a minute when the notch opens.
+- **Links**: an EAS build whose message ends in ` bb:<workspace>/<repo>#<number>` links to that run,
+  and the run back to it; without the suffix, a build of the same commit started during a run is
+  linked as *inferred* (dashed). A badge on each row opens the other.
+- Collapsed, the left spinner counts running runs with working sessions, and the right side shows
+  a red ✕ for a failure of yours you have not seen, or a hammer with the number of running runs.
+- Passed and failed runs of yours send a notification only while the screen is locked, like the
+  sessions'; a failed one offers **Copy failure details** and **Open**.
+
 ### Light and dark
 
 The panel follows the system's appearance, live. The strip on the notch stays black in both to
@@ -252,6 +384,10 @@ from the app's first versions, so usage history carries over.
 - No desktop widget in the ad-hoc build (see above).
 - The Homebrew uninstall step can only edit `~/.claude/settings.json` and `~/.cursor/hooks.json`
   in place. If either is a symlink to a file elsewhere, click **Disconnect…** before uninstalling.
+- Pipelines: one EAS project, and Bitbucket Cloud only (no GitHub Actions or other CI). Expo's
+  GraphQL API is not documented and may change; the CLI then stands in. An EAS build started from
+  the CLI counts as yours by the CLI's login, which a team may share. ETAs are medians of recent
+  runs, not promises.
 
 ## License
 

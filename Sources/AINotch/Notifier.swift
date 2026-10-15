@@ -10,6 +10,9 @@ final class Notifier: NSObject {
     static let shared = Notifier()
     /// Opens the session a notification names.
     var onOpen: ((String) -> Void)?
+    /// A build notification's action: open the run, or copy its failure details.
+    enum BuildAction { case open, copy }
+    var onBuild: ((String, BuildAction) -> Void)?
 
     private let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/notch/notch.log")
 
@@ -25,7 +28,13 @@ final class Notifier: NSObject {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         let open = UNNotificationAction(identifier: "open", title: "Open", options: [.foreground])
-        center.setNotificationCategories([UNNotificationCategory(identifier: "session", actions: [open], intentIdentifiers: [], options: [])])
+        // A failed build or run also offers its failure details, copied without opening anything.
+        let copy = UNNotificationAction(identifier: "copy", title: "Copy failure details", options: [])
+        center.setNotificationCategories([
+            UNNotificationCategory(identifier: "session", actions: [open], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "build", actions: [open], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "build-failed", actions: [copy, open], intentIdentifiers: [], options: []),
+        ])
         if asksAtLaunch { requestPermission { _ in } }
     }
 
@@ -73,6 +82,23 @@ final class Notifier: NSObject {
         }
     }
 
+    /// A build or run that passed or failed; one notification per run. `title` names the source.
+    func postBuild(id: String, title: String, subtitle: String, body: String, failed: Bool) {
+        guard isAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = subtitle
+        let flat = body.split(whereSeparator: \.isNewline).joined(separator: " ")
+        content.body = flat.count > 160 ? String(flat.prefix(159)) + "…" : flat
+        content.categoryIdentifier = failed ? "build-failed" : "build"
+        content.userInfo = ["build": id]
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "build-\(id)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in self.note("posted “\(title)”\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
+        }
+    }
+
     private func note(_ line: String) {
         let stamp = ISO8601DateFormatter().string(from: Date())
         guard let data = "\(stamp) \(line)\n".data(using: .utf8) else { return }
@@ -94,9 +120,13 @@ extension Notifier: UNUserNotificationCenterDelegate {
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
-        let session = response.notification.request.content.userInfo["session"] as? String
+        let info = response.notification.request.content.userInfo
+        let session = info["session"] as? String
+        let build = info["build"] as? String
+        let action = response.actionIdentifier
         Task { @MainActor in
             if let session { Notifier.shared.onOpen?(session) }
+            if let build { Notifier.shared.onBuild?(build, action == "copy" ? .copy : .open) }
             completionHandler()
         }
     }

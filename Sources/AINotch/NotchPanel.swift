@@ -64,26 +64,36 @@ final class ClickThroughHostingView<Content: View>: NSHostingView<Content> {
 /// the shape between hugging the notch and the dropped-down session list.
 @MainActor
 final class NotchController: ObservableObject {
-    @Published private(set) var isExpanded = false
+    @Published private(set) var isExpanded = false {
+        didSet {
+            guard isExpanded != oldValue else { return }
+            if isExpanded { store.panelOpened(); builds.panelOpened() } else { builds.panelClosed() }
+        }
+    }
     @Published private(set) var geometry = NotchGeometry.current()
     /// The shape's size as the view laid it out; zero until its first layout.
     var shapeSize: CGSize = .zero
 
     private let store: SessionStore
-    /// `--preview`: always expanded, in the middle of the screen, for a look without hovering.
+    private let builds: BuildStore
+    /// `--preview`: always expanded, in the middle of the screen, for a look without hovering;
+    /// `--preview --collapsed`: the collapsed strip there instead.
     private let isPreview = CommandLine.arguments.contains("--preview")
+    private let isCollapsedPreview = CommandLine.arguments.contains("--preview") && CommandLine.arguments.contains("--collapsed")
     private let panel = NotchPanel()
     private var collapseWork: DispatchWorkItem?
     private var monitors: [Any] = []
     private var timer: Timer?
     private var watchers: Set<AnyCancellable> = []
 
-    init(store: SessionStore) {
+    init(store: SessionStore, builds: BuildStore) {
         self.store = store
-        panel.contentView = ClickThroughHostingView(rootView: RootView(store: store, controller: self))
-        if isPreview {
+        self.builds = builds
+        panel.contentView = ClickThroughHostingView(rootView: RootView(store: store, builds: builds, controller: self))
+        if isPreview && !isCollapsedPreview {
             isExpanded = true
             store.panelOpened()
+            builds.panelOpened()
         }
         placeWindow()
         panel.orderFrontRegardless()
@@ -109,7 +119,7 @@ final class NotchController: ObservableObject {
             .store(in: &watchers)
     }
 
-    var showsWings: Bool { !store.sessions.isEmpty || !geometry.hasNotch }
+    var showsWings: Bool { !store.sessions.isEmpty || !geometry.hasNotch || builds.hasActive || builds.hasUnseenFailure }
 
     /// Collapses at once, after a click sent you somewhere else.
     func collapse() {
@@ -154,10 +164,7 @@ final class NotchController: ObservableObject {
         if isInside {
             collapseWork?.cancel()
             collapseWork = nil
-            if !isExpanded {
-                isExpanded = true
-                store.panelOpened()
-            }
+            if !isExpanded { isExpanded = true }
         } else if isExpanded, collapseWork == nil {
             // A short grace, so a pointer that slips off the edge does not snap it shut.
             let work = DispatchWorkItem { [weak self] in

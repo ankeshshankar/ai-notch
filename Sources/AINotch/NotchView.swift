@@ -18,7 +18,7 @@ private func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> 
 private func gray(_ w: CGFloat, _ a: CGFloat = 1) -> NSColor { NSColor(white: w, alpha: a) }
 
 /// The dropped-down body's colours by role, each with a light and a dark value.
-private enum Palette {
+enum Palette {
     // The accent hues as they read on black. Tints behind tags use them in both themes.
     static let claudeHue = Color(red: 0.85, green: 0.47, blue: 0.34)
     static let waitingHue = Color(red: 0.96, green: 0.65, blue: 0.14)
@@ -31,7 +31,12 @@ private enum Palette {
     static let waiting = adaptive(light: rgb(0.60, 0.34, 0.0), dark: rgb(0.96, 0.65, 0.14))
     static let done = adaptive(light: rgb(0.11, 0.50, 0.31), dark: rgb(0.30, 0.76, 0.54))
     static let mcp = adaptive(light: rgb(0.36, 0.31, 0.79), dark: rgb(0.56, 0.52, 0.91))
-    static let failed = adaptive(light: rgb(0.78, 0.16, 0.14), dark: rgb(1.0, 0.23, 0.19, 0.82))
+    static let failedNS = adaptiveNS(light: rgb(0.78, 0.16, 0.14), dark: rgb(1.0, 0.23, 0.19, 0.82))
+    static let failed = Color(nsColor: failedNS)
+    static let failedHue = Color(red: 1.0, green: 0.27, blue: 0.23)
+    /// Bitbucket's blue, for its source tag.
+    static let bitbucketHue = Color(red: 0.15, green: 0.52, blue: 1.0)
+    static let bitbucket = adaptive(light: rgb(0.0, 0.32, 0.80), dark: rgb(0.40, 0.66, 1.0))
 
     // Text.
     static let ink = adaptive(light: gray(0.0, 0.88), dark: gray(1.0))
@@ -62,12 +67,15 @@ private enum Palette {
     /// The approval card on a waiting row: a step off the row's own tint.
     static let approvalCard = adaptive(light: gray(1.0, 0.75), dark: gray(0.0, 0.35))
     static let waitingEdge = adaptive(light: rgb(0.96, 0.65, 0.14, 0.45), dark: rgb(0.96, 0.65, 0.14, 0.0))
+    /// A failed run the notch has not shown you yet, and the edge of any failed run.
+    static let failedTint = adaptive(light: rgb(1.0, 0.93, 0.92), dark: rgb(1.0, 0.23, 0.19, 0.13))
+    static let failedEdge = adaptive(light: rgb(0.86, 0.20, 0.16, 0.35), dark: rgb(1.0, 0.23, 0.19, 0.30))
     static let bar = adaptive(light: rgb(0.16, 0.62, 0.36), dark: rgb(0.30, 0.76, 0.54, 0.8))
     static let grid = adaptive(light: rgb(0.16, 0.62, 0.36), dark: rgb(0.30, 0.76, 0.54))
 }
 
 /// The top row sits on the black hardware notch in every theme, so it keeps light-on-black.
-private enum Strip {
+enum Strip {
     static let ink = Color.white
     static let ink2 = Color.white.opacity(0.62)
     static let ink3 = Color.white.opacity(0.42)
@@ -76,6 +84,7 @@ private enum Strip {
     static let waiting = Palette.waitingHue
     static let waitingNS = rgb(0.96, 0.65, 0.14)
     static let done = Palette.doneHue
+    static let failed = Color(red: 1.0, green: 0.36, blue: 0.32)
 }
 
 func elapsed(_ seconds: Double) -> String {
@@ -101,6 +110,7 @@ struct NotchShape: Shape {
 
 struct RootView: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var builds: BuildStore
     @ObservedObject var controller: NotchController
     /// The black edge left around the body's card.
     static let bezel: CGFloat = 5
@@ -111,16 +121,16 @@ struct RootView: View {
         let expanded = controller.isExpanded
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                if wings { LeftWing(store: store).frame(width: g.wing) }
+                if wings { LeftWing(store: store, builds: builds).frame(width: g.wing) }
                 Color.clear.frame(width: g.notchWidth)
-                if wings { RightWing(store: store).frame(width: g.wing) }
+                if wings { RightWing(store: store, builds: builds).frame(width: g.wing) }
             }
             .frame(height: g.notchHeight)
 
             if expanded {
                 // The body is a card set into the black shape: on light it hangs under the strip
                 // inside a thin black bezel, on dark it is the black itself.
-                SessionList(store: store, approvals: store.approvals, controller: controller)
+                SessionList(store: store, approvals: store.approvals, builds: builds, controller: controller)
                     .background(
                         UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
                                                bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
@@ -177,10 +187,12 @@ struct Spinner: View {
 
 private struct LeftWing: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var builds: BuildStore
 
     var body: some View {
         HStack(spacing: 4) {
-            let busy = store.working.count
+            // Working sessions and active builds or runs.
+            let busy = store.working.count + builds.activeCount
             if busy > 0 || store.runningAgents > 0 {
                 Spinner(color: Strip.claudeNS)
                 if busy > 1 { Text("\(busy)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink) }
@@ -194,6 +206,7 @@ private struct LeftWing: View {
 
 private struct RightWing: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var builds: BuildStore
 
     var body: some View {
         HStack(spacing: 4) {
@@ -203,9 +216,15 @@ private struct RightWing: View {
                 Text("\(store.waiting.count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.waiting)
             } else if store.now - store.lastDoneAt < 4 {
                 Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.done)
+            } else if builds.hasUnseenFailure {
+                // A build or run failed since the notch was last opened.
+                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
             } else if store.runningAgents > 0 {
                 Image(systemName: "person.2.fill").font(.system(size: 9)).foregroundStyle(Strip.ink2)
                 Text("\(store.runningAgents)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
+            } else if builds.activeCount > 0 {
+                Image(systemName: "hammer.fill").font(.system(size: 9)).foregroundStyle(Strip.ink2)
+                Text("\(builds.activeCount)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -215,6 +234,7 @@ private struct RightWing: View {
 private struct SessionList: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var approvals: ApprovalCenter
+    @ObservedObject var builds: BuildStore
     var controller: NotchController
     /// Each approval card's height, which its row keeps free so the card sits inside it.
     @State private var cardHeights: [String: CGFloat] = [:]
@@ -241,7 +261,10 @@ private struct SessionList: View {
                     .font(.system(size: 12)).foregroundStyle(Palette.ink2)
                     .padding(.vertical, 6)
             }
-            ForEach(store.sessions.prefix(detailId == nil ? maxRows : 3), id: \.id) { session in
+            // Six rows between agents and pipelines: agents first, pipelines at least two.
+            let pipelineRows = !builds.showsSection ? 0 : max(1, min(builds.rows.count, max(2, maxRows - store.sessions.count)))
+            let sessionRows = max(1, (detailId == nil ? maxRows : 3) - pipelineRows)
+            ForEach(store.sessions.prefix(sessionRows), id: \.id) { session in
                 let isOpen = detailId == session.id
                 let title = store.title(of: session)
                 // Two sibling buttons: the row jumps to the session, the corner toggles its details.
@@ -287,8 +310,11 @@ private struct SessionList: View {
                     .padding(8)
                 }
             }
-            if store.sessions.count > maxRows {
-                Text("+\(store.sessions.count - maxRows) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+            if store.sessions.count > sessionRows {
+                Text("+\(store.sessions.count - sessionRows) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+            }
+            if builds.showsSection {
+                PipelinesSection(builds: builds, now: store.now, limit: pipelineRows, controller: controller)
             }
             HStack(spacing: 12) {
                 Spacer()
@@ -846,14 +872,33 @@ private struct EngineTag: View {
     }
 }
 
+/// A row's card: the fill and the hairline edge every row in the list shares.
+struct RowCard: ViewModifier {
+    var tint: Color = Palette.card
+    var edge: Color = Palette.hairline
+
+    func body(content: Content) -> some View {
+        content
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(tint))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(edge, lineWidth: 1))
+    }
+}
+
+extension View {
+    func rowCard(tint: Color = Palette.card, edge: Color = Palette.hairline) -> some View {
+        modifier(RowCard(tint: tint, edge: edge))
+    }
+}
+
 /// A row that lifts a little under the pointer and dips while pressed.
-private struct RowButtonStyle: ButtonStyle {
+struct RowButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         RowBody(label: configuration.label, isPressed: configuration.isPressed)
     }
 }
 
-private struct RowBody<Label: View>: View {
+struct RowBody<Label: View>: View {
     var label: Label
     var isPressed: Bool
     @State private var isHovered = false
@@ -1042,15 +1087,8 @@ private struct SessionRow: View {
                 Color.clear.frame(height: 14 + reserved)
             }
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(session.phase == .waiting ? Palette.waitingTint : Palette.card)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(session.phase == .waiting ? Palette.waitingEdge : Palette.hairline, lineWidth: 1)
-        )
+        .rowCard(tint: session.phase == .waiting ? Palette.waitingTint : Palette.card,
+                 edge: session.phase == .waiting ? Palette.waitingEdge : Palette.hairline)
     }
 
     /// While it works, what it spends a minute; while idle, how long its prompt cache stays warm.
@@ -1249,25 +1287,63 @@ private struct ToolLine: View {
     }
 }
 
-private struct StatusChip: View {
-    var session: SessionState
+/// A row's state at a glance: a session's phase, or a build's.
+struct StatusChip: View {
+    enum Kind: Equatable {
+        case working(since: Double), waiting, idle
+        case queued, running(since: Double), failed, passed, canceled
+        /// Waiting at a manual step, or for a deployment lock; with how long when it is long.
+        case paused(age: String?), held(age: String?)
+    }
+
+    var kind: Kind
     var now: Double
+
+    init(kind: Kind, now: Double) {
+        self.kind = kind
+        self.now = now
+    }
+
+    init(session: SessionState, now: Double) {
+        switch session.phase {
+        case .working: kind = .working(since: session.turnStartedAt ?? session.updatedAt)
+        case .waiting: kind = .waiting
+        case .idle: kind = .idle
+        }
+        self.now = now
+    }
 
     var body: some View {
         HStack(spacing: 5) {
-            switch session.phase {
-            case .working:
+            switch kind {
+            case .working(let since), .running(let since):
                 Spinner(size: 9)
-                Text(elapsed(now - (session.turnStartedAt ?? session.updatedAt)))
+                Text(elapsed(now - since))
                     .font(.system(size: 11, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.claude)
             case .waiting:
                 Text("Needs you").font(.system(size: 11, weight: .bold)).foregroundStyle(.black)
             case .idle:
                 Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.done)
                 Text("Idle").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink2)
+            case .queued:
+                Image(systemName: "clock").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink2)
+                Text("Queued").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink2)
+            case .paused(let age), .held(let age):
+                Image(systemName: kind == .paused(age: age) ? "pause.fill" : "lock.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(Palette.waiting)
+                Text((kind == .paused(age: age) ? "Paused" : "Waiting") + (age.map { " · \($0)" } ?? ""))
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.waiting)
+            case .failed:
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.failed)
+                Text("Failed").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.failed)
+            case .passed:
+                Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.done)
+                Text("Done").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink2)
+            case .canceled:
+                Image(systemName: "stop.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(Palette.ink3)
+                Text("Canceled").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink3)
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(Capsule().fill(session.phase == .waiting ? Palette.waitingHue : Palette.chip))
+        .background(Capsule().fill(kind == .waiting ? Palette.waitingHue : kind == .failed ? Palette.failedHue.opacity(0.14) : Palette.chip))
     }
 }

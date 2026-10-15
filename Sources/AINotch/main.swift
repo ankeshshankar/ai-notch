@@ -7,6 +7,7 @@ let showSetupNotification = Notification.Name("info.ankeshshiv.notch.show-setup"
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = SessionStore()
+    private let builds = BuildStore()
     private var controller: NotchController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -33,7 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A copy not set up yet asks for notifications from Set Up, not on its first launch.
         Notifier.shared.asksAtLaunch = !firstLaunch
         store.start()
-        controller = NotchController(store: store)
+        builds.start()
+        SetupWindowController.shared.builds = builds
+        controller = NotchController(store: store, builds: builds)
         // Another copy opened while this one runs asks this one to show the window (see below).
         DistributedNotificationCenter.default().addObserver(forName: showSetupNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { SetupWindowController.shared.show() }
@@ -71,6 +74,88 @@ if let index = CommandLine.arguments.firstIndex(of: "--chat-title") {
         exit(2)
     }
     ChatTitles.printTitles(of: CommandLine.arguments[index + 1])
+    exit(0)
+}
+
+// Dev checks of the build sources, never the app: a failure report as Copy failure copies it
+// (`--eas-failure <build id>`, `--bitbucket-failure <ws/repo#n>`), one poll of a repository as
+// the app reads it (`--bitbucket-runs <ws/repo>`), EAS over GraphQL against the CLI, timed
+// (`--eas-compare -`), and the masking alone (`--redact <file>`).
+if let index = CommandLine.arguments.firstIndex(where: { ["--eas-failure", "--bitbucket-failure", "--bitbucket-runs", "--bitbucket-watch", "--eas-compare", "--redact"].contains($0) }) {
+    let flag = CommandLine.arguments[index]
+    guard index + 1 < CommandLine.arguments.count else {
+        FileHandle.standardError.write(Data("usage: AINotch \(flag) <argument>\n".utf8))
+        exit(2)
+    }
+    let argument = CommandLine.arguments[index + 1]
+    if flag == "--redact" {
+        let text = (try? String(contentsOfFile: argument, encoding: .utf8)) ?? ""
+        print(Redact.mask(text))
+        exit(0)
+    }
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+        var text = ""
+        if flag == "--bitbucket-watch" {
+            // The poller as the app runs it, headless, for <seconds>: each snapshot it publishes.
+            let seconds = Double(argument) ?? 60
+            let started = Date()
+            let source = BitbucketSource { snapshot in
+                let t = Int(Date().timeIntervalSince(started))
+                let active = snapshot.runs.filter { $0.state.isRunning }.count
+                let waiting = snapshot.runs.filter { $0.state == .paused }.count
+                FileHandle.standardError.write(Data("[\(t)s] status=\(snapshot.status?.text ?? "ok") runs=\(snapshot.runs.count) running=\(active) waiting=\(waiting) owner=\(snapshot.owner?.how ?? "-") requests: \(snapshot.requests.summary), 304s \(snapshot.notModified)\n".utf8))
+            }
+            await source.start()
+            // CLAUDE_NOTCH_TEST_OPENS="70,90,140": the notch opens at those seconds (as the panel
+            // does it) and closes 3 s later, to time the sweep on opening.
+            let opens = (ProcessInfo.processInfo.environment["CLAUDE_NOTCH_TEST_OPENS"] ?? "").split(separator: ",").compactMap { Double($0) }
+            if !opens.isEmpty {
+                Task.detached {
+                    for at in opens.sorted() {
+                        let wait = at - Date().timeIntervalSince(started)
+                        if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+                        FileHandle.standardError.write(Data("[\(Int(Date().timeIntervalSince(started)))s] notch opened\n".utf8))
+                        await source.setPanelOpen(true)
+                        try? await Task.sleep(for: .seconds(3))
+                        await source.setPanelOpen(false)
+                    }
+                }
+            }
+            try? await Task.sleep(for: .seconds(seconds))
+            text = "after \(Int(seconds)) s: \(await source.debugCounts().summary)"
+        } else if flag == "--eas-compare" {
+            text = EASSource.debugCompare()
+        } else if flag == "--bitbucket-runs", let slash = argument.firstIndex(of: "/") {
+            let source = BitbucketSource { _ in }
+            let repo = BitbucketRepo(workspace: String(argument[..<slash]), repo: String(argument[argument.index(after: slash)...]),
+                                     path: BitbucketConfig.loadRepos().first { $0.key == argument }?.path)
+            let runs = await source.debugFetch(repo)
+            let owner = await source.debugOwner()
+            let now = Date().timeIntervalSince1970
+            var lines = ["owner: \(owner.map { "\($0.name ?? "?") \($0.uuid ?? "-") via \($0.how)" } ?? "none")"]
+            for run in runs {
+                let mine = owner?.owns(run) == true ? "mine" : "    "
+                let wait = run.wait.map { " | \($0.detail)" } ?? ""
+                let usual = run.usualDuration.map { " | usual \(shortDuration($0))" } ?? ""
+                lines.append("#\(run.ref.number) \(mine) \(run.state.rawValue)\(run.stage.map { "/\($0)" } ?? "") stale=\(run.isStale(now: now)) fast=\(run.needsFastPoll(now: now)) | \(run.branch ?? "-")\(run.pullRequest.map { " PR #\($0)" } ?? "") | \(run.selectorKey) | \(run.trigger ?? "-") | \(run.creator ?? "-") | steps \(run.steps.count)\(wait)\(usual)")
+            }
+            lines.append("requests: \(await source.debugCounts().summary)")
+            text = lines.joined(separator: "\n")
+        } else if flag == "--eas-failure" {
+            let id = argument
+            let build = EASBuild(id: id, state: .failed, platform: "", createdAt: 0, url: EASBuild.pageURL(owner: EASConfig.settings?.account ?? "_", slug: EASConfig.settings?.slug ?? "_", id: id))
+            text = await EASFailure.report(for: build, pipelineURL: nil)
+        } else if let ref = PipelineRef.find(in: "bb:" + argument) {
+            let source = BitbucketSource { _ in }
+            let runs = await source.debugFetch(BitbucketRepo(workspace: ref.workspace, repo: ref.repo))
+            FileHandle.standardError.write(Data("runs: \(runs.map { "#\($0.ref.number) \($0.state.rawValue) steps \($0.steps.count)" }.joined(separator: ", "))\n".utf8))
+            text = await source.failureReport(for: ref.key, easURLs: [])
+        }
+        print(text)
+        done.signal()
+    }
+    done.wait()
     exit(0)
 }
 

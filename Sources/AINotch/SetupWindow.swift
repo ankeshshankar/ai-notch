@@ -26,6 +26,11 @@ final class SetupModel: ObservableObject {
     @Published private(set) var probe: HookProbe.Result?
     @Published private(set) var quarantine: String?
     @Published private(set) var probing = false
+    /// builds.json, and the build sources it sets up, from the running notch (nil when the file
+    /// leaves a source out, and in a setup preview).
+    @Published private(set) var buildsConfig = BuildsConfigInfo(nil, exists: false)
+    @Published private(set) var eas: BuildSourceInfo?
+    @Published private(set) var bitbucket: BuildSourceInfo?
     private var probedAt = Date.distantPast
     private var pendingProbe: HookProbe.Run?
     private var timer: Timer?
@@ -59,6 +64,10 @@ final class SetupModel: ObservableObject {
         set(\.cursor, Setup.hasCursor ? Setup.cursorStatus(location) : nil)
         set(\.login, Setup.loginStatus(location))
         set(\.accessibility, AXIsProcessTrusted())
+        set(\.buildsConfig, BuildsConfigInfo(BuildsConfig.current, exists: BuildsConfig.fileExists))
+        let builds = SetupWindowController.shared.builds
+        set(\.eas, builds.flatMap { $0.easOn ? BuildSourceInfo.eas($0.eas) : nil })
+        set(\.bitbucket, builds.flatMap { $0.bitbucketOn ? BuildSourceInfo.bitbucket($0.bitbucket) : nil })
         Notifier.shared.permission { [weak self] status in self?.set(\.notifications, status) }
     }
 
@@ -144,6 +153,54 @@ final class SetupModel: ObservableObject {
     }
 }
 
+/// builds.json in Setup: whether it is there and what it sets up.
+struct BuildsConfigInfo: Equatable {
+    var text: String
+    var ok: Bool
+    var isSetUp: Bool
+    var problems: [String]
+
+    init(_ config: BuildsConfig?, exists: Bool) {
+        let parts = [config?.eas != nil ? "EAS" : nil, config?.bitbucket != nil ? "Bitbucket" : nil].compactMap { $0 }
+        problems = config?.problems ?? []
+        isSetUp = !parts.isEmpty
+        ok = isSetUp && problems.isEmpty
+        text = isSetUp ? parts.joined(separator: " · ") : exists ? "Check the file" : "Not set up"
+    }
+}
+
+/// One build source's line in Setup: a few words, whether it works, and its ⓘ.
+struct BuildSourceInfo: Equatable {
+    var text: String
+    var ok: Bool
+    var help: String
+    /// Not connected yet: Setup shows the steps.
+    var needsSetup = false
+
+    static func eas(_ snapshot: EASSnapshot) -> BuildSourceInfo {
+        let about = "Read over Expo's GraphQL API (the one eas-cli uses) with the CLI's own login from ~/.expo/state.json, or an EXPO_TOKEN in the Keychain (\(EASConfig.tokenService)) if you store one; if that API fails or changes, the EAS CLI (eas build:list) stands in. A build in flight every 25 s, the list every 5 minutes (every minute while anything runs), paused while the screen is locked. Never starts or cancels a build."
+        if let status = snapshot.status { return BuildSourceInfo(text: status.text, ok: false, help: status.help + "\n\n" + about) }
+        if snapshot.fetchedAt == 0 { return BuildSourceInfo(text: "Checking…", ok: false, help: about) }
+        let via = snapshot.via.map { " · \($0)" } ?? ""
+        let fallback = snapshot.fallback.map { "GraphQL failed (\($0)); the CLI stands in for now.\n\n" } ?? ""
+        return BuildSourceInfo(text: "Connected\(via)", ok: true, help: fallback + about)
+    }
+
+    static func bitbucket(_ snapshot: BitbucketSnapshot) -> BuildSourceInfo {
+        let about = "Read over Bitbucket's API with a read-only token from the Keychain (\(BitbucketConfig.tokenService)): one workspace request every 2 minutes for pushes, every repository every 15 minutes, one with a running pipeline every 25 s, under 390 requests an hour (\(snapshot.requestsLastHour) in the last hour), paused while the screen is locked. Repositories: bitbucket in \(BuildsConfig.displayPath). Never starts, stops or reruns a pipeline."
+        if let status = snapshot.status {
+            return BuildSourceInfo(text: status.text.prefix(1).uppercased() + status.text.dropFirst(), ok: false, help: status.help + "\n\n" + about, needsSetup: status.isSetup)
+        }
+        if snapshot.fetchedAt == 0 { return BuildSourceInfo(text: "Checking…", ok: false, help: about) }
+        var text = "Connected · " + (snapshot.repoCount == 1 ? "1 repository" : "\(snapshot.repoCount) repositories")
+        if let expiry = snapshot.tokenExpiresAt {
+            let days = Int((expiry - Date().timeIntervalSince1970) / 86_400)
+            if days < 14 { text += " · token expires in \(max(0, days))d" }
+        }
+        return BuildSourceInfo(text: text, ok: true, help: about)
+    }
+}
+
 /// The window itself: opened on a first launch, when the app is opened again, and from the
 /// panel's footer.
 @MainActor
@@ -156,6 +213,8 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     static let connectedKey = "setupConnectedPath"
     /// A preview's window quits the app when it closes.
     var quitsOnClose = false
+    /// The running notch's builds, for the Builds section.
+    weak var builds: BuildStore?
     let model = SetupModel()
     private var window: NSWindow?
 
@@ -250,6 +309,7 @@ struct SetupView: View {
     var confirmDisconnect: () -> Void
 
     private var isDone: Bool { model.requiredDone }
+    @State private var showsBuildsExample = false
     /// A team-signed build carries the widget and the app group it reads; an ad-hoc one neither.
     private let hasWidget: Bool = WidgetSnapshot.appGroup != nil
         && FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent("Contents/PlugIns/AINotchWidget.appex").path)
@@ -315,6 +375,8 @@ struct SetupView: View {
                     }
                 }
             }
+
+            buildsSection
 
             if isDone {
                 HStack(spacing: 10) {
@@ -422,6 +484,101 @@ struct SetupView: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.14)))
+    }
+
+    /// EAS builds and Bitbucket Pipelines in the notch: builds.json, each source's state, and
+    /// the token steps.
+    private var buildsSection: some View {
+        section("Builds") {
+            let config = model.buildsConfig
+            row("Pipelines", icon: "hammer.fill", tint: Color(red: 0.55, green: 0.45, blue: 0.85), info: Self.configHelp) {
+                Button(showsBuildsExample ? "Hide" : config.isSetUp ? "Example" : "How") {
+                    showsBuildsExample.toggle()
+                }
+                .controlSize(.small)
+                badge(config.text, symbol: config.ok ? "checkmark.circle.fill" : config.problems.isEmpty ? "circle.dashed" : "exclamationmark.circle.fill",
+                      color: config.ok ? .green : config.problems.isEmpty ? .secondary : .orange)
+                    .help(config.problems.isEmpty ? "" : "In \(BuildsConfig.displayPath): " + config.problems.joined(separator: "; "))
+                    .lineLimit(1).fixedSize()
+            }
+            if showsBuildsExample { configSteps }
+            if let eas = model.eas {
+                divider
+                row("EAS builds", icon: "shippingbox.fill", tint: Color(white: 0.2), info: eas.help) {
+                    badge(eas.text, symbol: eas.ok ? "checkmark.circle.fill" : "circle.dashed", color: eas.ok ? .green : .secondary)
+                }
+            }
+            if let bitbucket = model.bitbucket {
+                divider
+                row("Bitbucket Pipelines", icon: "arrow.triangle.branch", tint: Color(red: 0.15, green: 0.52, blue: 1.0), info: bitbucket.help) {
+                    if bitbucket.needsSetup {
+                        Button("Check Again") { SetupWindowController.shared.builds?.recheckBitbucket() }.controlSize(.small)
+                    }
+                    badge(bitbucket.text, symbol: bitbucket.ok ? "checkmark.circle.fill" : "circle.dashed", color: bitbucket.ok ? .green : .secondary)
+                        .lineLimit(1).fixedSize()
+                }
+                if bitbucket.needsSetup { bitbucketSteps }
+            }
+        }
+    }
+
+    static let bitbucketCommand = BitbucketConfig.saveCommand
+
+    static let configHelp = """
+    The Pipelines section shows EAS builds and Bitbucket Pipelines runs. It reads \(BuildsConfig.displayPath); with no file it stays hidden. Leave out a part you don't use.
+
+    eas: account (the Expo account that owns the project), slug, projectId (extra.eas.projectId in the app config), and optionally cli, the path of an eas-cli 24 or later to fall back on. Sign in with `eas login`, or store an EXPO_TOKEN in the Keychain as \(EASConfig.tokenService).
+
+    bitbucket: workspace, and repos as "name", "workspace/name" or {"workspace", "repo", "path"}. searchRoots adds every local clone under those folders (three levels deep) that has a bitbucket.org remote and a bitbucket-pipelines.yml.
+
+    me (optional): {"emails": ["you@example.com"]}, the commit emails that make a run yours. Without it, your git user.email.
+
+    AI Notch reads the file again within seconds of a change.
+    """
+
+    /// builds.json: an example to copy, and where it goes.
+    private var configSteps: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Save as \(BuildsConfig.displayPath) with your own values. Leave out a part you don't use.")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(BuildsConfig.example)
+                .font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
+            HStack(spacing: 8) {
+                Text("searchRoots finds your Bitbucket clones.").font(.system(size: 11)).foregroundStyle(.secondary)
+                InfoMark(text: Self.configHelp)
+                Spacer(minLength: 0)
+                CopyButton(text: BuildsConfig.example)
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
+    }
+
+    /// How to connect Bitbucket: a read-only token, stored in the Keychain.
+    private var bitbucketSteps: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Group {
+                Text("1. In Atlassian account settings → Security → API tokens, create an API token with scopes for Bitbucket: read:repository and read:pipeline (up to 365 days).")
+                Text("2. Paste this command into Terminal and put in the token's expiry date. Then copy the token and press Return: the command reads it from the clipboard and clears the clipboard. (Typing it at the `-w` prompt cuts it to 128 characters; these tokens are 192.)")
+            }
+            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(Self.bitbucketCommand)
+                .font(.system(size: 10.5, design: .monospaced)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
+            HStack(spacing: 8) {
+                Text("3. Check Again. Nothing else to set.").font(.system(size: 11)).foregroundStyle(.secondary)
+                InfoMark(text: "The token stays in your login Keychain (not synced) and is read with /usr/bin/security; it is never written to a file or a log. AI Notch warns 14 days before the date you give. To disconnect: security delete-generic-password -s \(BitbucketConfig.tokenService)")
+                Spacer(minLength: 0)
+                CopyButton(text: Self.bitbucketCommand)
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
     }
 
     private var divider: some View { Divider().padding(.leading, 44) }
