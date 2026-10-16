@@ -1,0 +1,1081 @@
+{
+  "uid": 501,
+  "selfPid": 900,
+  "cases": [
+    {
+      "name": "VS Code group: Claude Code, MCP servers, a Jest run by the agent",
+      "processes": [
+        {
+          "pid": 1,
+          "ppid": 0,
+          "pgid": 1,
+          "uid": 0,
+          "comm": "launchd",
+          "path": "/sbin/launchd"
+        },
+        {
+          "pid": 5518,
+          "ppid": 1,
+          "pgid": 5518,
+          "comm": "Electron",
+          "path": "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
+        },
+        {
+          "pid": 5924,
+          "ppid": 5518,
+          "pgid": 5518,
+          "comm": "Code Helper (Plugin)",
+          "path": "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)"
+        },
+        {
+          "pid": 9897,
+          "ppid": 5924,
+          "pgid": 5518,
+          "comm": "claude",
+          "path": "/Users/dev/.vscode/extensions/anthropic.claude-code-2.0.0-darwin-arm64/resources/native-binary/claude",
+          "args": [
+            "claude",
+            "--output-format",
+            "stream-json"
+          ]
+        },
+        {
+          "pid": 9926,
+          "ppid": 9897,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/.npm/_npx/0a1b/node_modules/.bin/mcp-server-filesystem",
+            "/Users/dev/Code"
+          ]
+        },
+        {
+          "pid": 9980,
+          "ppid": 9926,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/.npm/_npx/0a1b/node_modules/mcp-server-filesystem/dist/index.js"
+          ]
+        },
+        {
+          "pid": 9981,
+          "ppid": 9897,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/.npm/_npx/9f8e/node_modules/.bin/mcp-server-jest-docs"
+          ]
+        },
+        {
+          "pid": 7001,
+          "ppid": 9897,
+          "pgid": 5518,
+          "comm": "zsh",
+          "path": "/bin/zsh"
+        },
+        {
+          "pid": 7002,
+          "ppid": 7001,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest/bin/jest.js",
+            "--runInBand=false"
+          ]
+        },
+        {
+          "pid": 7003,
+          "ppid": 7002,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest-worker/build/workers/processChild.js"
+          ]
+        },
+        {
+          "pid": 7004,
+          "ppid": 7002,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest-worker/build/workers/processChild.js"
+          ]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "jest",
+            "root": 7002,
+            "plan": "tree",
+            "planPids": [
+              7002,
+              7003,
+              7004
+            ],
+            "pids": [
+              7002,
+              7003,
+              7004
+            ],
+            "watch": false,
+            "editorChild": false
+          }
+        ],
+        "never": [
+          1,
+          5518,
+          5924,
+          9897,
+          9926,
+          9980,
+          9981,
+          7001
+        ]
+      }
+    },
+    {
+      "name": "Terminal job: pnpm, sh -c, expo start with Metro's transform workers; the group is the job",
+      "processes": [
+        {
+          "pid": 3000,
+          "ppid": 1,
+          "pgid": 3000,
+          "comm": "Terminal",
+          "path": "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"
+        },
+        {
+          "pid": 3001,
+          "ppid": 3000,
+          "pgid": 3001,
+          "uid": 0,
+          "comm": "login",
+          "path": "/usr/bin/login",
+          "tty": 268435461
+        },
+        {
+          "pid": 3002,
+          "ppid": 3001,
+          "pgid": 3002,
+          "comm": "zsh",
+          "path": "/bin/zsh",
+          "tty": 268435461,
+          "sessionLeader": true
+        },
+        {
+          "pid": 3010,
+          "ppid": 3002,
+          "pgid": 3010,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435461,
+          "args": [
+            "node",
+            "/opt/homebrew/bin/pnpm",
+            "start"
+          ]
+        },
+        {
+          "pid": 3011,
+          "ppid": 3010,
+          "pgid": 3010,
+          "comm": "sh",
+          "path": "/bin/sh",
+          "tty": 268435461
+        },
+        {
+          "pid": 3012,
+          "ppid": 3011,
+          "pgid": 3010,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435461,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/.bin/expo",
+            "start",
+            "--port",
+            "7070"
+          ]
+        },
+        {
+          "pid": 3013,
+          "ppid": 3012,
+          "pgid": 3010,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435461,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest-worker/build/workers/processChild.js"
+          ]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "metro",
+            "root": 3012,
+            "plan": "group",
+            "planPids": [
+              3010,
+              3011,
+              3012,
+              3013
+            ],
+            "pids": [
+              3012,
+              3013
+            ],
+            "orphan": false
+          }
+        ],
+        "never": [
+          3000,
+          3001,
+          3002
+        ]
+      }
+    },
+    {
+      "name": "pnpm dev runs Metro and a tsc --watch in one group: only Metro's tree",
+      "processes": [
+        {
+          "pid": 3102,
+          "ppid": 1,
+          "pgid": 3102,
+          "comm": "zsh",
+          "path": "/bin/zsh",
+          "tty": 268435462,
+          "sessionLeader": true
+        },
+        {
+          "pid": 3110,
+          "ppid": 3102,
+          "pgid": 3110,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435462,
+          "args": [
+            "node",
+            "/opt/homebrew/lib/node_modules/pnpm/bin/pnpm.cjs",
+            "dev"
+          ]
+        },
+        {
+          "pid": 3111,
+          "ppid": 3110,
+          "pgid": 3110,
+          "comm": "sh",
+          "path": "/bin/sh",
+          "tty": 268435462
+        },
+        {
+          "pid": 3112,
+          "ppid": 3111,
+          "pgid": 3110,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435462,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/@expo/cli/build/bin/cli",
+            "start"
+          ]
+        },
+        {
+          "pid": 3113,
+          "ppid": 3112,
+          "pgid": 3110,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435462,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest-worker/build/workers/processChild.js"
+          ]
+        },
+        {
+          "pid": 3114,
+          "ppid": 3111,
+          "pgid": 3110,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435462,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/typescript/bin/tsc",
+            "--watch"
+          ]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "metro",
+            "root": 3112,
+            "plan": "tree",
+            "planPids": [
+              3112,
+              3113
+            ]
+          }
+        ],
+        "never": [
+          3102,
+          3110,
+          3111,
+          3114
+        ]
+      }
+    },
+    {
+      "name": "Two make verify at once, each with a nested make, turbo and Jest folded in",
+      "processes": [
+        {
+          "pid": 4000,
+          "ppid": 1,
+          "pgid": 4000,
+          "comm": "zsh",
+          "path": "/bin/zsh",
+          "tty": 268435463,
+          "sessionLeader": true
+        },
+        {
+          "pid": 4001,
+          "ppid": 4000,
+          "pgid": 4001,
+          "comm": "make",
+          "path": "/usr/bin/make",
+          "tty": 268435463,
+          "args": [
+            "make",
+            "verify"
+          ]
+        },
+        {
+          "pid": 4002,
+          "ppid": 4001,
+          "pgid": 4001,
+          "comm": "make",
+          "path": "/usr/bin/make",
+          "tty": 268435463,
+          "args": [
+            "make",
+            "-C",
+            "apps/app",
+            "verify"
+          ]
+        },
+        {
+          "pid": 4003,
+          "ppid": 4002,
+          "pgid": 4001,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435463,
+          "args": [
+            "node",
+            "/Users/dev/Code/repo/node_modules/.bin/turbo",
+            "run",
+            "test"
+          ]
+        },
+        {
+          "pid": 4004,
+          "ppid": 4003,
+          "pgid": 4001,
+          "comm": "turbo",
+          "path": "/Users/dev/Code/repo/node_modules/@turbo/darwin-arm64/bin/turbo",
+          "tty": 268435463,
+          "args": [
+            "turbo",
+            "run",
+            "test"
+          ]
+        },
+        {
+          "pid": 4005,
+          "ppid": 4004,
+          "pgid": 4001,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435463,
+          "args": [
+            "node",
+            "/Users/dev/Code/repo/node_modules/jest/bin/jest.js"
+          ]
+        },
+        {
+          "pid": 4100,
+          "ppid": 1,
+          "pgid": 4100,
+          "comm": "zsh",
+          "path": "/bin/zsh",
+          "tty": 268435464,
+          "sessionLeader": true
+        },
+        {
+          "pid": 4101,
+          "ppid": 4100,
+          "pgid": 4101,
+          "comm": "make",
+          "path": "/usr/bin/make",
+          "tty": 268435464,
+          "args": [
+            "make",
+            "verify"
+          ]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "verify",
+            "root": 4001,
+            "plan": "group",
+            "planPids": [
+              4001,
+              4002,
+              4003,
+              4004,
+              4005
+            ],
+            "pids": [
+              4001,
+              4002,
+              4003,
+              4004,
+              4005
+            ]
+          },
+          {
+            "kind": "verify",
+            "root": 4101,
+            "plan": "group",
+            "planPids": [
+              4101
+            ]
+          }
+        ],
+        "never": [
+          4000,
+          4100
+        ]
+      }
+    },
+    {
+      "name": "Orphans: a Jest worker and a Metro left by a closed terminal; a Metro whose terminal lives on",
+      "processes": [
+        {
+          "pid": 5001,
+          "ppid": 1,
+          "pgid": 4990,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest-worker/build/workers/processChild.js"
+          ]
+        },
+        {
+          "pid": 5002,
+          "ppid": 1,
+          "pgid": 5002,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435470,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/.bin/expo",
+            "start"
+          ]
+        },
+        {
+          "pid": 5003,
+          "ppid": 1,
+          "pgid": 5003,
+          "comm": "zsh",
+          "path": "/bin/zsh",
+          "tty": 268435470,
+          "sessionLeader": true
+        },
+        {
+          "pid": 5004,
+          "ppid": 1,
+          "pgid": 5004,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/react-native/cli.js",
+            "start"
+          ]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "jest",
+            "root": 5001,
+            "plan": "tree",
+            "planPids": [
+              5001
+            ],
+            "orphan": true
+          },
+          {
+            "kind": "metro",
+            "root": 5002,
+            "orphan": false,
+            "plan": "group",
+            "planPids": [
+              5002
+            ]
+          },
+          {
+            "kind": "metro",
+            "root": 5004,
+            "orphan": true
+          }
+        ],
+        "never": [
+          5003
+        ]
+      }
+    },
+    {
+      "name": "Daemons, devices, look-alikes, other users and the protected tools",
+      "processes": [
+        {
+          "pid": 900,
+          "ppid": 1,
+          "pgid": 900,
+          "comm": "AINotch",
+          "path": "/Users/dev/Applications/AINotch.app/Contents/MacOS/AINotch"
+        },
+        {
+          "pid": 6001,
+          "ppid": 1,
+          "pgid": 6001,
+          "comm": "java",
+          "path": "/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home/bin/java",
+          "args": [
+            "java",
+            "-Xmx2048m",
+            "-cp",
+            "/Users/dev/.gradle/wrapper/dists/gradle-8.10/lib/gradle-launcher-8.10.jar",
+            "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+            "8.10"
+          ]
+        },
+        {
+          "pid": 6002,
+          "ppid": 1,
+          "pgid": 6002,
+          "comm": "java",
+          "path": "/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home/bin/java",
+          "args": [
+            "java",
+            "-cp",
+            "/Users/dev/.gradle/caches/kotlin-compiler-embeddable.jar",
+            "org.jetbrains.kotlin.daemon.KotlinCompileDaemon",
+            "--daemon-runFilesPath"
+          ]
+        },
+        {
+          "pid": 6003,
+          "ppid": 1,
+          "pgid": 6003,
+          "comm": "emulator",
+          "path": "/Users/dev/Library/Android/sdk/emulator/emulator"
+        },
+        {
+          "pid": 6004,
+          "ppid": 6003,
+          "pgid": 6003,
+          "comm": "qemu-system-aarch64",
+          "path": "/Users/dev/Library/Android/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64",
+          "args": [
+            "qemu-system-aarch64",
+            "-netdelay",
+            "none",
+            "-avd",
+            "Pixel_8_Pro"
+          ]
+        },
+        {
+          "pid": 6005,
+          "ppid": 6004,
+          "pgid": 6003,
+          "comm": "crashpad_handler",
+          "path": "/Users/dev/Library/Android/sdk/emulator/crashpad_handler"
+        },
+        {
+          "pid": 6010,
+          "ppid": 1,
+          "pgid": 6010,
+          "comm": "launchd_sim",
+          "path": "/Library/Developer/CoreSimulator/Volumes/iOS_23A/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.0.simruntime/Contents/Resources/RuntimeRoot/sbin/launchd_sim",
+          "args": [
+            "launchd_sim",
+            "/Users/dev/Library/Developer/CoreSimulator/Devices/0A1B2C3D-0000-4000-8000-00000000ABCD/data/var/run/launchd_bootstrap.plist"
+          ]
+        },
+        {
+          "pid": 6011,
+          "ppid": 6010,
+          "pgid": 6011,
+          "comm": "SpringBoard",
+          "path": "/Library/Developer/CoreSimulator/Volumes/iOS_23A/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/CoreServices/SpringBoard.app/SpringBoard"
+        },
+        {
+          "pid": 6012,
+          "ppid": 6010,
+          "pgid": 6012,
+          "comm": "AppUnderTest",
+          "path": "/Users/dev/Library/Developer/CoreSimulator/Devices/0A1B2C3D-0000-4000-8000-00000000ABCD/data/Containers/Bundle/Application/1111/App.app/App"
+        },
+        {
+          "pid": 6020,
+          "ppid": 1,
+          "pgid": 6020,
+          "comm": "Simulator",
+          "path": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator"
+        },
+        {
+          "pid": 6021,
+          "ppid": 1,
+          "pgid": 6021,
+          "comm": "Xcode",
+          "path": "/Applications/Xcode.app/Contents/MacOS/Xcode"
+        },
+        {
+          "pid": 6030,
+          "ppid": 1,
+          "pgid": 6030,
+          "comm": "adb",
+          "path": "/Users/dev/Library/Android/sdk/platform-tools/adb",
+          "args": [
+            "adb",
+            "-L",
+            "tcp:5037",
+            "fork-server",
+            "server",
+            "--reply-fd",
+            "4"
+          ]
+        },
+        {
+          "pid": 6031,
+          "ppid": 1,
+          "pgid": 6031,
+          "comm": "watchman",
+          "path": "/opt/homebrew/bin/watchman"
+        },
+        {
+          "pid": 6040,
+          "ppid": 1,
+          "pgid": 6040,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/opt/homebrew/bin/codex"
+          ]
+        },
+        {
+          "pid": 6041,
+          "ppid": 1,
+          "pgid": 6041,
+          "comm": "claude",
+          "path": "/Users/dev/.local/bin/claude"
+        },
+        {
+          "pid": 6042,
+          "ppid": 1,
+          "pgid": 6042,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/.local/share/cursor-agent/versions/1/cursor-agent"
+          ]
+        },
+        {
+          "pid": 6050,
+          "ppid": 1,
+          "pgid": 6050,
+          "uid": 502,
+          "comm": "node",
+          "path": "",
+          "args": [
+            "node",
+            "/Users/other/Code/app/node_modules/.bin/expo",
+            "start"
+          ]
+        },
+        {
+          "pid": 6060,
+          "ppid": 1,
+          "pgid": 6060,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/.bin/expo-doctor"
+          ]
+        },
+        {
+          "pid": 6061,
+          "ppid": 1,
+          "pgid": 6061,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/.bin/expo",
+            "export"
+          ]
+        },
+        {
+          "pid": 6062,
+          "ppid": 1,
+          "pgid": 6062,
+          "comm": "make",
+          "path": "/usr/bin/make",
+          "args": [
+            "make",
+            "lint"
+          ]
+        },
+        {
+          "pid": 6063,
+          "ppid": 1,
+          "pgid": 6063,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/notes/metro-map.js",
+            "start"
+          ]
+        },
+        {
+          "pid": 6064,
+          "ppid": 1,
+          "pgid": 6064,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+          ]
+        },
+        {
+          "pid": 6065,
+          "ppid": 6064,
+          "pgid": 6064,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/vendor/jest/bin/jest.js"
+          ]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "gradle",
+            "root": 6001,
+            "plan": "group",
+            "planPids": [
+              6001
+            ]
+          },
+          {
+            "kind": "kotlin",
+            "root": 6002,
+            "plan": "group",
+            "planPids": [
+              6002
+            ]
+          },
+          {
+            "kind": "emulator",
+            "root": 6004,
+            "plan": "tree",
+            "planPids": [
+              6004,
+              6005
+            ]
+          },
+          {
+            "kind": "simulator",
+            "root": 6010,
+            "plan": "none",
+            "pids": [
+              6010,
+              6011,
+              6012
+            ]
+          },
+          {
+            "kind": "simulatorApp",
+            "root": 6020,
+            "plan": "none"
+          },
+          {
+            "kind": "adb",
+            "root": 6030,
+            "plan": "none"
+          },
+          {
+            "kind": "watchman",
+            "root": 6031,
+            "plan": "none"
+          }
+        ],
+        "never": [
+          900,
+          6003,
+          6020,
+          6021,
+          6030,
+          6031,
+          6040,
+          6041,
+          6042,
+          6050,
+          6060,
+          6061,
+          6062,
+          6063,
+          6064,
+          6011,
+          6012,
+          6065
+        ]
+      }
+    },
+    {
+      "name": "Started by the editor itself (VS Code's Jest extension), and a Jest whose group is a shell",
+      "processes": [
+        {
+          "pid": 5518,
+          "ppid": 1,
+          "pgid": 5518,
+          "comm": "Electron",
+          "path": "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
+        },
+        {
+          "pid": 5924,
+          "ppid": 5518,
+          "pgid": 5518,
+          "comm": "Code Helper (Plugin)",
+          "path": "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)"
+        },
+        {
+          "pid": 7101,
+          "ppid": 5924,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/.bin/jest",
+            "--watchAll"
+          ]
+        },
+        {
+          "pid": 7102,
+          "ppid": 7101,
+          "pgid": 5518,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest-worker/build/workers/processChild.js"
+          ]
+        },
+        {
+          "pid": 8001,
+          "ppid": 1,
+          "pgid": 8001,
+          "comm": "zsh",
+          "path": "/bin/zsh",
+          "tty": 268435480,
+          "sessionLeader": true
+        },
+        {
+          "pid": 8002,
+          "ppid": 8001,
+          "pgid": 8001,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435480,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/jest/bin/jest.js",
+            "--watch"
+          ]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "jest",
+            "root": 7101,
+            "plan": "none",
+            "editorChild": true,
+            "watch": true
+          },
+          {
+            "kind": "jest",
+            "root": 8002,
+            "plan": "tree",
+            "planPids": [
+              8002
+            ],
+            "watch": true,
+            "orphan": false
+          }
+        ],
+        "never": [
+          5518,
+          5924,
+          7101,
+          7102,
+          8001
+        ]
+      }
+    },
+    {
+      "name": "Xcode's make (/usr/bin/make execs gnumake from Xcode.app's Developer folder) is a dev wrapper, not the editor; Xcode itself is",
+      "processes": [
+        {
+          "pid": 9100,
+          "ppid": 1,
+          "pgid": 9100,
+          "comm": "zsh",
+          "path": "/bin/zsh",
+          "tty": 268435490,
+          "sessionLeader": true
+        },
+        {
+          "pid": 9101,
+          "ppid": 9100,
+          "pgid": 9101,
+          "comm": "gnumake",
+          "path": "/Applications/Xcode-beta.app/Contents/Developer/usr/bin/make",
+          "tty": 268435490,
+          "args": [
+            "make",
+            "verify"
+          ]
+        },
+        {
+          "pid": 9102,
+          "ppid": 9100,
+          "pgid": 9102,
+          "comm": "gnumake",
+          "path": "/Applications/Xcode.app/Contents/Developer/usr/bin/make",
+          "tty": 268435490,
+          "args": [
+            "make",
+            "dev"
+          ]
+        },
+        {
+          "pid": 9103,
+          "ppid": 9102,
+          "pgid": 9102,
+          "comm": "node",
+          "path": "/opt/homebrew/bin/node",
+          "tty": 268435490,
+          "args": [
+            "node",
+            "/Users/dev/Code/app/node_modules/.bin/expo",
+            "start",
+            "--port",
+            "6060"
+          ]
+        },
+        {
+          "pid": 9110,
+          "ppid": 1,
+          "pgid": 9110,
+          "comm": "Xcode",
+          "path": "/Applications/Xcode-beta.app/Contents/MacOS/Xcode"
+        },
+        {
+          "pid": 9111,
+          "ppid": 9110,
+          "pgid": 9110,
+          "comm": "gnumake",
+          "path": "/Applications/Xcode-beta.app/Contents/Developer/usr/bin/make",
+          "args": [
+            "make",
+            "verify"
+          ]
+        },
+        {
+          "pid": 9112,
+          "ppid": 1,
+          "pgid": 9112,
+          "comm": "SourceKitService",
+          "path": "/Applications/Xcode-beta.app/Contents/SharedFrameworks/SourceKit.framework/Versions/A/XPCServices/SourceKitService.xpc/Contents/MacOS/SourceKitService"
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "kind": "verify",
+            "root": 9101,
+            "plan": "group",
+            "planPids": [
+              9101
+            ],
+            "editorChild": false
+          },
+          {
+            "kind": "metro",
+            "root": 9103,
+            "plan": "group",
+            "planPids": [
+              9102,
+              9103
+            ],
+            "editorChild": false
+          },
+          {
+            "kind": "verify",
+            "root": 9111,
+            "plan": "none",
+            "editorChild": true
+          }
+        ],
+        "never": [
+          9100,
+          9110,
+          9111,
+          9112
+        ]
+      }
+    }
+  ]
+}
