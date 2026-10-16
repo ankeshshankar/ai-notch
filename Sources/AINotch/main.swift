@@ -8,6 +8,9 @@ let showSetupNotification = Notification.Name("info.ankeshshiv.notch.show-setup"
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = SessionStore()
     private let builds = BuildStore()
+    private let prod = ProdStore()
+    private let machine = MachineStore()
+    private let reviews = ReviewStore()
     private var controller: NotchController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -22,7 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // CLAUDE_NOTCH_SETUP_HOME it reads and writes a copy of a home folder.
         if args.contains("--setup-preview") {
             setup.quitsOnClose = true
-            setup.show()
+            // `--focus prod`: opened at a section, as the grey Prod chip's click does.
+            setup.show(focus: args.firstIndex(of: "--focus").flatMap { $0 + 1 < args.count && args[$0 + 1] == "prod" ? .prod : nil })
             // Its number and frame once SwiftUI has laid it out, for `screencapture -l` and clicks.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 guard let info = setup.windowInfo else { return }
@@ -35,8 +39,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Notifier.shared.asksAtLaunch = !firstLaunch
         store.start()
         builds.start()
+        prod.start()
+        machine.start()
+        // Pull requests: notified through Notifier (locked screen only), a failed build Pipelines
+        // already announced left out, and read less often while one of my pipelines runs.
+        reviews.onEvents = { [weak reviews] events in reviews?.post(events) }
+        reviews.pipelineNotified = { [weak builds] ref in builds?.hasNotified(ref) ?? false }
+        builds.onMyPipelineRunning = { [weak reviews] running in reviews?.setMyPipelineRunning(running) }
+        reviews.start()
         SetupWindowController.shared.builds = builds
-        controller = NotchController(store: store, builds: builds)
+        SetupWindowController.shared.prod = prod
+        SetupWindowController.shared.machine = machine
+        SetupWindowController.shared.reviews = reviews
+        controller = NotchController(store: store, builds: builds, prod: prod, machine: machine, reviews: reviews)
         // Another copy opened while this one runs asks this one to show the window (see below).
         DistributedNotificationCenter.default().addObserver(forName: showSetupNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { SetupWindowController.shared.show() }
@@ -76,6 +91,15 @@ if let index = CommandLine.arguments.firstIndex(of: "--chat-title") {
     ChatTitles.printTitles(of: CommandLine.arguments[index + 1])
     exit(0)
 }
+
+// Dev checks of the pull-request data layer, never the app: `--pr-selfcheck`, `--pr-watch <s>`.
+PullRequestDev.runIfAsked(CommandLine.arguments)
+
+// Dev checks of the Datadog sign-in, never the app: `--datadog-auth <command>` (stub or probe).
+DatadogAuthDev.runIfAsked(CommandLine.arguments)
+
+// Dev check of Prod's alerts (snapshot diffing, grouping, flapping), never the app: `--prod-alerts-selfcheck`.
+ProdAlertsCheck.runIfAsked(CommandLine.arguments)
 
 // Dev checks of the build sources, never the app: a failure report as Copy failure copies it
 // (`--eas-failure <build id>`, `--bitbucket-failure <ws/repo#n>`), one poll of a repository as
@@ -153,6 +177,31 @@ if let index = CommandLine.arguments.firstIndex(where: { ["--eas-failure", "--bi
             text = await source.failureReport(for: ref.key, easURLs: [])
         }
         print(text)
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
+// Dev checks of the machine guard, never the app: `--machine-selfcheck <fixtures.json>` runs the
+// classifier and safety rules on saved process tables; `--machine-scan [seconds]` scans this Mac
+// twice that far apart (CPU needs two) and prints each row: kind, pid, footprint, state, plan.
+if let index = CommandLine.arguments.firstIndex(of: "--machine-selfcheck") {
+    guard index + 1 < CommandLine.arguments.count else {
+        FileHandle.standardError.write(Data("usage: AINotch --machine-selfcheck <fixtures.json>\n".utf8))
+        exit(2)
+    }
+    exit(MachineSelfCheck.run(fixtures: CommandLine.arguments[index + 1]))
+}
+if let index = CommandLine.arguments.firstIndex(of: "--machine-scan") {
+    let seconds = index + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[index + 1]) ?? 3 : 3
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+        let source = MachineSource { _ in }
+        _ = await source.debugLines()
+        try? await Task.sleep(for: .seconds(seconds))
+        print((await source.debugLines()).joined(separator: "\n"))
+        if index + 2 < CommandLine.arguments.count, let count = Int(CommandLine.arguments[index + 2]) { print(await source.benchmark(count)) }
         done.signal()
     }
     done.wait()

@@ -31,6 +31,19 @@ final class SetupModel: ObservableObject {
     @Published private(set) var buildsConfig = BuildsConfigInfo(nil, exists: false)
     @Published private(set) var eas: BuildSourceInfo?
     @Published private(set) var bitbucket: BuildSourceInfo?
+    /// Pull requests: on or off in builds.json, and whether they read (nil without a bitbucket part).
+    @Published private(set) var pullRequests: PRSetupInfo?
+    @Published private(set) var prNotify = ReviewStore.NotifyPrefs.load()
+    /// Prod (Datadog): its state, and which of its news notifies.
+    @Published private(set) var prod = ProdSetupInfo.make(nil)
+    @Published private(set) var prodAlerts = ProdAlertPrefs.load()
+    /// The machine guard: on or off, and whether memory critical notifies.
+    @Published private(set) var machineOn = UserDefaults.standard.object(forKey: "machine.enabled") as? Bool ?? true
+    @Published private(set) var machineNotify = UserDefaults.standard.object(forKey: "machine.notifyCritical") as? Bool ?? true
+    /// The section the window was opened for (the Prod chip's click): outlined for a moment.
+    @Published private(set) var focus: SetupFocus?
+    /// Counts the times a section was asked for, so asking again scrolls to it again.
+    @Published private(set) var focusRequest = 0
     private var probedAt = Date.distantPast
     private var pendingProbe: HookProbe.Run?
     private var timer: Timer?
@@ -43,6 +56,8 @@ final class SetupModel: ObservableObject {
 
     func start() {
         refresh()
+        // The sign-in is read again (it may have changed while the window was closed).
+        DatadogAuthModel.shared.reload()
         // A probe from the launch check a moment ago stands; otherwise check again.
         if Date().timeIntervalSince(probedAt) > 5 { checkHook() }
         timer?.invalidate()
@@ -54,6 +69,16 @@ final class SetupModel: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        focus = nil
+    }
+
+    func setFocus(_ focus: SetupFocus?) {
+        self.focus = focus
+        guard focus != nil else { return }
+        focusRequest += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            MainActor.assumeIsolated { if self?.focus == focus { self?.focus = nil } }
+        }
     }
 
     func refresh() {
@@ -68,6 +93,16 @@ final class SetupModel: ObservableObject {
         let builds = SetupWindowController.shared.builds
         set(\.eas, builds.flatMap { $0.easOn ? BuildSourceInfo.eas($0.eas) : nil })
         set(\.bitbucket, builds.flatMap { $0.bitbucketOn ? BuildSourceInfo.bitbucket($0.bitbucket) : nil })
+        let reviews = SetupWindowController.shared.reviews
+        set(\.pullRequests, PRSetupInfo.make(reviews))
+        if let reviews { set(\.prNotify, reviews.notify) }
+        let prodStore = SetupWindowController.shared.prod
+        set(\.prod, ProdSetupInfo.make(prodStore))
+        if let prodStore { set(\.prodAlerts, prodStore.alertPrefs) }
+        if let machine = SetupWindowController.shared.machine {
+            set(\.machineOn, machine.isOn)
+            set(\.machineNotify, machine.notifyCritical)
+        }
         Notifier.shared.permission { [weak self] status in self?.set(\.notifications, status) }
     }
 
@@ -137,6 +172,40 @@ final class SetupModel: ObservableObject {
         refresh()
     }
 
+    /// Which Datadog alerts notify, pop the notch open or remind (the running notch's, else saved).
+    func setProdAlerts(_ prefs: ProdAlertPrefs) {
+        prodAlerts = prefs
+        if let prod = SetupWindowController.shared.prod { prod.setAlertPrefs(prefs) } else { prefs.save() }
+    }
+
+    /// The pull-requests switch: written into builds.json (the source of truth), picked up
+    /// within seconds.
+    func setPullRequests(_ on: Bool) {
+        errors["prs"] = BuildsConfig.setPullRequests(on)
+        refresh()
+    }
+
+    func setPRNotify(_ prefs: ReviewStore.NotifyPrefs) {
+        prNotify = prefs
+        if let reviews = SetupWindowController.shared.reviews { reviews.setNotify(prefs) } else { prefs.save() }
+    }
+
+    /// Check Again for Bitbucket: Pipelines and pull requests read the Keychain again now.
+    func recheckBitbucket() {
+        SetupWindowController.shared.builds?.recheckBitbucket()
+        SetupWindowController.shared.reviews?.recheckToken()
+    }
+
+    func setMachineOn(_ on: Bool) {
+        machineOn = on
+        if let machine = SetupWindowController.shared.machine { machine.setEnabled(on) } else { UserDefaults.standard.set(on, forKey: "machine.enabled") }
+    }
+
+    func setMachineNotify(_ on: Bool) {
+        machineNotify = on
+        if let machine = SetupWindowController.shared.machine { machine.setNotify(on) } else { UserDefaults.standard.set(on, forKey: "machine.notifyCritical") }
+    }
+
     func askForNotifications() {
         if notifications == .denied {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!)
@@ -153,6 +222,11 @@ final class SetupModel: ObservableObject {
     }
 }
 
+/// A section the window can open at.
+enum SetupFocus: Equatable {
+    case prod
+}
+
 /// builds.json in Setup: whether it is there and what it sets up.
 struct BuildsConfigInfo: Equatable {
     var text: String
@@ -166,6 +240,76 @@ struct BuildsConfigInfo: Equatable {
         isSetUp = !parts.isEmpty
         ok = isSetUp && problems.isEmpty
         text = isSetUp ? parts.joined(separator: " · ") : exists ? "Check the file" : "Not set up"
+    }
+}
+
+/// Prod's line in Setup: a few words, whether it works, its ⓘ, and whether the steps show.
+struct ProdSetupInfo: Equatable {
+    var text: String
+    var ok: Bool
+    var help: String
+    /// No `datadog` in builds.json: the example shows.
+    var needsConfig = false
+    /// Not connected, the sign-in ended, or keys Datadog refused.
+    var needsKeys = false
+
+    static let about = "The footer's Prod chip: Datadog monitors (a search query from \(BuildsConfig.displayPath), muted ones count as OK), active incidents, and a few numbers, read with your Datadog sign-in (monitors_read, incident_read, timeseries_query) or, without one, a read-only service-account key from the Keychain (\(DatadogConfig.keyService)). Monitors every minute (3 while the screen is locked), incidents every 3 minutes, the numbers every 5 (not while locked): about 100 requests an hour, backing off on Datadog's rate-limit headers. Never mutes or changes anything in Datadog."
+
+    @MainActor static func make(_ prod: ProdStore?) -> ProdSetupInfo {
+        guard BuildsConfig.current?.datadog != nil else {
+            return ProdSetupInfo(text: "Not set up", ok: false, help: about, needsConfig: true)
+        }
+        guard let prod else { return ProdSetupInfo(text: "Not connected", ok: false, help: about, needsKeys: true) }
+        let snapshot = prod.snapshot
+        switch snapshot.access {
+        case .notConfigured, .noKeys:
+            return ProdSetupInfo(text: "Not connected", ok: false, help: DatadogConfig.setupHelp + "\n\n" + about, needsKeys: true)
+        case .signInAgain(let why):
+            return ProdSetupInfo(text: "Sign in again", ok: false, help: why + "\n\n" + about, needsKeys: true)
+        case .rejected(let why) where snapshot.viaSignIn:
+            return ProdSetupInfo(text: "Refused", ok: false, help: why + "\n\n" + about)
+        case .rejected(let why):
+            return ProdSetupInfo(text: "Key rejected", ok: false, help: why + " Store new keys (the steps below); they are picked up within a minute.\n\n" + about, needsKeys: true)
+        case .ok:
+            if snapshot.monitorsAt == 0 {
+                return ProdSetupInfo(text: snapshot.problem?.text.capitalizedFirst ?? "Checking…", ok: false, help: (snapshot.problem.map { $0.help + "\n\n" } ?? "") + about)
+            }
+            var notes = [snapshot.incidentsNote.map { "Incidents: \($0)." }, snapshot.numbersNote.map { "Numbers: \($0)." }].compactMap { $0 }
+            if let problem = snapshot.problem { notes.insert("\(problem.text.capitalizedFirst): \(problem.help)", at: 0) }
+            let count = snapshot.monitorTotal == 1 ? "1 monitor" : "\(snapshot.monitorTotal) monitors"
+            let via = snapshot.viaSignIn ? "Read with your Datadog sign-in. " : "Read with the service-account keys. "
+            return ProdSetupInfo(text: "Connected · \(count)", ok: notes.isEmpty,
+                                 help: (notes.isEmpty ? "" : notes.joined(separator: "\n") + "\n\n") + via + about + " (\(snapshot.requestsLastHour) in the last hour.)")
+        }
+    }
+}
+
+/// Pull requests' line in Setup: on or off, whether they read, and its ⓘ. A missing scope is a
+/// grey hint, never an error.
+struct PRSetupInfo: Equatable {
+    var text: String
+    var ok: Bool
+    var on: Bool
+    var help: String
+    /// The token cannot read pull requests (no read:pullrequest, none stored, refused): the
+    /// steps can show.
+    var needsToken = false
+
+    static let about = "Your open pull requests and the ones waiting for your review, in the repositories of bitbucket in \(BuildsConfig.displayPath), with the same token as Pipelines (it needs read:pullrequest; read:user finds your account at once). Mine every 2 minutes, each repository's review list every 10 (20 while one of your pipelines runs), details only for what changed: about 70 requests an hour for 7 repositories, capped at 150, beside Pipelines' own budget. Read only. The switch writes \"pullRequests\" into the bitbucket part of that file."
+
+    @MainActor static func make(_ reviews: ReviewStore?) -> PRSetupInfo? {
+        guard let bitbucket = BuildsConfig.current?.bitbucket else { return nil }
+        guard bitbucket.pullRequests else { return PRSetupInfo(text: "Off", ok: false, on: false, help: about) }
+        guard let reviews else { return PRSetupInfo(text: "On", ok: false, on: true, help: about) }
+        if let status = reviews.status {
+            let needsToken = status.isSetup && status.text != "no repositories" && status.text != "who am I?"
+            return PRSetupInfo(text: status.text.prefix(1).uppercased() + status.text.dropFirst(), ok: false, on: true,
+                               help: status.help + "\n\n" + about, needsToken: needsToken)
+        }
+        if reviews.updatedAt == 0 { return PRSetupInfo(text: "Checking…", ok: false, on: true, help: about) }
+        let repos = BitbucketConfig.loadReposCached().count
+        return PRSetupInfo(text: "Connected · " + (repos == 1 ? "1 repo" : "\(repos) repos"), ok: true, on: true,
+                           help: about + (reviews.requestSummary.isEmpty ? "" : " (\(reviews.requestSummary).)"))
     }
 }
 
@@ -215,6 +359,12 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     var quitsOnClose = false
     /// The running notch's builds, for the Builds section.
     weak var builds: BuildStore?
+    /// The running notch's prod health, for the Prod section.
+    weak var prod: ProdStore?
+    /// The running notch's machine guard, for the Machine section.
+    weak var machine: MachineStore?
+    /// The running notch's pull requests, for the Builds section.
+    weak var reviews: ReviewStore?
     let model = SetupModel()
     private var window: NSWindow?
 
@@ -248,33 +398,113 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    func show() {
-        if window == nil {
-            let host = NSHostingController(rootView: SetupView(model: model, close: { [weak self] in self?.window?.close() },
-                                                               confirmDisconnect: { [weak self] in self?.confirmDisconnect() }))
-            host.sizingOptions = .preferredContentSize
-            let window = NSWindow(contentViewController: host)
-            window.styleMask = [.titled, .closable, .fullSizeContentView]
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.title = "AI Notch Setup"
-            window.isMovableByWindowBackground = true
-            window.isReleasedWhenClosed = false
-            window.delegate = self
-            // Its SwiftUI size first, so it is centred at the size it shows.
-            window.setContentSize(host.view.fittingSize)
-            window.center()
-            self.window = window
-        }
+    /// The window's width: the column the sections are laid out in.
+    static let width: CGFloat = 440
+    /// Kept clear of the screen's edges (menu bar and Dock excluded) when it fits itself.
+    private static let margin: CGFloat = 24
+    /// The scrolling sections' and the pinned buttons' heights, as SwiftUI lays them out.
+    private var contentHeight: CGFloat = 0
+    private var footerHeight: CGFloat = 0
+    /// Resized by hand: the window no longer fits itself to its content until it is closed.
+    private var userSized = false
+
+    /// Opens the window on the notch's screen, as tall as its content up to that screen's
+    /// visible height (past that it scrolls); with `focus`, that section is scrolled into view
+    /// and outlined for a moment (the Prod chip's click when it is not connected).
+    func show(focus: SetupFocus? = nil) {
+        model.setFocus(focus)
+        let window = self.window ?? makeWindow()
         model.start()
+        if !window.isVisible {
+            userSized = false
+            // SwiftUI measures its parts during this layout; the window then fits them.
+            window.contentView?.layoutSubtreeIfNeeded()
+            fit(center: true)
+        }
         NSApp.activate()
-        window?.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func makeWindow() -> NSWindow {
+        let view = SetupView(model: model, close: { [weak self] in self?.window?.close() },
+                             confirmDisconnect: { [weak self] in self?.confirmDisconnect() },
+                             measured: { [weak self] part, height in self?.measured(part, height) })
+        let host = NSHostingController(rootView: view)
+        // The window sizes itself (fit), so it can also be resized, zoomed and made full screen.
+        host.sizingOptions = []
+        let window = SetupNSWindow(contentViewController: host)
+        window.styleMask = [.titled, .closable, .resizable, .fullSizeContentView]
+        window.collectionBehavior = [.fullScreenPrimary]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.title = "AI Notch Setup"
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.contentMinSize = NSSize(width: Self.width, height: 280)
+        window.delegate = self
+        let screen = Self.notchScreen.visibleFrame
+        window.setContentSize(NSSize(width: Self.width, height: screen.height - 2 * Self.margin))
+        self.window = window
+        return window
+    }
+
+    /// The screen with the notch (the built-in display), as the notch itself picks it; else the
+    /// main one.
+    private static var notchScreen: NSScreen {
+        NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main ?? NSScreen.screens[0]
+    }
+
+    private func measured(_ part: SetupView.Part, _ height: CGFloat) {
+        switch part {
+        case .content: if contentHeight == height { return } else { contentHeight = height }
+        case .footer: if footerHeight == height { return } else { footerHeight = height }
+        }
+        // A section opening or closing (How, the steps) grows or shrinks the window, top edge
+        // kept, unless it was resized by hand.
+        if window?.isVisible == true { fit(center: false) }
+    }
+
+    /// The window's frame showing all of its content, at most `maxHeight` tall, top edge kept.
+    private func fittingFrame(_ window: NSWindow, maxHeight: CGFloat) -> NSRect {
+        // The title bar overlaps the content (full-size content view); SwiftUI insets for it.
+        let titleBar = window.frame.height - window.contentLayoutRect.height
+        let wanted = contentHeight + footerHeight + titleBar
+        let height = min(max(wanted, window.minSize.height), maxHeight).rounded()
+        return NSRect(x: window.frame.minX, y: window.frame.maxY - height, width: window.frame.width, height: height)
+    }
+
+    private func fit(center: Bool) {
+        guard let window, contentHeight > 0, !userSized, !window.styleMask.contains(.fullScreen) else { return }
+        let screen = center ? Self.notchScreen.visibleFrame : (window.screen ?? Self.notchScreen).visibleFrame
+        var frame = fittingFrame(window, maxHeight: screen.height - 2 * Self.margin)
+        if center {
+            frame.origin = NSPoint(x: (screen.midX - frame.width / 2).rounded(), y: (screen.midY - frame.height / 2).rounded())
+        } else {
+            // Grown past the bottom: moved up, as far as the top margin.
+            frame.origin.y = max(frame.minY, screen.minY + Self.margin)
+            frame.origin.y = min(frame.minY, screen.maxY - Self.margin - frame.height)
+        }
+        if frame != window.frame { window.setFrame(frame, display: true) }
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        userSized = true
+    }
+
+    /// Zoom (the green button, a double-click on the title bar): as tall as the content, up to
+    /// the screen's visible height; zooming again goes back.
+    func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
+        let screen = (window.screen ?? Self.notchScreen).visibleFrame
+        var frame = fittingFrame(window, maxHeight: screen.height)
+        frame.origin.y = min(max(window.frame.maxY - frame.height, screen.minY), screen.maxY - frame.height)
+        return frame
     }
 
     /// The window's number and frame, for a preview's screenshots.
     var windowInfo: (number: Int, frame: NSRect)? { window.map { ($0.windowNumber, $0.frame) } }
 
     func windowWillClose(_ notification: Notification) {
+        userSized = false
         model.stop()
         UserDefaults.standard.set(model.location.bundle.path, forKey: Self.seenKey)
         if quitsOnClose { NSApp.terminate(nil) }
@@ -294,6 +524,24 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     }
 }
 
+/// The setup window. The app has no menu bar of its own (it is an accessory), so the window
+/// takes the standard keys itself: Control-Command-F for full screen, Command-W to close.
+final class SetupNSWindow: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function])
+        switch (event.charactersIgnoringModifiers?.lowercased(), mods) {
+        case ("f", [.control, .command]):
+            toggleFullScreen(nil)
+            return true
+        case ("w", [.command]):
+            performClose(nil)
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
+    }
+}
+
 /// The wordmark's orange-to-lilac, a step darker on light.
 private let wordmark = LinearGradient(
     colors: [
@@ -307,14 +555,65 @@ struct SetupView: View {
     @ObservedObject var model: SetupModel
     var close: () -> Void
     var confirmDisconnect: () -> Void
+    /// Each part's height as laid out, for the window to fit itself to.
+    var measured: (Part, CGFloat) -> Void = { _, _ in }
+
+    enum Part { case content, footer }
 
     private var isDone: Bool { model.requiredDone }
+    /// The sections are taller than the window shows: a line above the pinned buttons.
+    @State private var overflows = false
+    @State private var contentHeight: CGFloat = 0
+    @State private var viewportHeight: CGFloat = 0
     @State private var showsBuildsExample = false
+    @State private var showsProdExample = false
+    @State private var showsProdSteps = false
+    @State private var showsTokenSteps = false
+    @ObservedObject private var auth = DatadogAuthModel.shared
     /// A team-signed build carries the widget and the app group it reads; an ad-hoc one neither.
     private let hasWidget: Bool = WidgetSnapshot.appGroup != nil
         && FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent("Contents/PlugIns/AINotchWidget.appex").path)
 
+    /// The sections scroll (the window is at most the screen's visible height); the buttons stay
+    /// pinned below them. The column keeps its width, centred, when the window is wider (full
+    /// screen).
     var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    content
+                        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { height in
+                            contentHeight = height
+                            measured(.content, height)
+                        }
+                        .frame(maxWidth: .infinity)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { viewportHeight = $0 }
+                .onAppear { scrollToFocus(proxy, animated: false) }
+                .onChange(of: model.focusRequest) { scrollToFocus(proxy, animated: true) }
+            }
+            .onChange(of: contentHeight > viewportHeight + 1) { _, now in overflows = now }
+            footer
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { measured(.footer, $0) }
+        }
+        .frame(minWidth: SetupWindowController.width, maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The section asked for, scrolled to the top of the window (after this layout pass, so it
+    /// is laid out to scroll to).
+    private func scrollToFocus(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard let focus = model.focus else { return }
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.3)) { proxy.scrollTo(focus, anchor: .top) }
+            } else {
+                proxy.scrollTo(focus, anchor: .top)
+            }
+        }
+    }
+
+    private var content: some View {
         VStack(spacing: 18) {
             VStack(spacing: 8) {
                 Image(nsImage: NSApp.applicationIconImage)
@@ -378,6 +677,11 @@ struct SetupView: View {
 
             buildsSection
 
+            prodSection
+                .id(SetupFocus.prod)
+
+            machineSection
+
             if isDone {
                 HStack(spacing: 10) {
                     NotchGlyph().frame(width: 34, height: 14)
@@ -387,48 +691,62 @@ struct SetupView: View {
                 .padding(.horizontal, 12).padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.accentColor.opacity(0.12)))
             }
-
-            HStack(spacing: 10) {
-                if isDone {
-                    Button("Disconnect…", action: confirmDisconnect)
-                        .controlSize(.large)
-                    if !model.backups.isEmpty { InfoMark(text: "Backups: " + model.backups.joined(separator: ", ")) }
-                    Spacer()
-                    Button("Done", action: close)
-                        .keyboardShortcut(.defaultAction)
-                        .controlSize(.large)
-                        .buttonStyle(.borderedProminent)
-                } else if model.location.problem == nil && model.hookBlocked {
-                    Button("Not Now", action: close)
-                        .controlSize(.large)
-                    // Hooks already pointing at a blocked helper stall every event: offer to take them out.
-                    if model.connected {
-                        Button("Disconnect…", action: confirmDisconnect)
-                            .controlSize(.large)
-                    }
-                    Spacer()
-                    Button(model.probing ? "Checking…" : "Check Again", action: model.setUp)
-                        .keyboardShortcut(.defaultAction)
-                        .controlSize(.large)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.probing)
-                } else {
-                    Button("Not Now", action: close)
-                        .controlSize(.large)
-                    Spacer()
-                    Button("Set Up", action: model.setUp)
-                        .keyboardShortcut(.defaultAction)
-                        .controlSize(.large)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.location.problem != nil || model.probing)
-                }
-            }
         }
         .padding(.horizontal, 24)
         .padding(.top, 22)
-        .padding(.bottom, 20)
-        .frame(width: 440)
+        .padding(.bottom, 2)
+        .frame(maxWidth: SetupWindowController.width)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Set Up / Done and the rest, always in view.
+    private var footer: some View {
+        VStack(spacing: 0) {
+            Divider().opacity(overflows ? 1 : 0)
+            buttons
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+                .padding(.bottom, 20)
+                .frame(maxWidth: SetupWindowController.width)
+        }
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 10) {
+            if isDone {
+                Button("Disconnect…", action: confirmDisconnect)
+                    .controlSize(.large)
+                if !model.backups.isEmpty { InfoMark(text: "Backups: " + model.backups.joined(separator: ", ")) }
+                Spacer()
+                Button("Done", action: close)
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+            } else if model.location.problem == nil && model.hookBlocked {
+                Button("Not Now", action: close)
+                    .controlSize(.large)
+                // Hooks already pointing at a blocked helper stall every event: offer to take them out.
+                if model.connected {
+                    Button("Disconnect…", action: confirmDisconnect)
+                        .controlSize(.large)
+                }
+                Spacer()
+                Button(model.probing ? "Checking…" : "Check Again", action: model.setUp)
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.probing)
+            } else {
+                Button("Not Now", action: close)
+                    .controlSize(.large)
+                Spacer()
+                Button("Set Up", action: model.setUp)
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.location.problem != nil || model.probing)
+            }
+        }
     }
 
     private func blocked(_ problem: AppLocation.Problem) -> some View {
@@ -512,17 +830,67 @@ struct SetupView: View {
                 divider
                 row("Bitbucket Pipelines", icon: "arrow.triangle.branch", tint: Color(red: 0.15, green: 0.52, blue: 1.0), info: bitbucket.help) {
                     if bitbucket.needsSetup {
-                        Button("Check Again") { SetupWindowController.shared.builds?.recheckBitbucket() }.controlSize(.small)
+                        Button("Check Again", action: model.recheckBitbucket).controlSize(.small)
                     }
                     badge(bitbucket.text, symbol: bitbucket.ok ? "checkmark.circle.fill" : "circle.dashed", color: bitbucket.ok ? .green : .secondary)
                         .lineLimit(1).fixedSize()
                 }
                 if bitbucket.needsSetup { bitbucketSteps }
             }
+            if let prs = model.pullRequests {
+                divider
+                pullRequestsRow(prs, stepsShown: model.bitbucket?.needsSetup == true)
+            }
         }
     }
 
     static let bitbucketCommand = BitbucketConfig.saveCommand
+
+    /// Pull requests: the switch, how they read (a missing scope in grey), which news notifies.
+    @ViewBuilder
+    private func pullRequestsRow(_ prs: PRSetupInfo, stepsShown: Bool) -> some View {
+        row("Pull requests", icon: "arrow.triangle.pull", tint: Color(red: 0.15, green: 0.52, blue: 1.0), info: prs.help) {
+            if let error = model.errors["prs"] {
+                badge("Not saved", symbol: "exclamationmark.circle.fill", color: .orange).help(error)
+            } else {
+                badge(prs.text, symbol: prs.ok ? "checkmark.circle.fill" : "circle.dashed", color: prs.ok ? .green : .secondary)
+                    .lineLimit(1).fixedSize()
+            }
+            Toggle("", isOn: Binding(get: { prs.on }, set: { model.setPullRequests($0) }))
+                .toggleStyle(.switch).controlSize(.small).labelsHidden()
+        }
+        if prs.needsToken && !stepsShown {
+            // A quiet hint: Pipelines works; pull requests wait for a token with the scope.
+            HStack(spacing: 8) {
+                Text("PRs need a new token.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button(showsTokenSteps ? "Hide" : "How") { showsTokenSteps.toggle() }.controlSize(.small)
+                Button("Check Again", action: model.recheckBitbucket).controlSize(.small)
+            }
+            .padding(.horizontal, 12).padding(.bottom, 8).padding(.leading, 32)
+            if showsTokenSteps { bitbucketSteps }
+        }
+        if prs.on {
+            divider
+            row("Notify", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
+                info: "Only while the screen is locked, once each: one of your pull requests approved, changes requested on it, new comments (grouped per pull request, at most every 10 minutes), a review asked of you, and a failed build on yours (not when Pipelines already notified that run). Right-click a row in the notch to mute a pull request.") {
+                let notify = model.prNotify
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 10) {
+                        Toggle("Approved", isOn: Binding(get: { notify.approved }, set: { var next = notify; next.approved = $0; model.setPRNotify(next) }))
+                        Toggle("Changes", isOn: Binding(get: { notify.changes }, set: { var next = notify; next.changes = $0; model.setPRNotify(next) }))
+                        Toggle("Comments", isOn: Binding(get: { notify.comments }, set: { var next = notify; next.comments = $0; model.setPRNotify(next) }))
+                    }
+                    HStack(spacing: 10) {
+                        Toggle("Review requests", isOn: Binding(get: { notify.reviews }, set: { var next = notify; next.reviews = $0; model.setPRNotify(next) }))
+                        Toggle("Failed builds", isOn: Binding(get: { notify.builds }, set: { var next = notify; next.builds = $0; model.setPRNotify(next) }))
+                    }
+                }
+                .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+            }
+            .padding(.vertical, 4)
+        }
+    }
 
     static let configHelp = """
     The Pipelines section shows EAS builds and Bitbucket Pipelines runs. It reads \(BuildsConfig.displayPath); with no file it stays hidden. Leave out a part you don't use.
@@ -561,7 +929,7 @@ struct SetupView: View {
     private var bitbucketSteps: some View {
         VStack(alignment: .leading, spacing: 6) {
             Group {
-                Text("1. In Atlassian account settings → Security → API tokens, create an API token with scopes for Bitbucket: read:repository and read:pipeline (up to 365 days).")
+                Text("1. In Atlassian account settings → Security → API tokens, create an API token with scopes for Bitbucket: read:repository, read:pipeline, read:pullrequest and read:user (up to 365 days). A token cannot gain scopes later; a new one replaces the old.")
                 Text("2. Paste this command into Terminal and put in the token's expiry date. Then copy the token and press Return: the command reads it from the clipboard and clears the clipboard. (Typing it at the `-w` prompt cuts it to 128 characters; these tokens are 192.)")
             }
             .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -572,7 +940,7 @@ struct SetupView: View {
                 .padding(.horizontal, 8).padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
             HStack(spacing: 8) {
-                Text("3. Check Again. Nothing else to set.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("3. Check Again (or open the notch). Nothing else to set.").font(.system(size: 11)).foregroundStyle(.secondary)
                 InfoMark(text: "The token stays in your login Keychain (not synced) and is read with /usr/bin/security; it is never written to a file or a log. AI Notch warns 14 days before the date you give. To disconnect: security delete-generic-password -s \(BitbucketConfig.tokenService)")
                 Spacer(minLength: 0)
                 CopyButton(text: Self.bitbucketCommand)
@@ -581,14 +949,236 @@ struct SetupView: View {
         .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
     }
 
+    /// Prod health from Datadog: its state, the steps to connect, and which news notifies.
+    private var prodSection: some View {
+        section("Prod", highlighted: model.focus == .prod) {
+            let prod = model.prod
+            row("Datadog", icon: "waveform.path.ecg", tint: Color(red: 0.39, green: 0.17, blue: 0.64), info: prod.help) {
+                if prod.needsConfig {
+                    Button(showsProdExample ? "Hide" : "How") { showsProdExample.toggle() }.controlSize(.small)
+                }
+                badge(prod.text, symbol: prod.ok ? "checkmark.circle.fill" : prod.text == "Key rejected" ? "exclamationmark.circle.fill" : "circle.dashed",
+                      color: prod.ok ? .green : prod.text == "Key rejected" ? .orange : .secondary)
+                    .lineLimit(1).fixedSize()
+            }
+            if prod.needsConfig && showsProdExample { prodConfigSteps }
+            if !prod.needsConfig {
+                signInRow
+                if showsProdSteps && !isSignedIn { datadogSteps }
+            }
+            divider
+            row("Datadog alerts", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27), info: Self.prodAlertsHelp) {
+                EmptyView()
+            }
+            prodAlertsGroup
+        }
+    }
+
+    static let prodAlertsHelp = "Datadog alerts notify even while you're at your Mac. Serious ones (a monitor alerting, an incident declared) also pop the notch open for about 6 s; Warn and recoveries only notify. Each news notifies once. Right-click the Prod chip to snooze everything for an hour."
+
+    /// The alerts' checkboxes: what notifies, and how.
+    private var prodAlertsGroup: some View {
+        let prefs = model.prodAlerts
+        func box(_ title: String, _ key: WritableKeyPath<ProdAlertPrefs, Bool>) -> some View {
+            Toggle(title, isOn: Binding(get: { prefs[keyPath: key] }, set: { var next = prefs; next[keyPath: key] = $0; model.setProdAlerts(next) }))
+        }
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 12) {
+                box("Monitor alert", \.monitorAlert)
+                box("Warn", \.monitorWarn)
+                box("Recovered", \.recovered)
+            }
+            HStack(spacing: 12) {
+                box("Incident declared", \.incidentDeclared)
+                box("Incident changed", \.incidentChanged)
+            }
+            HStack(spacing: 12) {
+                box("Incident resolved", \.incidentResolved)
+                box("Error rate / latency", \.metrics)
+            }
+            Divider().padding(.vertical, 2)
+            HStack(spacing: 12) {
+                box("Pop open the notch", \.popOpen)
+                box("Notify while unlocked", \.notifyUnlocked)
+            }
+            box("Remind every 2 h if still alerting", \.reminder)
+        }
+        .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+        .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
+    }
+
+    /// builds.json's datadog part: an example to copy.
+    private var prodConfigSteps: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Add this to \(BuildsConfig.displayPath) (inside its outer braces) with your own site, query and numbers.")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(DatadogConfig.example)
+                .font(.system(size: 9.5, design: .monospaced)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
+            HStack(spacing: 8) {
+                Text("monitors is the Manage Monitors search.").font(.system(size: 11)).foregroundStyle(.secondary)
+                InfoMark(text: Self.prodConfigHelp)
+                Spacer(minLength: 0)
+                CopyButton(text: DatadogConfig.example)
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
+    }
+
+    static let prodConfigHelp = """
+    site: your Datadog site (us1, us3, us5, eu, ap1, or its domain).
+
+    monitors: a search as the Manage Monitors page takes it; AND, OR and parentheses work. Muted monitors count as OK.
+
+    incidents: an incident search (default state:active); false leaves incidents out.
+
+    health (optional, up to 3): numbers beside the chip. Each has a label, one query or named queries with a formula, an aggregator (avg by default), a unit (% or ms), a scale (1000 turns seconds into ms), amber (the chip turns amber above it, in the shown unit) and minutes (15 by default).
+
+    Red comes only from a monitor in Alert or an active incident.
+    """
+
+    /// Sign in with Datadog: the button, the browser wait, who is signed in, and the keys as the
+    /// other way in.
+    private var signInRow: some View {
+        let site = BuildsConfig.current?.datadog?.site ?? ""
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                switch auth.status {
+                case .signedOut:
+                    Button("Sign in with Datadog") { auth.signIn() }
+                        .controlSize(.small).buttonStyle(.borderedProminent)
+                    Text(site).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    InfoMark(text: "Opens Datadog's sign-in in your browser. Approve AI Notch there; it asks only to read monitors, incidents and metrics (monitors_read, incident_read, timeseries_query). The tokens stay in your login Keychain (\(DatadogConfig.keyService), not synced) and renew by themselves for about 30 days.")
+                    Spacer(minLength: 0)
+                case .working(let text):
+                    Image(systemName: "hourglass").foregroundStyle(.secondary)
+                    Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button("Cancel") { auth.cancel() }.controlSize(.small)
+                case .waiting:
+                    Image(systemName: "safari").foregroundStyle(.secondary)
+                    Text("Waiting for the browser…").font(.system(size: 12))
+                    InfoMark(text: "Approve AI Notch in the Datadog tab that opened. AI Notch waits 5 minutes for the answer on 127.0.0.1. Open Again shows the same page if you closed it.")
+                    Spacer(minLength: 0)
+                    Button("Open Again") { auth.reopen() }.controlSize(.small)
+                    Button("Cancel") { auth.cancel() }.controlSize(.small)
+                case .signedIn(let org, let tokenSite, let scopes, let expiry):
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Signed in\(org.map { " as \($0)" } ?? "")").font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                        Text("Renews automatically").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    InfoMark(text: "\(tokenSite), scopes \(scopes.joined(separator: ", ")). The access token lasts an hour (this one until \(Self.clock.string(from: Date(timeIntervalSince1970: expiry)))) and renews itself; the sign-in lasts about 30 days, then asks again. Sign Out deletes the tokens from this Mac. \(DatadogOAuth.revokeHint)")
+                    Spacer(minLength: 0)
+                    Button("Sign Out") { auth.signOut() }.controlSize(.small)
+                case .signInAgain(let why):
+                    Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+                    Text("Sign in again").font(.system(size: 12)).foregroundStyle(.secondary)
+                    InfoMark(text: why)
+                    Spacer(minLength: 0)
+                    Button("Sign In Again") { auth.signIn() }.controlSize(.small)
+                }
+            }
+            if let note = auth.note {
+                Text(note).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if !isSignedIn {
+                Button {
+                    showsProdSteps.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showsProdSteps ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .semibold))
+                        Text("Or use service-account keys")
+                    }
+                    .font(.system(size: 11)).foregroundStyle(.secondary).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
+    }
+
+    /// Signed in: no keys needed.
+    private var isSignedIn: Bool {
+        if case .signedIn = auth.status { return true }
+        return false
+    }
+
+    private static let clock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    /// How to connect Datadog: an admin makes a service account and its keys; you store them.
+    private var datadogSteps: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Group {
+                Text("A Datadog admin:")
+                ForEach(Array(DatadogConfig.adminSteps.enumerated()), id: \.offset) { index, step in
+                    Text("\(index + 1). \(step)")
+                }
+                Text("Then copy each key and run its command; it reads the key from the clipboard and clears it.")
+            }
+            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ForEach([DatadogConfig.apiKeyAccount, DatadogConfig.appKeyAccount], id: \.self) { account in
+                HStack(alignment: .top, spacing: 8) {
+                    Text(DatadogConfig.saveCommand(account))
+                        .font(.system(size: 10.5, design: .monospaced)).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
+                    CopyButton(text: DatadogConfig.saveCommand(account))
+                }
+            }
+            HStack(spacing: 8) {
+                Button("Check Again") { SetupWindowController.shared.prod?.recheck() }.controlSize(.small)
+                InfoMark(text: "Both keys stay in your login Keychain (not synced) and are read with /usr/bin/security; they go only into the request headers, never to a file or a log. The application key needs only monitors_read, incident_read and timeseries_query. Typing a key at the interactive -w prompt keeps only its first 128 characters, so the commands read the clipboard. To disconnect: security delete-generic-password -s \(DatadogConfig.keyService) -a \(DatadogConfig.apiKeyAccount), and again with -a \(DatadogConfig.appKeyAccount).")
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
+    }
+
+    /// The machine guard: on or off, which news notifies, and the optional settings.
+    private var machineSection: some View {
+        section("Machine") {
+            row("Dev machine guard", icon: "memorychip", tint: Color(red: 0.16, green: 0.55, blue: 0.45), info: Self.machineHelp) {
+                Toggle("", isOn: Binding(get: { model.machineOn }, set: { model.setMachineOn($0) }))
+                    .toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
+            row("Notify", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
+                info: "Only while the screen is locked: memory critical (under 2 GB available, or the kernel's critical pressure) for 30 seconds, naming the biggest dev process. Its one action opens the Machine panel; nothing is closed from a notification. It comes again only after 10 minutes back at normal.") {
+                Toggle("Memory critical", isOn: Binding(get: { model.machineNotify }, set: { model.setMachineNotify($0) }))
+                    .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+                    .disabled(!model.machineOn)
+            }
+        }
+    }
+
+    static let machineHelp = """
+    The footer's RAM chip and the Machine panel: free memory, and the dev processes holding it (Metro, Jest, make verify, turbo, the Android emulator, the iOS Simulator, Gradle and Kotlin daemons, adb, watchman), each with its footprint and whether it is idle. Close sends SIGTERM, and Force quit (a second click) SIGKILL only if it is still running 5 s later. Close idle never includes the emulator or the Simulator. Editors, terminals, shells, Claude Code, Codex and Cursor's agent are never touched.
+
+    Optional, in \(BuildsConfig.displayPath):
+    \(MachineConfig.example)
+    warnBelowMB: amber under this much free memory. idleMinutes: quiet this long counts as idle. exclude: kinds never shown (metro, jest, verify, turbo, emulator, simulator, simulatorApp, gradle, kotlin, adb, watchman).
+    """
+
     private var divider: some View { Divider().padding(.leading, 44) }
 
-    private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+    private func section<Content: View>(_ title: String, highlighted: Bool = false, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).padding(.leading, 4)
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(highlighted ? Color.accentColor : .secondary).padding(.leading, 4)
             VStack(spacing: 0) { content() }
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.04)))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(highlighted ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: highlighted ? 2 : 1))
+                .animation(.easeOut(duration: 0.3), value: highlighted)
         }
     }
 

@@ -4,7 +4,8 @@ import UserNotifications
 
 /// macOS notifications for the moments that matter when you are away from the screen: a session
 /// waiting on you, and a long turn finishing. They show on the lock screen as your notification
-/// settings allow; "Open" (or a click) unlocks to the session's window.
+/// settings allow; "Open" (or a click) unlocks to the session's window. Datadog news is the one
+/// exception to "only while locked": it notifies while unlocked too (Setup can turn that off).
 @MainActor
 final class Notifier: NSObject {
     static let shared = Notifier()
@@ -13,6 +14,10 @@ final class Notifier: NSObject {
     /// A build notification's action: open the run, or copy its failure details.
     enum BuildAction { case open, copy }
     var onBuild: ((String, BuildAction) -> Void)?
+    /// A machine guard notification's Open: the notch on its Machine panel.
+    var onMachine: (() -> Void)?
+    /// A Datadog notification's Snooze 1 h.
+    var onProdSnooze: (() -> Void)?
 
     private let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/notch/notch.log")
 
@@ -34,6 +39,11 @@ final class Notifier: NSObject {
             UNNotificationCategory(identifier: "session", actions: [open], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: "build", actions: [open], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: "build-failed", actions: [copy, open], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "alert", actions: [open], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "pullrequest", actions: [open], intentIdentifiers: [], options: []),
+            // Datadog: Open, or silence its notifications and banners for an hour.
+            UNNotificationCategory(identifier: "prod", actions: [open, UNNotificationAction(identifier: "snooze", title: "Snooze 1 h", options: [])],
+                                   intentIdentifiers: [], options: []),
         ])
         if asksAtLaunch { requestPermission { _ in } }
     }
@@ -99,6 +109,87 @@ final class Notifier: NSObject {
         }
     }
 
+    /// One poll's Datadog news, grouped (see ProdAlertPlanner): posted while the screen is
+    /// unlocked too, which only Prod does. "Open" (or a click) opens the monitor, incident or
+    /// filtered list; "Snooze 1 h" silences Prod for an hour. Each notification stays in the list
+    /// (a new identifier each time). The log gets the kinds and ids, never a title or name.
+    func postProd(_ notice: ProdNotice) {
+        guard isAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = notice.title
+        let flat = notice.subtitle.split(whereSeparator: \.isNewline).joined(separator: " ")
+        content.subtitle = flat.count > 80 ? String(flat.prefix(79)) + "…" : flat
+        content.body = notice.body
+        content.categoryIdentifier = "prod"
+        content.threadIdentifier = "prod"
+        var info: [String: String] = ["prod": "1"]
+        if let url = notice.url { info["url"] = url.absoluteString }
+        content.userInfo = info
+        content.sound = .default
+        prodCount += 1
+        let request = UNNotificationRequest(identifier: "prod-\(Int(Date().timeIntervalSince1970))-\(prodCount)", content: content, trigger: nil)
+        let what = "\(notice.kinds) [\(notice.keys.joined(separator: ","))]"
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in self.note("posted a prod notification: \(what)\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
+        }
+    }
+
+    private var prodCount = 0
+
+    /// The machine guard's memory-critical news: only while the screen is locked, like the other
+    /// status news. Its one action is Open (the notch's Machine panel); nothing is ever closed
+    /// from a notification.
+    func postMachine(title: String, subtitle: String, body: String) {
+        guard isAvailable, Self.mayPostAlerts else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = subtitle
+        content.body = body
+        content.categoryIdentifier = "alert"
+        content.userInfo = ["machine": "1"]
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "machine-critical", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in self.note("posted “\(title)”\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
+        }
+    }
+
+    /// News on a pull request (approved, changes requested, new comments, a review request, a
+    /// failed build): only while the screen is locked, like the other status news. One per pull
+    /// request and kind, a newer one replacing the older. "Open" (or a click) opens it on the web.
+    /// The log gets the kind only, never the title.
+    func postPullRequest(_ event: PREvent) {
+        guard isAvailable, Self.mayPostAlerts else { return }
+        let content = UNMutableNotificationContent()
+        switch event.kind {
+        case .approved: content.title = "Pull request approved"
+        case .changesRequested: content.title = "Changes requested"
+        case .newComments: content.title = "New comments"
+        case .reviewRequested: content.title = "Review requested"
+        case .buildFailed: content.title = "Pull request build failed"
+        }
+        let flat = "\(event.pr.repo) #\(event.pr.id) · " + event.title.split(whereSeparator: \.isNewline).joined(separator: " ")
+        content.subtitle = flat.count > 80 ? String(flat.prefix(79)) + "…" : flat
+        if case .buildFailed(let pipeline?) = event.kind {
+            content.body = "Pipeline #\(pipeline.number) failed"
+        } else {
+            content.body = event.text
+        }
+        content.categoryIdentifier = "pullrequest"
+        if let url = event.url { content.userInfo = ["url": url.absoluteString] }
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "pr-\(event.pr.key)-\(event.tag)", content: content, trigger: nil)
+        let tag = event.tag
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in self.note("posted a pull-request notification (\(tag))\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
+        }
+    }
+
+    /// Status news notifies only while the screen is locked; a preview may say otherwise.
+    static var mayPostAlerts: Bool {
+        shared.isScreenLocked || (CommandLine.arguments.contains("--preview") && CommandLine.arguments.contains("--notify-unlocked"))
+    }
+
     private func note(_ line: String) {
         let stamp = ISO8601DateFormatter().string(from: Date())
         guard let data = "\(stamp) \(line)\n".data(using: .utf8) else { return }
@@ -123,8 +214,23 @@ extension Notifier: UNUserNotificationCenterDelegate {
         let info = response.notification.request.content.userInfo
         let session = info["session"] as? String
         let build = info["build"] as? String
+        let url = (info["url"] as? String).flatMap(URL.init(string:))
+        let machine = info["machine"] != nil
+        let prod = info["prod"] != nil
         let action = response.actionIdentifier
         Task { @MainActor in
+            if prod {
+                // Snooze opens nothing; a dismissal neither.
+                if action == "snooze" {
+                    Notifier.shared.onProdSnooze?()
+                } else if action != UNNotificationDismissActionIdentifier, let url {
+                    NSWorkspace.shared.open(url)
+                }
+                completionHandler()
+                return
+            }
+            if let url { NSWorkspace.shared.open(url) }
+            if machine, action != UNNotificationDismissActionIdentifier { Notifier.shared.onMachine?() }
             if let session { Notifier.shared.onOpen?(session) }
             if let build { Notifier.shared.onBuild?(build, action == "copy" ? .copy : .open) }
             completionHandler()

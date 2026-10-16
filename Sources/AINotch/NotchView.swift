@@ -111,6 +111,9 @@ struct NotchShape: Shape {
 struct RootView: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var builds: BuildStore
+    @ObservedObject var prod: ProdStore
+    @ObservedObject var machine: MachineStore
+    @ObservedObject var reviews: ReviewStore
     @ObservedObject var controller: NotchController
     /// The black edge left around the body's card.
     static let bezel: CGFloat = 5
@@ -119,18 +122,29 @@ struct RootView: View {
         let g = controller.geometry
         let wings = controller.showsWings
         let expanded = controller.isExpanded
+        // Two columns when the agents and the right side (pipeline runs, or pull requests that
+        // need something) both have rows to show and the screen has room; else one, so neither
+        // side stands empty.
+        let wide = g.canGoWide && !store.sessions.isEmpty && ((builds.showsSection && !builds.rows.isEmpty) || reviews.showsBlock)
+        let width = wide ? g.wideWidth : g.expandedWidth
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 if wings { LeftWing(store: store, builds: builds).frame(width: g.wing) }
                 Color.clear.frame(width: g.notchWidth)
-                if wings { RightWing(store: store, builds: builds).frame(width: g.wing) }
+                if wings { RightWing(store: store, builds: builds, prod: prod, machine: machine, reviews: reviews).frame(width: g.wing) }
             }
             .frame(height: g.notchHeight)
+            // Something in prod is open (red), else memory is low (amber): a still dot in the
+            // strip's corner (on a wing, beside the hardware notch, where it shows).
+            .overlay(alignment: .topTrailing) {
+                CornerDot(color: !wings ? nil : prod.hasOpenAlert ? Strip.failed : machine.showsDot ? Strip.waiting : nil)
+            }
 
             if expanded {
                 // The body is a card set into the black shape: on light it hangs under the strip
                 // inside a thin black bezel, on dark it is the black itself.
-                SessionList(store: store, approvals: store.approvals, builds: builds, controller: controller)
+                SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, reviews: reviews, controller: controller,
+                            isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, maxHeight: g.maxHeight - Self.bezel)
                     .background(
                         UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
                                                bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
@@ -138,7 +152,7 @@ struct RootView: View {
                     )
                     .padding(.horizontal, Self.bezel)
                     .padding(.bottom, Self.bezel)
-                    .frame(width: g.expandedWidth)
+                    .frame(width: width)
                     .fixedSize(horizontal: false, vertical: true)
                     .transition(.asymmetric(
                         insertion: .opacity.animation(.easeOut(duration: 0.14).delay(0.03)),
@@ -146,7 +160,7 @@ struct RootView: View {
                     ))
             }
         }
-        .frame(width: expanded ? g.expandedWidth : g.collapsedWidth(showsWings: wings))
+        .frame(width: expanded ? width : g.collapsedWidth(showsWings: wings))
         // Black in every theme: it is the hardware notch, grown.
         .background(NotchShape(radius: expanded ? 22 : 11).fill(Color.black))
         .overlay(WaitingGlow(isOn: !store.waiting.isEmpty && !expanded, radius: 11))
@@ -158,6 +172,23 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: expanded)
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: wings)
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: wide)
+    }
+}
+
+/// Sizes its one subview to its natural height up to `cap`, then gives it exactly `cap`: a
+/// ScrollView inside hugs short content and scrolls long content, with no measuring pass.
+private struct CappedHeight: Layout {
+    var cap: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let natural = child.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+        return CGSize(width: proposal.width ?? natural.width, height: min(natural.height, cap))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
     }
 }
 
@@ -207,24 +238,45 @@ private struct LeftWing: View {
 private struct RightWing: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var builds: BuildStore
+    @ObservedObject var prod: ProdStore
+    @ObservedObject var machine: MachineStore
+    @ObservedObject var reviews: ReviewStore
 
     var body: some View {
+        // One slot, in WingSlot's order.
+        let slot = WingSlot.pick(waiting: store.waiting.count, memoryCritical: machine.showsSlot, justDone: store.now - store.lastDoneAt < 4,
+                                 prodAlert: prod.hasUnseenAlert, buildFailure: builds.hasUnseenFailure,
+                                 pullRequestNews: reviews.unseenCount, subagents: store.runningAgents, building: builds.activeCount)
         HStack(spacing: 4) {
-            if !store.waiting.isEmpty {
+            switch slot {
+            case .waiting(let count):
                 LoopLayer(kind: .dot, color: Strip.waitingNS)
                     .frame(width: 7, height: 7)
-                Text("\(store.waiting.count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.waiting)
-            } else if store.now - store.lastDoneAt < 4 {
+                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.waiting)
+            case .done:
                 Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.done)
-            } else if builds.hasUnseenFailure {
+            case .prodAlert:
+                // A monitor went to Alert, or an incident was declared, since the notch was last looked at.
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
+            case .buildFailure:
                 // A build or run failed since the notch was last opened.
                 Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
-            } else if store.runningAgents > 0 {
+            case .subagents(let count):
                 Image(systemName: "person.2.fill").font(.system(size: 9)).foregroundStyle(Strip.ink2)
-                Text("\(store.runningAgents)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
-            } else if builds.activeCount > 0 {
+                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
+            case .building(let count):
                 Image(systemName: "hammer.fill").font(.system(size: 9)).foregroundStyle(Strip.ink2)
-                Text("\(builds.activeCount)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
+                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
+            case .memoryCritical:
+                // Memory critical: static, no animation.
+                Image(systemName: "memorychip.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.waiting)
+            case .pullRequestNews(let count):
+                // News on pull requests (a review request, an approval, changes, comments, a failed
+                // build) since the notch was last looked at.
+                Image(systemName: "arrow.triangle.pull").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.bitbucketHue)
+                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink)
+            case .none:
+                EmptyView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -235,88 +287,88 @@ private struct SessionList: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var approvals: ApprovalCenter
     @ObservedObject var builds: BuildStore
+    @ObservedObject var prod: ProdStore
+    @ObservedObject var machine: MachineStore
+    @ObservedObject var reviews: ReviewStore
     var controller: NotchController
+    /// Pinned open; passed by value so the header redraws when it changes.
+    var isPinned: Bool
+    /// Which of the full-width panels is open (Usage, Code or Machine, from the controller);
+    /// by value for the same reason.
+    var openPanel: String?
+    /// Two columns, agents left and pipelines right, or one with the pipelines under the agents.
+    var isWide: Bool
+    /// The tallest the body may be; past it the rows scroll.
+    var maxHeight: CGFloat
     /// Each approval card's height, which its row keeps free so the card sits inside it.
     @State private var cardHeights: [String: CGFloat] = [:]
+    /// One column: six rows between agents and pipelines. Two columns: six each.
     private let maxRows = 6
     /// The session whose details are open; one at a time keeps the panel short.
     @State private var detailId: String?
-    /// Which of the header's panels is open: Usage or Code, one at a time.
-    @State private var openPanel: String?
+    /// The header's and the footer's heights, for what is left to the rows.
+    @State private var headerHeight: CGFloat = 22
+    @State private var footerHeight: CGFloat = 13
+    private static let padTop: CGFloat = 8, padBottom: CGFloat = 9, spacing: CGFloat = 8
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Agents").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
-                Spacer()
-                Text(summary).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1)
-                LimitsChip(limits: store.claudeLimits, now: store.now)
-                panelButton("Usage", icon: "chart.bar.fill")
-                panelButton("Code", icon: "chevron.left.forwardslash.chevron.right")
-            }
-            if openPanel == "Usage" { UsagePanel(usage: store.usage, now: store.now, claudeLimits: store.claudeLimits) }
-            if openPanel == "Code" { CodePanel(lines: store.usage.lines, git: store.gitLines, now: store.now) }
-            if store.sessions.isEmpty {
-                Text("No open sessions")
-                    .font(.system(size: 12)).foregroundStyle(Palette.ink2)
-                    .padding(.vertical, 6)
-            }
-            // Six rows between agents and pipelines: agents first, pipelines at least two.
-            let pipelineRows = !builds.showsSection ? 0 : max(1, min(builds.rows.count, max(2, maxRows - store.sessions.count)))
-            let sessionRows = max(1, (detailId == nil ? maxRows : 3) - pipelineRows)
-            ForEach(store.sessions.prefix(sessionRows), id: \.id) { session in
-                let isOpen = detailId == session.id
-                let title = store.title(of: session)
-                // Two sibling buttons: the row jumps to the session, the corner toggles its details.
-                let asks = approvals.pending(for: session.id)
-                let space = asks.isEmpty ? 0 : (cardHeights[session.id] ?? 0) + 8
-                // Sibling buttons: the row jumps to the session, the card answers its prompt, the
-                // corner toggles its details.
-                ZStack(alignment: .bottomTrailing) {
-                    Button {
-                        controller.collapse()
-                        Jump.to(session)
-                    } label: {
-                        SessionRow(session: session, title: title, now: store.now, agentActivity: store.agentActivity, agentModels: store.agentModels,
-                                   usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
-                                   reserved: space, live: store.usage.live[session.id])
-                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        VStack(alignment: .leading, spacing: Self.spacing) {
+            Group {
+                if isWide {
+                    HStack(alignment: .center, spacing: NotchGeometry.gutter) {
+                        agentsHeader.frame(maxWidth: .infinity)
+                        rightHeader.frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(RowButtonStyle())
-
-                    VStack(alignment: .trailing, spacing: 8) {
-                        if let first = asks.first {
-                            ApprovalCard(center: approvals, item: first, chat: title, more: asks.count - 1)
-                                .id(first.id)
-                                .padding(.leading, 38)
-                                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { height in
-                                    if cardHeights[session.id] != height { cardHeights[session.id] = height }
-                                }
-                        }
-                        Button {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { detailId = isOpen ? nil : session.id }
-                        } label: {
-                            HStack(spacing: 3) {
-                                Text(isOpen ? "Less" : "Details").font(.system(size: 10, weight: .medium))
-                                Image(systemName: isOpen ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
-                            }
-                            .foregroundStyle(Palette.ink2)
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(Capsule().fill(Palette.chip))
-                            .contentShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(8)
+                } else {
+                    agentsHeader
                 }
             }
-            if store.sessions.count > sessionRows {
-                Text("+\(store.sessions.count - sessionRows) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { if headerHeight != $0 { headerHeight = $0 } }
+            // Above the rows, so the PRs chip's hover card is drawn over them.
+            .zIndex(1)
+
+            // The rows, at their natural height up to what the cap leaves, then scrolling: in two
+            // columns each on its own, under an open Usage or Code panel all together.
+            let cap = max(120, maxHeight - Self.padTop - Self.padBottom - 2 * Self.spacing - headerHeight - footerHeight)
+            if isWide && openPanel == nil {
+                HStack(alignment: .top, spacing: NotchGeometry.gutter) {
+                    scrolling(cap) { agentsColumn }
+                    scrolling(cap) { pipelinesColumn }
+                }
+            } else {
+                scrolling(cap) {
+                    VStack(alignment: .leading, spacing: Self.spacing) {
+                        if openPanel == "Usage" { UsagePanel(usage: store.usage, now: store.now, claudeLimits: store.claudeLimits) }
+                        if openPanel == "Code" { CodePanel(lines: store.usage.lines, git: store.gitLines, now: store.now) }
+                        if openPanel == NotchController.machinePanel, machine.isOn { MachinePanel(machine: machine, feed: machine.feed) }
+                        if openPanel == NotchController.pullRequestsPanel, reviews.isOn {
+                            PullRequestsPanel(reviews: reviews, controller: controller, now: store.now, isWide: isWide)
+                        }
+                        if isWide {
+                            HStack(alignment: .top, spacing: NotchGeometry.gutter) {
+                                agentsColumn
+                                pipelinesColumn
+                            }
+                        } else {
+                            // Six rows between agents and pipelines: agents first, pipelines at least two.
+                            let pipelineRows = !builds.showsSection ? 0 : max(1, min(builds.rows.count, max(2, maxRows - store.sessions.count)))
+                            sessionRows(limit: max(1, (detailId == nil ? maxRows : 3) - pipelineRows))
+                            if builds.showsSection {
+                                PipelinesSection(builds: builds, now: store.now, limit: pipelineRows, controller: controller, part: .all)
+                            }
+                            // Pull requests in one line; it opens the PRs panel.
+                            if reviews.isOn, !reviews.mine.isEmpty || !reviews.toReview.isEmpty {
+                                PullRequestsSummaryLine(reviews: reviews, controller: controller, isOpen: openPanel == NotchController.pullRequestsPanel)
+                                    .padding(.top, builds.showsSection ? 0 : 4)
+                            }
+                        }
+                    }
+                }
             }
-            if builds.showsSection {
-                PipelinesSection(builds: builds, now: store.now, limit: pipelineRows, controller: controller)
-            }
+
             HStack(spacing: 12) {
+                // The status chips on the left (Prod, RAM), Setup and Quit on the right.
+                StatusStrip(prod: prod, machine: machine, controller: controller)
                 Spacer()
                 Button("Setup") {
                     controller.collapse()
@@ -326,17 +378,128 @@ private struct SessionList: View {
                 Button("Quit") { NSApp.terminate(nil) }
                     .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Palette.ink3)
             }
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { if footerHeight != $0 { footerHeight = $0 } }
         }
         // With the bezel outside, the same 14 from the shape's edge as before.
         .padding(.horizontal, 14 - RootView.bezel)
-        .padding(.top, 8)
-        .padding(.bottom, 9)
+        .padding(.top, Self.padTop)
+        .padding(.bottom, Self.padBottom)
+    }
+
+    /// Content at its natural height up to `cap`, scrolling past it.
+    private func scrolling(_ cap: CGFloat, @ViewBuilder _ content: () -> some View) -> some View {
+        CappedHeight(cap: cap) {
+            ScrollView(.vertical) { content() }
+        }
+    }
+
+    /// Two columns: the agents on the left, six rows (three with one's details open).
+    private var agentsColumn: some View {
+        VStack(alignment: .leading, spacing: Self.spacing) { sessionRows(limit: detailId == nil ? maxRows : 3) }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// Two columns: the pipelines on the right, six rows of their own, then the pull requests
+    /// that need something.
+    private var pipelinesColumn: some View {
+        VStack(alignment: .leading, spacing: Self.spacing) {
+            if builds.showsSection {
+                PipelinesSection(builds: builds, now: store.now, limit: maxRows, controller: controller, part: .rows)
+            }
+            // With the PRs panel open above, its rows are there already.
+            if reviews.showsBlock, openPanel != NotchController.pullRequestsPanel {
+                PullRequestsBlock(reviews: reviews, controller: controller, limit: 4, header: builds.showsSection)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// Two columns: the right one's header. Pipelines' (with the PRs chip when pull requests are
+    /// on), else the pull requests' own.
+    @ViewBuilder private var rightHeader: some View {
+        if builds.showsSection {
+            HStack(spacing: 6) {
+                PipelinesSection(builds: builds, now: store.now, limit: maxRows, controller: controller, part: .header)
+                if reviews.isOn { PRsChip(reviews: reviews, controller: controller, hover: controller.hover) }
+            }
+        } else {
+            PullRequestsHeader(reviews: reviews, controller: controller)
+        }
+    }
+
+    private var agentsHeader: some View {
+        HStack(spacing: 8) {
+            Text("Agents").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
+            Spacer()
+            Text(summary).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1)
+            LimitsChip(limits: store.claudeLimits, now: store.now)
+            panelButton("Usage", icon: "chart.bar.fill")
+            panelButton("Code", icon: "chevron.left.forwardslash.chevron.right")
+            pinButton
+        }
+    }
+
+    /// The sessions, at most `limit` of them, and how many more there are.
+    @ViewBuilder private func sessionRows(limit: Int) -> some View {
+        if store.sessions.isEmpty {
+            Text("No open sessions")
+                .font(.system(size: 12)).foregroundStyle(Palette.ink2)
+                .padding(.vertical, 6)
+        }
+        ForEach(store.sessions.prefix(limit), id: \.id) { session in
+            let isOpen = detailId == session.id
+            let title = store.title(of: session)
+            let asks = approvals.pending(for: session.id)
+            let space = asks.isEmpty ? 0 : (cardHeights[session.id] ?? 0) + 8
+            // Sibling buttons: the row jumps to the session, the card answers its prompt, the
+            // corner toggles its details.
+            ZStack(alignment: .bottomTrailing) {
+                Button {
+                    controller.collapse()
+                    Jump.to(session)
+                } label: {
+                    SessionRow(session: session, title: title, now: store.now, agentActivity: store.agentActivity, agentModels: store.agentModels,
+                               usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
+                               reserved: space, live: store.usage.live[session.id])
+                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(RowButtonStyle())
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    if let first = asks.first {
+                        ApprovalCard(center: approvals, item: first, chat: title, more: asks.count - 1)
+                            .id(first.id)
+                            .padding(.leading, 38)
+                            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { height in
+                                if cardHeights[session.id] != height { cardHeights[session.id] = height }
+                            }
+                    }
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { detailId = isOpen ? nil : session.id }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(isOpen ? "Less" : "Details").font(.system(size: 10, weight: .medium))
+                            Image(systemName: isOpen ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
+                        }
+                        .foregroundStyle(Palette.ink2)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(Palette.chip))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(8)
+            }
+        }
+        if store.sessions.count > limit {
+            Text("+\(store.sessions.count - limit) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+        }
     }
 
     private func panelButton(_ name: String, icon: String) -> some View {
         let isOpen = openPanel == name
         return Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { openPanel = isOpen ? nil : name }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { controller.openPanel = isOpen ? nil : name }
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 9, weight: .semibold))
@@ -348,6 +511,26 @@ private struct SessionList: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Keeps the notch open: the header's pin, filled while pinned.
+    private var pinButton: some View {
+        Button {
+            controller.togglePin()
+        } label: {
+            Image(systemName: isPinned ? "pin.fill" : "pin")
+                .font(.system(size: 9, weight: .semibold))
+                .rotationEffect(.degrees(45))
+                .foregroundStyle(isPinned ? Palette.onDone : Palette.ink2)
+                .frame(width: 12, height: 12)
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(Capsule().fill(isPinned ? Palette.done : Palette.chip))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(isPinned
+              ? "Pinned open: it stays open when the pointer leaves or you click a row. Click to unpin. Over a full-screen app it opens only on hover."
+              : "Pin open: keep the notch open when the pointer leaves or you click a row. Clicks outside it still reach the app below.")
     }
 
     private var summary: String {
@@ -472,8 +655,10 @@ private struct CodePanel: View {
     var git: [String: [String: LineTally]]
     var now: Double
     @State private var hoveredDay: String?
+    @Environment(\.hoverHub) private var hub
 
     private let weeks = 26
+    private static let grid = "code-grid"
     private let cell: CGFloat = 11
     private let gap: CGFloat = 3
 
@@ -514,11 +699,24 @@ private struct CodePanel: View {
                                     .fill(shade(perDay[index].added, most: most))
                                     .overlay(RoundedRectangle(cornerRadius: 2.5).stroke(Palette.ink.opacity(day == hoveredDay ? 0.9 : day == days.last ? 0.45 : 0), lineWidth: 1))
                                     .frame(width: cell, height: cell)
-                                    .onHover { inside in if inside { hoveredDay = day } }
+                                    .onHover { inside in if inside, hub == nil { hoveredDay = day } }
                             } else {
                                 Color.clear.frame(width: cell, height: cell)
                             }
                         }
+                    }
+                }
+            }
+            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { frame in
+                hub?.grids[Self.grid] = (frame, cell + gap)
+            }
+            .onDisappear { hub?.grids[Self.grid] = nil }
+            .background {
+                // In the notch the hub says which cell the pointer is over (onHover never fires there).
+                if let hub {
+                    GridHoverReader(hub: hub, grid: Self.grid) { cell in
+                        let index = cell.column * 7 + cell.row
+                        if cell.row < 7, index < days.count, hoveredDay != days[index] { hoveredDay = days[index] }
                     }
                 }
             }
@@ -898,19 +1096,44 @@ struct RowButtonStyle: ButtonStyle {
     }
 }
 
+/// In the notch the hover comes from the controller's pointer tick (HoverHub): onHover never fires
+/// in its panel, which is never key. Elsewhere, onHover.
 struct RowBody<Label: View>: View {
     var label: Label
     var isPressed: Bool
+    @Environment(\.hoverHub) private var hub
+    @State private var key = "row-" + UUID().uuidString
     @State private var isHovered = false
 
     var body: some View {
+        if let hub {
+            HoverZone(hub: hub, key: key) { styled($0) }
+        } else {
+            styled(isHovered).onHover { isHovered = $0 }
+        }
+    }
+
+    private func styled(_ hovered: Bool) -> some View {
         label
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.cardHover).opacity(isHovered && !isPressed ? 1 : 0).allowsHitTesting(false))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.cardHover).opacity(hovered && !isPressed ? 1 : 0).allowsHitTesting(false))
             .brightness(isPressed ? -0.04 : 0)
             .scaleEffect(isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.12), value: isPressed)
-            .animation(.easeOut(duration: 0.12), value: isHovered)
-            .onHover { isHovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovered)
+    }
+}
+
+/// Calls `onCell` when the pointer moves onto another cell of `grid`.
+private struct GridHoverReader: View {
+    @ObservedObject var hub: HoverHub
+    let grid: String
+    var onCell: (HoverHub.Cell) -> Void
+
+    var body: some View {
+        Color.clear
+            .onChange(of: hub.cell) { _, cell in
+                if let cell, cell.grid == grid { onCell(cell) }
+            }
     }
 }
 
@@ -1042,6 +1265,8 @@ private struct SessionRow: View {
     var reserved: CGFloat = 0
     /// Its recent spend and prompt cache.
     var live: LiveSpend?
+    /// The Details button's width and gap, kept free at the end of the row's last line.
+    static let cornerRoom: CGFloat = 70
 
     var body: some View {
         let app = AppInfo.of(session.appBundleId)
@@ -1075,16 +1300,21 @@ private struct SessionRow: View {
                     }
                     pace
                 }
-                activity
+                // With nothing under it, the last line leaves room on its right for the Details
+                // button instead of a line of its own.
+                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty
+                let mcpLine = !isDetailed && !session.mcp.isEmpty
+                activity.padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
                 if !session.agents.isEmpty { agents }
                 if isDetailed {
                     details
-                } else if !session.mcp.isEmpty {
+                } else if mcpLine {
                     Text("MCP  " + top(session.mcp, 3))
                         .font(.system(size: 10)).foregroundStyle(Palette.ink3).lineLimit(1)
+                        .padding(.trailing, inline ? Self.cornerRoom : 0)
                 }
                 // Room for the Details button in the corner, and the approval card above it.
-                Color.clear.frame(height: 14 + reserved)
+                if !inline { Color.clear.frame(height: 14 + reserved) }
             }
         }
         .rowCard(tint: session.phase == .waiting ? Palette.waitingTint : Palette.card,

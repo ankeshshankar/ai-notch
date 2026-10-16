@@ -16,6 +16,33 @@ single-choice questions from the notch.
   repository's lines beside what was committed to git there.
 - Optionally, a Pipelines section shows your EAS builds and Bitbucket Pipelines runs as they
   queue, run, wait and finish (see [Builds and pipelines](#builds-and-pipelines)).
+- With Bitbucket set up, your open pull requests and the ones waiting for your review: the ones
+  that need you inline, all of them in a **PRs** panel (see [Pull requests](#pull-requests)).
+- The pin in the header keeps the notch open (see [Pinned open](#pinned-open)).
+- Optionally, a **Prod** chip in the footer shows your Datadog monitors and incidents (see
+  [Prod health](#prod-health-datadog)).
+- A **RAM** chip in the footer shows free memory and the dev processes holding it (Metro, Jest,
+  `make verify`, the emulator, the Simulator, Gradle), and closes idle ones on request (see
+  [Machine guard](#machine-guard)).
+
+### Layout
+
+With agents and pipeline runs (or pull requests that need you) to show, the notch opens wide:
+agents on the left, pipelines and pull requests on the right, each with up to six rows. With only one of them, or on a screen narrower than about
+900 points, it is one column 470 points wide, the pipelines under the agents. It grows to at most
+520 points below the notch (half the screen on a shorter one); past that, a column scrolls by
+itself. An open Usage, Code, Machine or PRs panel spans the full width, with the rows under it.
+
+### Pinned open
+
+Click the pin at the right of the header (next to Usage and Code) to keep the notch open: the
+pointer leaving and a click on a row (jumping to a session, opening a run) no longer close it,
+and the filled pin shows it is pinned. Click it again to unpin. The choice is remembered across
+restarts. Pinned, it still lets every click outside its shape through to the app below and never
+takes your typing, and it stays on the screen with the notch. While a full-screen app fills that
+screen, it opens only on hover, as unpinned; it opens again when you leave full screen. With the
+pointer away, a pipeline failure that arrives counts as unseen (its ✕ shows in the wing) until you
+move over the notch, as when it is closed.
 
 Requires macOS 15 (Sequoia) or later and is made for MacBooks with a notch.
 
@@ -78,7 +105,9 @@ If the helper of a copy that is already connected stops running, the window open
 the same command, and **Disconnect…** to take the hooks out meanwhile.
 
 Reopen the window from the panel's footer (**Setup**) or by opening the app again. Only one copy
-runs: a second launch hands over to the running one and quits.
+runs: a second launch hands over to the running one and quits. It opens centred on the screen
+with the notch, as tall as its sections up to that screen's height; past that they scroll, with
+the buttons kept in view. It can be resized, zoomed and made full screen (Control-Command-F).
 
 ## How it works
 
@@ -126,7 +155,10 @@ the editor. Plan approval cannot be answered by a hook, so the notch only shows 
 ### Notifications
 
 Only while the screen is locked: a session that needs you, or a turn longer than a minute
-finishing, sends a macOS notification with the chat's title, the project and what happened.
+finishing, sends a macOS notification with the chat's title, the project and what happened. So do
+your pipelines' finishes, news on your pull requests (see [Pull requests](#pull-requests)) and
+memory critical for 30 seconds (see [Machine guard](#machine-guard)). Prod's Datadog news is the
+exception: it notifies while the screen is unlocked too (see [Prod health](#prod-health-datadog)).
 **Open** unlocks to the session. What the lock screen shows follows System Settings →
 Notifications → Show previews.
 
@@ -168,7 +200,7 @@ finished tool rather than the one in flight, subagents once they stop, and no ap
 
 ### Builds and pipelines
 
-Under the agents, a **Pipelines** section shows EAS builds and Bitbucket Pipelines runs that are
+Beside the agents (under them in one column), a **Pipelines** section shows EAS builds and Bitbucket Pipelines runs that are
 queued or running, waiting (at a manual step or for a deployment lock), finished in the last 3
 minutes, or failed since you last opened the notch. Each row (and the running summary in its
 header) opens the run on the web. The notch never starts, cancels or reruns anything. The two
@@ -191,7 +223,8 @@ other. Nothing is read until you set it up; until then the section stays hidden.
      "bitbucket": {
        "workspace": "acme",
        "repos": ["mobile-app", "api", "other-workspace/web"],
-       "searchRoots": ["~/Code"]
+       "searchRoots": ["~/Code"],
+       "pullRequests": true
      },
      "me": { "emails": ["you@example.com"] }
    }
@@ -204,7 +237,8 @@ other. Nothing is read until you set it up; until then the section stays hidden.
      `"workspace/name"` or `{"workspace": …, "repo": …, "path": …}`. `searchRoots` (optional) adds
      every local clone under those folders, up to three levels down, that has a bitbucket.org
      remote and a `bitbucket-pipelines.yml`; it is read from each clone's `.git/config`, never run.
-     Either `repos` or `searchRoots` is enough.
+     Either `repos` or `searchRoots` is enough. `pullRequests` (optional, on by default) reads
+     your pull requests in the same repositories; `false` turns that off (Setup's switch writes it).
    - `me` (optional): the commit emails that make a run yours. Without it, your git `user.email`
      (`~/.gitconfig`, and the clones' own).
 
@@ -212,7 +246,10 @@ other. Nothing is read until you set it up; until then the section stays hidden.
 2. EAS: sign in with `eas login` (AI Notch reads that login), or store an `EXPO_TOKEN` as the
    Keychain item `ai-notch.expo`.
 3. Bitbucket: in Atlassian account settings → Security → API tokens, create an API token with the
-   Bitbucket scopes `read:repository` and `read:pipeline`. Copy this into Terminal with the
+   Bitbucket scopes `read:repository`, `read:pipeline`, `read:pullrequest` and `read:user` (the
+   last two for [Pull requests](#pull-requests); without them Pipelines still works, and pull
+   requests wait quietly). A token cannot gain scopes later: a new one replaces it under the same
+   Keychain item. Copy this into Terminal with the
    token's expiry date, then copy the token and press Return. It reads the token from the
    clipboard and clears it; typing the token at the `-w` prompt instead silently keeps only 128 of
    its 192 characters.
@@ -222,7 +259,7 @@ other. Nothing is read until you set it up; until then the section stays hidden.
    ```
 
    The notch warns 14 days before the date in the comment. Setup → Builds → **Check Again**
-   picks it up at once.
+   picks it up at once (pull requests also look for it when the notch opens).
 
 #### What it shows
 
@@ -292,9 +329,263 @@ other. Nothing is read until you set it up; until then the section stays hidden.
   and the run back to it; without the suffix, a build of the same commit started during a run is
   linked as *inferred* (dashed). A badge on each row opens the other.
 - Collapsed, the left spinner counts running runs with working sessions, and the right side shows
-  a red ✕ for a failure of yours you have not seen, or a hammer with the number of running runs.
+  a red ✕ for a failure of yours you have not seen, or a hammer with the number of running runs
+  (see [The collapsed notch](#the-collapsed-notch) for the order).
 - Passed and failed runs of yours send a notification only while the screen is locked, like the
   sessions'; a failed one offers **Copy failure details** and **Open**.
+
+### Pull requests
+
+With a `bitbucket` part in `builds.json` (and `pullRequests` not `false`), the notch reads your
+open pull requests and the ones you are a reviewer on, in the same repositories as Pipelines and
+with the same token. Nothing is approved, merged or commented from the notch.
+
+- **What needs you** shows as rows under Pipelines in the right column (one column: a line under
+  Pipelines that opens the panel): a review asked of you (⧗ and who asked), changes requested on
+  yours (✕ and by whom), a failed build on yours, new comments by others since you last looked,
+  and yours approved (✓ approvals of reviewers, `2/3`). The block's header counts mine, to review
+  and the quiet ones. A row opens the pull request on bitbucket.org; right-click mutes it (until it
+  closes) or marks it seen.
+- **PRs**, the chip in the right column's header, opens a panel across the full width with every
+  open pull request, **Mine** and **To review**. **Details** on a row shows its branches, each
+  reviewer's review, open tasks, comments and build, and reads its merge checks once ("can merge",
+  or what blocks it: `minimum approvals`, `no changes requested`). Hover the chip for the counts
+  and the requests of the last hour.
+- **Collapsed**, the right wing shows the pull-request mark and how many rows have news you have
+  not looked at. Moving over the open notch counts it as seen; the comments the rows showed stop
+  counting as new when the notch closes.
+- **Notifications**, only while the screen is locked and each once: yours approved, changes
+  requested on yours, new comments (grouped per pull request, at most every 10 minutes), a review
+  asked of you, and a failed build on yours unless Pipelines already notified that run. Each kind
+  has its checkbox in Setup → Builds. What is known is kept in `~/.claude/notch/pr-seen.json`, so a
+  restart announces nothing twice.
+
+How it reads, in a budget of its own (about 120 requests an hour, never more than 150; Pipelines
+keeps its 390, together well under Bitbucket's 1,000):
+
+- Mine: `GET /2.0/workspaces/{workspace}/pullrequests/{my uuid}?state=OPEN` every 2 minutes (5
+  while the screen is locked); opening the notch reads it when it is older than a minute.
+- To review: per repository, `GET /2.0/repositories/{workspace}/{repo}/pullrequests` with
+  `q=state="OPEN" AND (author.uuid="{me}" OR reviewers.uuid="{me}")`, every 10 minutes (20 while
+  one of your pipelines runs or the screen is locked), stretched for many repositories.
+- Details only for what changed: `/statuses` when a pull request's `updated_on` moves (every 4
+  minutes while a build of yours runs), the 10 newest comments' authors and times (never their
+  text) when its comment count moves. `/mergeability/checks` only from Details.
+- Your account: the token's `/2.0/user` (`read:user`), else the Bitbucket user behind commits
+  made with your email, as Pipelines finds it.
+
+For 7 repositories that is about 70 requests an hour. A token without `read:pullrequest` is
+answered with a 403 once; from then on the lane sends nothing, shows a grey "needs
+read:pullrequest" in Setup and the PRs chip, and looks for a newer token in the Keychain every 10
+minutes (and on Check Again or opening the notch). Pipelines is not affected.
+
+### The collapsed notch
+
+The right wing shows one thing, the first that applies: a session waiting on you (amber dot and
+count), memory critical (a still amber memory chip), a turn that just finished (✓), a prod alert
+you have not seen (⚠), a pipeline failure of yours you have not seen (✕), news on your pull
+requests you have not seen (the pull-request mark and a count), running subagents, then running
+pipeline runs (hammer). "Not seen" ends when you move over the open notch. While a monitor
+alerts or an incident is open, a still red dot sits in the strip's top right corner; else, while
+memory is low, an amber one.
+
+### Prod health (Datadog)
+
+A **Prod** chip on the left of the footer: green, amber (a monitor warns, or a number is over its
+line), red (a monitor in Alert, or an active incident), or grey (not connected, "Sign in again",
+the keys refused, or no answer for 10 minutes; a sign-in or key problem is never red). Grey, a
+click opens Setup at its Prod section. Beside it, the numbers you configure
+(for example the 5xx rate and p95). Hover lists the alerting monitors and incidents; a click opens
+the one alerting monitor or incident in Datadog, else the monitor list filtered by your query;
+right-click snoozes it for an hour (no dot, no ⚠, no notifications). Nothing is read until you set
+it up; without it the chip stays hidden.
+
+1. Add a `datadog` part to `~/.claude/notch/builds.json` (Setup → Prod → **How** shows it, with
+   Copy):
+
+   ```json
+   "datadog": {
+     "site": "us3",
+     "monitors": "(service:api AND env:production) OR service:gateway",
+     "incidents": "state:active",
+     "health": [
+       { "label": "5xx", "unit": "%", "amber": 2, "aggregator": "sum",
+         "queries": {
+           "a": "sum:trace.http.request.hits.by_http_status{service:api,env:production,http.status_class:5xx}.as_count()",
+           "b": "sum:trace.http.request.hits.by_http_status{service:api,env:production}.as_count()"
+         },
+         "formula": "100 * a / b" },
+       { "label": "p95", "unit": "ms", "scale": 1000, "amber": 1000,
+         "query": "p95:trace.http.request{service:api,env:production}" }
+     ]
+   }
+   ```
+
+   - `site`: `us1`, `us3`, `us5`, `eu`, `ap1` or the site's domain.
+   - `monitors`: a search as the Manage Monitors page takes it (`AND`, `OR` and parentheses
+     work). Muted monitors count as OK: the app adds `AND muted:false`.
+   - `incidents` (optional): an incident search, `state:active` by default; `false` leaves
+     incidents out.
+   - `health` (optional, up to 3): each a `label`, one `query` or named `queries` with a
+     `formula`, an `aggregator` (`avg` by default), a `unit` (`%` or `ms`), a `scale` (`1000` turns
+     seconds into ms), `amber` (in the shown unit) and `minutes` (the window, 15 by default).
+
+2. Setup → Prod → **Sign in with Datadog**. Your browser opens Datadog's sign-in for the `site`
+   in `builds.json`; approve AI Notch there (it asks only for `monitors_read`, `incident_read` and
+   `timeseries_query`) and the tab says you can close it. Setup then shows "Signed in as <your
+   organization>", and the token renews by itself (see [Signing in](#signing-in-with-datadog)).
+
+   Or, instead, service-account keys (Setup → Prod → **Or use service-account keys**): a Datadog
+   admin creates a service account (Organization Settings → Service Accounts →
+   New Service Account, role Datadog Read Only Role), opens it and adds an application key (New
+   Key) scoped to `monitors_read`, `incident_read` and `timeseries_query`, and an API key
+   (Organization Settings → API Keys → New Key). Copy each key, then run its command in Terminal;
+   it reads the key from the clipboard and clears it (typing a secret at the `-w` prompt keeps
+   only its first 128 characters):
+
+   ```sh
+   security add-generic-password -U -s ai-notch.datadog -a api-key -w "$(pbpaste)" && pbcopy < /dev/null
+   security add-generic-password -U -s ai-notch.datadog -a app-key -w "$(pbpaste)" && pbcopy < /dev/null
+   ```
+
+   Setup → Prod → **Check Again** picks them up at once; otherwise within two minutes.
+
+How it reads, over Datadog's API (`https://api.<site>`, with the sign-in's `Authorization: Bearer`
+token, else the headers `DD-API-KEY` and `DD-APPLICATION-KEY`; the sign-in wins when both exist):
+
+- `GET /api/v1/monitor/search` (100 a page) every minute, every 3 minutes while the screen is
+  locked: its status facets colour the chip, its page names what alerts.
+- `GET /api/v2/incidents/search` every 3 minutes (a public beta API).
+- `POST /api/v2/query/scalar`, one request per number, every 5 minutes, not while locked.
+
+That is about 104 requests an hour with two numbers (40 while locked), under a hard cap of 150.
+Every answer's `X-RateLimit-*` headers are read: with a tenth or less of a window left, that kind
+of request waits for the reset; a 429 waits for it too and halves the pace for 15 minutes. With
+the sign-in, a 401 renews the token once and sends the request again; a 403 on the monitor search
+(your role cannot read monitors) is grey and tried again in 10 minutes. With the keys, a 401 (or a
+403 on the monitor search) means they were refused: the chip turns grey, and the Keychain is read
+again every minute, so re-saved keys are picked up by themselves. A 403 on incidents or the
+numbers names the missing scope and is tried again an hour later. The keys are read through
+`/usr/bin/security` and go only into the request headers, never to a file or a log; the requests
+follow no redirects.
+
+#### Signing in with Datadog
+
+OAuth 2 in the browser, the flow of Datadog's own CLI
+([pup](https://github.com/DataDog/pup/blob/main/docs/OAUTH2.md)):
+
+- The first sign-in on a site registers AI Notch with Datadog as a public client (Dynamic Client
+  Registration, `POST https://api.<site>/api/v2/oauth2/register`, no client secret) with the
+  loopback redirects `http://127.0.0.1:{8000,8080,8888,9000}/oauth/callback`. The client id is not
+  a secret and is kept in `~/.claude/notch/datadog-oauth-clients.json`; a later sign-in reuses it,
+  and one Datadog no longer knows (`invalid_client`) is registered again by itself.
+- A listener on 127.0.0.1 only takes the first free port of those four (all taken: any free port,
+  registered for itself). It answers one request with the right `state` and stops; it gives up
+  after 5 minutes (**Cancel** stops it sooner, **Open Again** shows the page again).
+- The authorize page (`https://<site>/oauth2/v1/authorize`, `app.datadoghq.com` on US1) gets PKCE
+  S256 and a random `state`; the code comes back to the listener and is exchanged at
+  `https://api.<site>/api/v2/oauth2/token`.
+- The access token (an hour) and the refresh token (about 30 days) go into one JSON item in your
+  login Keychain, `ai-notch.datadog` / account `oauth` (with the expiry, the granted scopes, the
+  client id and the site), not synced. The token renews 5 minutes before it ends and after a 401.
+  When Datadog refuses the refresh token, the tokens are wiped and Setup and the chip say "Sign in
+  again", grey; the service-account keys, if stored, take over meanwhile.
+- **Sign Out** deletes that Keychain item. To revoke AI Notch in Datadog too: Organization Settings
+  → Mobile and Third-Party Access → AI Notch → Users (an admin, or a role with
+  `org_authorized_apps_write`).
+- No token, code or verifier reaches a log or a file other than that Keychain item; `notch.log`
+  says only what happened ("signed in", "sign-in renewed", "sign-in ended: …").
+
+Alerts, each change once, diffed from one answer to the next (the first answer after launch, or
+after a change of site or query, is history: what is already open neither notifies nor counts as
+unseen):
+
+- a monitor going to Alert, to Warn, or back to OK from either (No Data shows in the list only);
+- an incident declared, its severity changed, resolved;
+- a number over its `amber` line for 2 polls in a row, and back under it for 2 polls.
+
+They notify even while the screen is unlocked (unlike the notch's other news), with **Open** (the
+monitor, the incident, or the filtered list) and **Snooze 1 h**. Everything from one poll is one
+notification ("Datadog · 3 monitors alerting"). A monitor that changes state 3 times in 15 minutes,
+going back into a state it had left, is told once as flapping, then not for 30 minutes (after
+which a different state is told once). Alert-level news (a monitor in Alert, an incident declared
+or escalated, a number going over) also drops a banner from the notch for 6 seconds, longer while
+the pointer is on it, with **Open** and ✕; never over a full-screen app, and it never takes your
+typing. Warn and recoveries only notify. A snooze (the chip's right-click, or the notification's
+Snooze 1 h) silences both for an hour. Each kind, the banner, notifying while unlocked, and an
+optional reminder every 2 hours for a monitor still alerting (off by default) are switches kept
+as `prod.alerts`. `notch.log` gets each change's kind and id (`prod: monitorAlert (m:123)`), never
+a monitor's or incident's name.
+
+### Machine guard
+
+A **RAM** chip on the left of the footer, beside Prod: the free memory in the colour of the
+pressure (green, amber under `warnBelowMB` or at the kernel's warning level, red under 2 GB or at
+critical), and the biggest idle dev process ("5.6 GB free · Metro idle 22m"). A click opens the
+**Machine** panel across the full width, like Usage and Code:
+
+- a memory bar: used of total, compressed, and the pressure;
+- a row per dev process with its footprint (`ri_phys_footprint`, children included, as Activity
+  Monitor's Memory column counts it, not RSS), its state (idle for how long, in use, running) and
+  its button;
+- warnings: low memory, more than one `make verify` at once, critical pressure;
+- **Close idle · N · size**, which turns into **Confirm close N**: a second click within 5 s
+  closes them.
+
+Free memory is free, inactive and speculative pages, as `vm_stat` counts them (the same measure a
+`make verify` memory check that waits for 4096 MB uses). Nothing to set up: it is on by default,
+and Setup → Machine turns it off.
+
+| Kind | Found by | Idle when | Button |
+| --- | --- | --- | --- |
+| Metro | node running `expo start`, `@expo/cli … start`, `react-native start` or `metro`; the port from its own listening socket | no client connected to its port (adb reverse counts) and under 1% CPU for `idleMinutes` | Close |
+| Jest | `jest/bin/jest.js` (workers: jest-worker's `processChild.js`, counted in their runner) | `--watch` under 1% CPU for `idleMinutes`; a plain run never | Close |
+| `make verify`, turbo | make (Xcode's runs as `gnumake`) with the `verify` target; turbo outside it | never | Close |
+| Android emulator | `qemu-system-*` with `-avd` | never | Close: `adb -s emulator-NNNN emu kill`, SIGTERM if that fails |
+| iOS Simulator | `launchd_sim` and everything under it, one row per device | never | Shut down: `xcrun simctl shutdown <udid>`, never a signal |
+| Gradle, Kotlin daemons | java running `GradleDaemon` / `KotlinCompileDaemon` | under 0.5% CPU for 10 minutes | Close |
+| adb server, watchman, the Simulator app | by name | — | none (adb serves your devices) |
+
+A process whose parent is gone and whose terminal has no one left on it is idle at once (Metro with
+a client excepted). Processes are told apart by their arguments (`KERN_PROCARGS2`), read once per
+process for the few named node, java, make, turbo, qemu, adb or launchd_sim, and never written
+anywhere. A matching process inside another's tree (Metro's transform workers, a Jest inside
+`make verify`) counts in that row.
+
+Closing:
+
+- Only your own processes, and only these kinds. Never an editor (VS Code, Cursor, Xcode) or a
+  process it started directly, Claude Code, Codex, Cursor's agent, the notch, a terminal or a
+  login shell.
+- The process group gets the signal only when its leader is the dev process itself or the make,
+  pnpm or npx that started it, and the group holds nothing but that chain and the dev process's
+  tree. An editor's group also holds its MCP servers, so a dev process there gets SIGTERM sent
+  to its own tree instead.
+- Each pid's start time is checked again right before its signal, so a pid reused by another
+  process is never signalled.
+- SIGTERM first. Still running 5 seconds later, the row offers **Force quit**, which sends
+  SIGKILL after a second click. A row that is not idle also needs a second click to close.
+- Close idle takes only Metro, Jest and the Gradle and Kotlin daemons, never the emulator or the
+  Simulator, and skips anything that used more than 5% of a core in the last minute.
+- `notch.log` gets the kind, the pid and the megabytes freed, nothing else.
+
+It scans every 10 seconds (every 2 while the Machine panel is open, and at once on a memory
+pressure event) off the main thread: about 0.5–0.8 ms of CPU a scan. The screen redraws only when
+something shown changes (memory in 0.1 GB steps).
+
+Collapsed, the wing's memory slot shows when the pressure is critical or less than 2 GB has been
+free for 30 seconds. While the screen is locked, that also sends one notification naming the
+biggest dev process (Open shows the Machine panel; nothing is ever closed from a notification);
+the next one comes only after 10 minutes back at normal. Setup → Machine turns it off.
+
+Optional settings, in `~/.claude/notch/builds.json`:
+
+```json
+"machine": { "warnBelowMB": 4096, "idleMinutes": 15, "exclude": [] }
+```
+
+`exclude` lists kinds never shown: `metro`, `jest`, `verify`, `turbo`, `emulator`, `simulator`,
+`simulatorApp`, `gradle`, `kotlin`, `adb`, `watchman`.
 
 ### Light and dark
 
@@ -330,6 +621,9 @@ then:
 launchctl bootout gui/$(id -u)/info.ankeshshiv.notch
 rm -rf /Applications/AINotch.app ~/Library/LaunchAgents/info.ankeshshiv.notch.plist
 rm -rf ~/.claude/notch    # optional: sessions and usage history
+security delete-generic-password -s ai-notch.datadog -a api-key    # optional: the Prod keys
+security delete-generic-password -s ai-notch.datadog -a app-key
+security delete-generic-password -s ai-notch.datadog -a oauth      # optional: the Datadog sign-in
 ```
 
 If the app is already gone, remove the `ai-notch-hook` entries from both files by hand and set
@@ -362,7 +656,8 @@ NOTCH_SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" NOTCH_TEAM_ID=YO
 The app and the widget then share the app group `<NOTCH_TEAM_ID>.info.ankeshshiv.notch`.
 
 For development: `AINotch --preview [--theme light|dark]` opens an always-expanded copy in the
-middle of the screen, `AINotch --setup-preview` opens the setup window alone, and
+middle of the screen (`--hover`: opening on hover and pinning as the real one does),
+`AINotch --setup-preview` opens the setup window alone, and
 `python3 scripts/dev/test-setup.py` tests the setup logic in temporary home folders. See
 [`scripts/dev/README.md`](scripts/dev/README.md) for these and the other helpers.
 
@@ -384,6 +679,21 @@ from the app's first versions, so usage history carries over.
 - No desktop widget in the ad-hoc build (see above).
 - The Homebrew uninstall step can only edit `~/.claude/settings.json` and `~/.cursor/hooks.json`
   in place. If either is a symlink to a file elsewhere, click **Disconnect…** before uninstalling.
+- Prod sign-in: Datadog marks Dynamic Client Registration as a preview. The refresh token's
+  lifetime (about 30 days) is what pup reports, not a documented number. A port other than the four
+  registered ones gets its own registration, which Datadog may refuse. AI Notch writes its Keychain
+  item itself, so a build signed by another identity (an ad-hoc upgrade) may make macOS ask once
+  before it reads the sign-in.
+- Prod: the chip reads the first 100 monitors the search returns (the colour comes from the
+  facets, which count them all). The web links (`/monitors/<id>`, `/incidents/<number>`,
+  `/monitors/manage?q=`) follow what Datadog's app shows, not a documented format. Incident search
+  is a public beta API.
+- Machine guard: Metro's clients are the connections accepted on its port, so a client of another
+  dev server does not count. A Jest started by an editor's own extension is shown but never
+  closed. The emulator's and the Simulator's own shutdowns take their time; the row says if one
+  is still running.
+- Pull requests: Bitbucket Cloud only. Bitbucket does not say who added a reviewer, so a review
+  request names the author. Mine lists up to 50 per workspace, a repository's list up to 50.
 - Pipelines: one EAS project, and Bitbucket Cloud only (no GitHub Actions or other CI). Expo's
   GraphQL API is not documented and may change; the CLI then stands in. An EAS build started from
   the CLI counts as yours by the CLI's login, which a team may share. ETAs are medians of recent
