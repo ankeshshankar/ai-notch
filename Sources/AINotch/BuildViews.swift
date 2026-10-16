@@ -10,53 +10,69 @@ struct PipelinesSection: View {
     /// Rows the shared budget leaves for this section.
     var limit: Int
     var controller: NotchController
+    /// Which part to draw: all of it (one column), or in two columns its header (in the header
+    /// row) and its rows (in the right column).
+    var part: Part = .all
+    enum Part { case all, header, rows }
     /// The row whose steps are open, and the one whose install QR is open; one at a time.
     @State private var detailId: String?
     @State private var qrId: String?
 
     var body: some View {
-        let rows = builds.rows
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("Pipelines").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
-                if builds.easOn, let eas = builds.health.eas {
-                    DegradedBadge(text: "EAS \(eas)", help: builds.health.easDetail ?? "status.expo.dev reports a problem with EAS Build.")
-                }
-                if builds.bitbucketOn, let bitbucket = builds.health.bitbucket {
-                    DegradedBadge(text: "Bitbucket \(bitbucket)", help: builds.health.bitbucketDetail ?? "bitbucket.status.atlassian.com reports a problem.")
-                }
-                Spacer(minLength: 4)
-                summary
-                ScopeSwitch(scope: builds.prefs.scope) { builds.setScope($0) }
-                FilterMenu(builds: builds)
-                InfoMark(text: aboutText)
+        switch part {
+        case .all:
+            VStack(alignment: .leading, spacing: 8) {
+                header.padding(.top, 4)
+                rowList
             }
-            .padding(.top, 4)
-            if rows.isEmpty {
-                Text(emptyText).font(.system(size: 11)).foregroundStyle(Palette.ink3)
-            }
-            ForEach(rows.prefix(max(1, limit))) { row in
-                BuildRowButton(row: row, now: now, isDetailed: detailId == row.id, showsQR: qrId == row.id, copy: builds.copying[row.id],
-                               open: { url in
-                                   controller.collapse()
-                                   builds.open(url)
-                               },
-                               toggleDetails: {
-                                   withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { detailId = detailId == row.id ? nil : row.id }
-                               },
-                               toggleQR: {
-                                   withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { qrId = qrId == row.id ? nil : row.id }
-                               },
-                               copyFailure: { builds.copyFailure(row) },
-                               togglePin: { builds.togglePin(row.id) },
-                               mute: { builds.toggleMute(row.muteKey) },
-                               onlyBranch: { builds.setBranch(row.branch) })
-            }
-            if rows.count > max(1, limit) {
-                Text("+\(rows.count - max(1, limit)) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
-            }
-            notes
+        case .header: header
+        case .rows: VStack(alignment: .leading, spacing: 8) { rowList }
         }
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Text("Pipelines").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
+            if builds.easOn, let eas = builds.health.eas {
+                DegradedBadge(text: "EAS \(eas)", help: builds.health.easDetail ?? "status.expo.dev reports a problem with EAS Build.")
+            }
+            if builds.bitbucketOn, let bitbucket = builds.health.bitbucket {
+                DegradedBadge(text: "Bitbucket \(bitbucket)", help: builds.health.bitbucketDetail ?? "bitbucket.status.atlassian.com reports a problem.")
+            }
+            Spacer(minLength: 4)
+            summary
+            ScopeSwitch(scope: builds.prefs.scope) { builds.setScope($0) }
+            FilterMenu(builds: builds)
+            InfoMark(text: aboutText)
+        }
+    }
+
+    @ViewBuilder private var rowList: some View {
+        let rows = builds.rows
+        if rows.isEmpty {
+            Text(emptyText).font(.system(size: 11)).foregroundStyle(Palette.ink3)
+        }
+        ForEach(rows.prefix(max(1, limit))) { row in
+            BuildRowButton(row: row, now: now, isDetailed: detailId == row.id, showsQR: qrId == row.id, copy: builds.copying[row.id],
+                           open: { url in
+                               controller.collapse()
+                               builds.open(url)
+                           },
+                           toggleDetails: {
+                               withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { detailId = detailId == row.id ? nil : row.id }
+                           },
+                           toggleQR: {
+                               withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { qrId = qrId == row.id ? nil : row.id }
+                           },
+                           copyFailure: { builds.copyFailure(row) },
+                           togglePin: { builds.togglePin(row.id) },
+                           mute: { builds.toggleMute(row.muteKey) },
+                           onlyBranch: { builds.setBranch(row.branch) })
+        }
+        if rows.count > max(1, limit) {
+            Text("+\(rows.count - max(1, limit)) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+        }
+        notes
     }
 
     private var emptyText: String {
@@ -121,7 +137,7 @@ struct PipelinesSection: View {
                 if bitbucket == nil, let expiry {
                     let days = max(0, Int((expiry - now) / 86_400))
                     note("Bitbucket", days == 0 ? "token expires today" : "token expires in \(days)d",
-                         help: "The API token in the Keychain (\(BitbucketConfig.tokenService)) expires soon (the date in its comment). Create a new one with read:repository and read:pipeline; Setup lists the steps.",
+                         help: "The API token in the Keychain (\(BitbucketConfig.tokenService)) expires soon (the date in its comment). Create a new one with read:repository, read:pipeline, read:pullrequest and read:user; Setup lists the steps.",
                          color: Palette.waiting)
                 }
                 Spacer(minLength: 0)
@@ -366,14 +382,21 @@ struct BuildRowView: View {
                         Text(ago(now - finished)).font(.system(size: 10)).foregroundStyle(Palette.ink3).lineLimit(1).fixedSize()
                     }
                 }
-                if let detail = row.detail {
+                if row.wait == nil, let progress = row.progress, let detail = row.detail {
+                    // Where it is, then the commit, on one line.
+                    (Text(progress).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.claude)
+                        + Text("  ·  " + detail).font(.system(size: 11)).foregroundStyle(Palette.ink2))
+                        .lineLimit(1).truncationMode(.tail)
+                        .help(detail)
+                } else if let detail = row.detail {
                     Text(detail).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
                 }
                 if let wait = row.wait {
                     Label(wait.detail, systemImage: wait.label.contains("lock") ? "lock" : "hand.tap")
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.waiting)
                         .lineLimit(1).truncationMode(.tail)
-                } else if let progress = row.progress {
+                } else if let progress = row.progress, row.detail == nil {
+                    // With a commit, it shares the commit's line above.
                     Text(progress).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.claude)
                         .lineLimit(1).truncationMode(.tail)
                 }

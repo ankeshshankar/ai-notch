@@ -8,7 +8,8 @@ import Foundation
 // read in the last minute. Lists and steps are asked with If-None-Match, so
 // an unchanged answer is a 304 with no body. Backoff on 429, X-RateLimit-NearLimit, or our own
 // count nearing the cap. Paused while the screen is locked with nothing running. Read only:
-// nothing is ever started, stopped or rerun.
+// nothing is ever started, stopped or rerun. The token, the ETags, the count and the backoff live
+// in BitbucketClient (its Pipelines lane), shared with the pull-request lane.
 
 struct BitbucketRepo: Codable, Hashable, Sendable {
     var workspace: String
@@ -287,7 +288,7 @@ enum BitbucketConfig {
         return (emails, name)
     }
 
-    static let setupHelp = "Not connected. Create an Atlassian API token with the scopes read:repository and read:pipeline (Setup lists the steps), and store it in the Keychain as \(tokenService)."
+    static let setupHelp = "Not connected. Create an Atlassian API token with the scopes read:repository, read:pipeline, read:pullrequest and read:user (Setup lists the steps), and store it in the Keychain as \(tokenService)."
     /// The command Setup shows: the token from the clipboard, which is then cleared. The
     /// interactive `-w` prompt silently keeps only 128 characters, and these tokens are 192.
     static let saveCommand = "security add-generic-password -U -s \(tokenService) -a api-token -j \"expires YYYY-MM-DD\" -w \"$(pbpaste)\" && pbcopy < /dev/null"
@@ -365,19 +366,12 @@ actor BitbucketSource {
     /// When each waiting run off the list's page was last read by itself.
     private var singleAt: [String: Double] = [:]
     private var logAt: [String: Double] = [:]
-    /// ETags and the bodies they stand for, by URL.
-    private var etags: [String: (etag: String, data: Data)] = [:]
-    private var requests: [(at: Double, kind: String, notModified: Bool)] = []
-    private var token: KeychainItem.Found?
-    private var tokenCheckedAt: Double = -.infinity
-    /// The fingerprint of a token Bitbucket rejected: the same one read again is not retried.
-    private var rejected: String?
+    /// The token, the ETags, the request count and the backoff: the client's Pipelines lane.
+    private let client: BitbucketClient
+    private static let lane = BitbucketLane.pipelines
     private var owner: BitbucketOwner?
     private var ownerTriedAt: Double = -.infinity
     private var status: SourceStatus?
-    private var pauseUntil: Double = 0
-    private var slowUntil: Double = 0
-    private var slowFactor: Double = 1
     private var wantsNow = false
     /// The notch opened: every unmuted repository not listed in the last minute is listed.
     private var openSweep = false
@@ -390,10 +384,11 @@ actor BitbucketSource {
 
     /// The hard ceiling, and what the schedule aims for. Bitbucket allows 1,000 an hour for
     /// these endpoints; this stays well under it.
-    static let hourlyCap = 390
-    static let hourlyTarget: Double = 360
+    static let hourlyCap = BitbucketLane.pipelines.hourlyCap
+    static let hourlyTarget: Double = BitbucketLane.pipelines.hourlyTarget
 
-    init(onChange: @escaping @Sendable (BitbucketSnapshot) -> Void) {
+    init(client: BitbucketClient = .shared, onChange: @escaping @Sendable (BitbucketSnapshot) -> Void) {
+        self.client = client
         self.onChange = onChange
     }
 
@@ -428,9 +423,8 @@ actor BitbucketSource {
     }
 
     /// Setup's "Check Again": reads the Keychain at once.
-    func recheckToken() {
-        tokenCheckedAt = -.infinity
-        rejected = nil
+    func recheckToken() async {
+        await client.recheck()
         wantsNow = true
     }
 
@@ -450,45 +444,32 @@ actor BitbucketSource {
         guard config != nil else {
             status = nil
             wantsNow = false
-            return publish()
+            return await publish()
         }
-        if token == nil {
+        if await !client.hasToken(for: Self.lane) {
             // After a rejection the Keychain is read on the next poll, then every minute, so a
             // re-saved token is picked up by itself; with none at all, every 10 minutes.
-            let every: Double = rejected != nil || wantsNow ? 60 : BuildPolling.broken
-            if now - tokenCheckedAt > every {
-                tokenCheckedAt = now
-                if let found = Self.readToken() {
-                    if found.fingerprint != rejected {
-                        if rejected != nil { noteBuildLog("bitbucket: a new token was found in the Keychain") }
-                        token = found
-                        rejected = nil
-                        status = nil
-                    }
-                } else if rejected == nil {
-                    status = nil
-                }
+            switch await client.loadToken(for: Self.lane, urgent: wantsNow) {
+            case .found: status = nil
+            case .missing(let afterRejection): if !afterRejection { status = nil }
+            case .notDue, .stillRejected: break
             }
         }
-        guard token != nil else {
+        guard await client.hasToken(for: Self.lane) else {
             if status == nil { status = SourceStatus(text: "not connected", help: BitbucketConfig.setupHelp, isSetup: true) }
             wantsNow = false
-            return publish()
+            return await publish()
         }
         guard !repos.isEmpty else {
             status = SourceStatus(text: "no repositories", help: "No repositories in \(BuildsConfig.displayPath): list them under bitbucket.repos, or give bitbucket.searchRoots to find the local clones with a bitbucket-pipelines.yml.", isSetup: true)
-            return publish()
+            return await publish()
         }
-        guard now >= pauseUntil else { return publish() }
+        guard await now >= client.pauseUntil(Self.lane) else { return await publish() }
         let anyFast = known.values.contains { $0.values.contains { $0.needsFastPoll(now: now) } }
         if BuildPolling.isScreenLocked && !anyFast { return }
 
-        requests.removeAll { now - $0.at > 3600 }
         // Early backoff on our own count, before Bitbucket has to say anything.
-        if requests.count > Self.hourlyCap * 4 / 5 {
-            slowUntil = max(slowUntil, now + 600)
-            slowFactor = max(slowFactor, 2)
-        }
+        await client.backOffIfNearCap(Self.lane)
         await resolveOwner()
 
         let early = wantsNow
@@ -496,18 +477,20 @@ actor BitbucketSource {
         let opened = openSweep
         openSweep = false
         // 1. The gate: which repositories were pushed to.
-        let gateDue = now - gateAt >= BuildPolling.gate * slow || (early && now - gateAt > BuildPolling.openRefresh)
+        let gateSlow = await slow()
+        let gateDue = now - gateAt >= BuildPolling.gate * gateSlow || (early && now - gateAt > BuildPolling.openRefresh)
         if gateDue { await gate() }
         // 2. Each repository that is due.
-        let interval = activeInterval()
+        let interval = await activeInterval()
         var swept: [String] = [], openListed: [String] = [], openSkipped = 0
         for repo in repos {
-            guard token != nil, Date().timeIntervalSince1970 >= pauseUntil else { break }
+            guard await client.hasToken(for: Self.lane), await Date().timeIntervalSince1970 >= client.pauseUntil(Self.lane) else { break }
             if let skip = skipUntil[repo.key], now < skip { continue }
             let runs = (known[repo.key] ?? [:]).values
             let fast = runs.contains { $0.needsFastPoll(now: now) }
             let hot = (hotUntil[repo.key] ?? 0) > now
             let first = listedAt[repo.key] == nil
+            let slow = await slow()
             let sweepDue = now - (sweptAt[repo.key] ?? 0) >= BuildPolling.sweep * slow
             let since = now - (listedAt[repo.key] ?? 0)
             // Opening the notch lists every unmuted repository not listed for a minute (longer
@@ -515,14 +498,17 @@ actor BitbucketSource {
             let openDue = opened && !muted.contains(repo.key) && since >= BuildPolling.openRefresh * slow
             if opened && !openDue && !muted.contains(repo.key) { openSkipped += 1 }
             guard first || sweepDue || openDue || ((fast || hot) && since >= interval) else { continue }
-            guard requests.count + 1 <= Self.hourlyCap else { break }
+            guard await requestCount() + 1 <= Self.hourlyCap else { break }
             if first || sweepDue { swept.append(repo.repo) } else if openDue && !((fast || hot) && since >= interval) { openListed.append(repo.repo) }
             await poll(repo, pagelen: first ? 10 : (fast || hot) ? 5 : 2, sweep: first || sweepDue)
         }
         if !swept.isEmpty { timing("bitbucket sweep: \(swept.count) repos (\(swept.joined(separator: ", ")))") }
-        if opened { timing("bitbucket open: listed \(openListed.count), skipped \(openSkipped) read <\(Int(BuildPolling.openRefresh * slow)) s ago, gate \(gateDue ? "read" : "skipped")") }
-        publish()
-        logCountIfDue()
+        if opened {
+            let slow = await slow()
+            timing("bitbucket open: listed \(openListed.count), skipped \(openSkipped) read <\(Int(BuildPolling.openRefresh * slow)) s ago, gate \(gateDue ? "read" : "skipped")")
+        }
+        await publish()
+        await logCountIfDue()
     }
 
     /// Dev: with CLAUDE_NOTCH_BUILD_TIMING, a line on stderr.
@@ -531,12 +517,16 @@ actor BitbucketSource {
         FileHandle.standardError.write(Data("\(line)\n".utf8))
     }
 
-    private var slow: Double { now < slowUntil ? slowFactor : 1 }
+    /// 1, or 2 or 3 while the lane backs off.
+    private func slow() async -> Double { await client.slow(Self.lane) }
+
+    /// The lane's requests in the last hour.
+    private func requestCount() async -> Int { await client.count(Self.lane) }
 
     /// 25 s for a repository with a running run, stretched so the busy polling and the idle
     /// gate and sweep together stay near the hourly target. A busy repository's sweep rides on
     /// its busy polls, so only the idle ones count toward the sweep's cost.
-    private func activeInterval() -> Double {
+    private func activeInterval() async -> Double {
         var activeCost = 0.0
         var activeRepos = 0
         let now = self.now
@@ -552,6 +542,7 @@ actor BitbucketSource {
         guard activeCost > 0 else { return BuildPolling.busy }
         let idleCost = 3600 / BuildPolling.gate + Double(repos.count - activeRepos) * 3600 / BuildPolling.sweep
         let room = max(60, Self.hourlyTarget - idleCost)
+        let slow = await slow()
         return max(BuildPolling.busy, 3600 * activeCost / room) * slow
     }
 
@@ -631,10 +622,11 @@ actor BitbucketSource {
         let onPage = Set(page.map(\.uuid))
         for (uuid, run) in runs where !onPage.contains(uuid) && run.state.isActive {
             let fast = run.needsFastPoll(now: now)
+            let slow = await slow()
             guard fast || (sweep && now - (singleAt[uuid] ?? 0) >= BuildPolling.staleReread * slow),
                   !superseded(run, in: runs) || fast else { continue }
             singleAt[uuid] = now
-            guard requests.count + 1 <= Self.hourlyCap, let fresh = await single(repo, uuid: uuid) else { continue }
+            guard await requestCount() + 1 <= Self.hourlyCap, let fresh = await single(repo, uuid: uuid) else { continue }
             var updated = fresh
             updated.steps = run.steps
             updated.logLine = run.logLine
@@ -648,7 +640,7 @@ actor BitbucketSource {
                 || (run.state == .paused && (stepsAt[uuid] == nil || changed.contains(uuid)))
                 || (run.state == .failed && !stepsRead.contains(uuid) && now - (run.completedAt ?? now) < 6 * 3600)
                 || (changed.contains(uuid) && run.state.isFinished && stepsAt[uuid] != nil)
-            guard wants, requests.count + 1 <= Self.hourlyCap, let steps = await fetchSteps(repo, uuid: uuid) else { continue }
+            guard wants, await requestCount() + 1 <= Self.hourlyCap, let steps = await fetchSteps(repo, uuid: uuid) else { continue }
             runs[uuid]?.steps = steps
             stepsAt[uuid] = now
             if run.state.isFinished { stepsRead.insert(uuid) }
@@ -657,7 +649,7 @@ actor BitbucketSource {
         if panelOpen {
             for (uuid, run) in runs where run.state == .running {
                 guard let step = run.runningStep, now - (logAt[uuid] ?? 0) >= BuildPolling.busy,
-                      requests.count + 1 <= Self.hourlyCap else { continue }
+                      await requestCount() + 1 <= Self.hourlyCap else { continue }
                 logAt[uuid] = now
                 if let line = await liveLogLine(repo, run: uuid, step: step.id) { runs[uuid]?.logLine = line }
             }
@@ -814,95 +806,51 @@ actor BitbucketSource {
 
     // MARK: Requests
 
-    /// One request with the token, counted against the hourly budget. JSON answers are asked
-    /// with the ETag of the last answer for the same URL; a 304 returns that answer's body.
-    /// Handles what changes the schedule: 401 (the token is dropped and the Keychain read again
-    /// on the next poll), 403 on a list (a missing scope), 429 and NearLimit (back off).
+    /// One request through the client's Pipelines lane. The client handles the token, the ETag
+    /// (a 304 returns the last answer's body), the count and the backoff; this sets what the
+    /// panel says: offline, a rejected or truncated token (401), a missing scope (403 on a list:
+    /// the lane stops until another token is stored) and a 429.
     private func get(_ url: URL, kind: String, range: String? = nil, accept: String = "application/json") async -> (Data, HTTPURLResponse)? {
-        guard let token else { return nil }
-        var request = URLRequest(url: url, timeoutInterval: 30)
-        request.setValue("Bearer \(token.secret)", forHTTPHeaderField: "Authorization")
-        request.setValue(accept, forHTTPHeaderField: "Accept")
-        if let range { request.setValue(range, forHTTPHeaderField: "Range") }
-        let cacheKey = url.absoluteString + (range ?? "")
-        let cached = etags[cacheKey]
-        if let cached { request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match") }
-        let started = Date()
-        guard let (data, response) = try? await BuildHTTP.session.data(for: request),
-              let http = response as? HTTPURLResponse else {
-            requests.append((now, kind, false))
+        switch await client.get(url, lane: Self.lane, kind: kind, range: range, accept: accept) {
+        case .noToken:
+            return nil
+        case .offline:
             status = SourceStatus(text: "offline", help: "Bitbucket did not answer; it is tried again on the next poll.")
             return nil
-        }
-        requests.append((now, kind, http.statusCode == 304))
-        if ProcessInfo.processInfo.environment["CLAUDE_NOTCH_BUILD_TIMING"] != nil {
-            FileHandle.standardError.write(Data("bitbucket \(kind) \(http.statusCode) \(url.path) \(data.count)B \(String(format: "%.2f", Date().timeIntervalSince(started)))s main=\(pthread_main_np() != 0)\n".utf8))
-        }
-        if http.value(forHTTPHeaderField: "X-RateLimit-NearLimit")?.lowercased() == "true" {
-            slowUntil = now + 900
-            slowFactor = max(slowFactor, 3)
-        }
-        switch http.statusCode {
-        case 304:
-            guard let cached else { return nil }
-            return (cached.data, HTTPURLResponse(url: url, statusCode: range == nil ? 200 : 206, httpVersion: nil, headerFields: nil)!)
-        case 401:
-            let truncated = token.secret.count == BitbucketConfig.truncatedLength
+        case .unauthorized(let truncated):
             status = truncated
                 ? SourceStatus(text: "token looks truncated", help: "Bitbucket refused the token in \(BitbucketConfig.tokenService), and it is exactly \(BitbucketConfig.truncatedLength) characters: the interactive `security … -w` prompt cuts input there, and Atlassian tokens are 192. Copy the token and re-save it with:\n\(BitbucketConfig.saveCommand)", isSetup: true)
                 : SourceStatus(text: "token rejected", help: "Bitbucket refused the token in \(BitbucketConfig.tokenService) (expired or revoked). Store a new one (Setup lists the steps); it is picked up within a minute.", isSetup: true)
-            rejected = token.fingerprint
-            self.token = nil
-            // Read the Keychain again on the next poll.
-            tokenCheckedAt = -.infinity
             noteBuildLog("bitbucket: 401, token rejected\(truncated ? " (128 characters: looks truncated)" : "")")
             return nil
-        case 403 where kind == "list" || kind == "gate":
-            status = SourceStatus(text: "needs read:pipeline", help: "The token in \(BitbucketConfig.tokenService) works but lacks a scope. Create one with read:repository and read:pipeline.", isSetup: true)
-            rejected = token.fingerprint
-            self.token = nil
-            tokenCheckedAt = -.infinity
-            noteBuildLog("bitbucket: 403 on \(url.path)")
-            return nil
-        case 429:
-            let wait = Double(http.value(forHTTPHeaderField: "Retry-After") ?? "") ?? 120
-            pauseUntil = now + max(30, wait)
-            slowUntil = now + 900
-            slowFactor = max(slowFactor, 2)
+        case .rateLimited(let wait):
             status = SourceStatus(text: "rate limited", help: "Bitbucket asked to slow down; polling waits \(Int(max(30, wait))) s, then runs at a slower pace for 15 minutes.")
             noteBuildLog("bitbucket: 429, waiting \(Int(max(30, wait))) s")
             return nil
-        default:
-            if now >= slowUntil { slowFactor = 1 }
-            if http.statusCode == 200 || http.statusCode == 206, let etag = http.value(forHTTPHeaderField: "ETag"), data.count < 512_000 {
-                if etags.count > 300 { etags.removeAll() }
-                etags[cacheKey] = (etag, data)
+        case .response(let data, let http):
+            if http.statusCode == 403, kind == "list" || kind == "gate" {
+                status = SourceStatus(text: "needs read:pipeline", help: "The token in \(BitbucketConfig.tokenService) works but lacks a scope. Create one with read:repository, read:pipeline, read:pullrequest and read:user.", isSetup: true)
+                await client.markLacksScope(Self.lane)
+                noteBuildLog("bitbucket: 403 on \(url.path)")
+                return nil
             }
             return (data, http)
         }
     }
 
-    private func counts() -> (RequestCount, Int) {
-        let now = self.now
-        var count = RequestCount()
-        var notModified = 0
-        for request in requests where now - request.at <= 3600 {
-            count.total += 1
-            count.byKind[request.kind, default: 0] += 1
-            if request.notModified { notModified += 1 }
-        }
-        return (count, notModified)
+    private func counts() async -> (RequestCount, Int) {
+        await client.counts(Self.lane)
     }
 
     /// Dev: with CLAUDE_NOTCH_BUILD_TIMING, the rolling count every 5 minutes on stderr.
-    private func logCountIfDue() {
+    private func logCountIfDue() async {
         guard ProcessInfo.processInfo.environment["CLAUDE_NOTCH_BUILD_TIMING"] != nil, now - countLoggedAt >= 300 else { return }
         countLoggedAt = now
-        let (count, notModified) = counts()
+        let (count, notModified) = await counts()
         FileHandle.standardError.write(Data("bitbucket requests: \(count.summary), 304s \(notModified)\n".utf8))
     }
 
-    private func publish() {
+    private func publish() async {
         let now = self.now
         var all: [PipelineRun] = []
         for repo in repos {
@@ -912,9 +860,9 @@ actor BitbucketSource {
             }
         }
         all.sort { $0.createdAt > $1.createdAt }
-        let (count, notModified) = counts()
+        let (count, notModified) = await counts()
         let snapshot = BitbucketSnapshot(runs: all, status: status, fetchedAt: listedAt.values.max() ?? 0, repoCount: repos.count,
-                                         tokenExpiresAt: KeychainItem.expiry(in: token?.comment), requests: count, owner: owner,
+                                         tokenExpiresAt: await client.tokenExpiry(for: Self.lane), requests: count, owner: owner,
                                          notModified: notModified)
         var compare = snapshot
         compare.fetchedAt = last.fetchedAt
@@ -928,21 +876,9 @@ actor BitbucketSource {
 
     private var lastSentAt: Double = 0
 
-    private static func readToken() -> KeychainItem.Found? {
-        // Dev: a stub's token from a file, which a test rewrites like a re-saved Keychain item.
-        if BitbucketConfig.isStubbed, let file = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_BITBUCKET_TEST_TOKEN_FILE"] {
-            guard let secret = (try? String(contentsOfFile: file, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines), !secret.isEmpty else { return nil }
-            return KeychainItem.Found(secret: secret, account: "stub", comment: nil)
-        }
-        if BitbucketConfig.isStubbed, let stub = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_BITBUCKET_TEST_TOKEN"] {
-            return KeychainItem.Found(secret: stub, account: "stub", comment: ProcessInfo.processInfo.environment["CLAUDE_NOTCH_BITBUCKET_TEST_EXPIRY"])
-        }
-        return KeychainItem.read(service: BitbucketConfig.tokenService)
-    }
-
     /// Dev: one poll of one repository, as the poller does it.
     func debugFetch(_ repo: BitbucketRepo) async -> [PipelineRun] {
-        if token == nil { token = Self.readToken() }
+        await client.loadTokenNow()
         if repos.isEmpty { repos = [repo] }
         await resolveOwner()
         await poll(repo, pagelen: 10, sweep: true)
@@ -955,14 +891,14 @@ actor BitbucketSource {
     }
 
     func debugOwner() -> BitbucketOwner? { owner }
-    func debugCounts() -> RequestCount { counts().0 }
+    func debugCounts() async -> RequestCount { await counts().0 }
 
     // MARK: Failure details
 
     /// What "Copy failure" copies for a run: where it ran, the failed step, its failed tests
     /// (when the step published a test report), and the end of its log.
     func failureReport(for key: String, easURLs: [URL]) async -> String {
-        if token == nil { token = Self.readToken() }
+        await client.loadTokenNow()
         guard var run = known.values.lazy.flatMap(\.values).first(where: { $0.id == key }) else {
             return "Bitbucket run \(key): not in the notch's data any more."
         }

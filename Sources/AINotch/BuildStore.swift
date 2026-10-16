@@ -94,6 +94,12 @@ final class BuildStore: ObservableObject {
     private var baseline: [BuildRow.Source: Double] = [:]
     private var known: [String: BuildState] = [:]
     private var notified: Set<String> = []
+    /// Runs whose finish was actually posted as a notification (a subset of `notified`).
+    private var posted: Set<String> = []
+    /// Whether one of my Bitbucket pipelines runs or is queued, as last told.
+    private var myPipelineRunning = false
+    /// Told when that changes: the pull-request lane reads its review lists less often meanwhile.
+    var onMyPipelineRunning: ((Bool) -> Void)?
     private var timer: Timer?
     /// When the last Bitbucket snapshot came (the source sends one at least every minute while it
     /// polls), and the EAS boost last sent: a stale snapshot never keeps EAS fast.
@@ -181,14 +187,27 @@ final class BuildStore: ObservableObject {
         }
     }
 
-    /// The notch opened: failures on show count as seen, and stale data is refreshed.
-    func panelOpened() {
-        isOpen = true
-        held = Set(rows.filter { $0.state == .failed }.map(\.id))
-        seen.formUnion(held)
+    /// The notch opened: failures on show count as seen, and stale data is refreshed. Pinned open
+    /// with the pointer away (`looking: false`), the sources read as for an open notch but
+    /// nothing counts as seen.
+    func panelOpened(looking: Bool = true) {
+        isOpen = looking
+        if looking {
+            held = Set(rows.filter { $0.state == .failed }.map(\.id))
+            seen.formUnion(held)
+        }
         easSource?.refreshSoon()
         easSource?.setPanelOpen(true)
         if let bitbucketSource { Task { await bitbucketSource.setPanelOpen(true) } }
+        recompute()
+    }
+
+    /// Pinned open, the pointer left: what was held lets go as when the notch closes, and a
+    /// failure that arrives now stays unseen (its ✕ in the wing) until the pointer comes back.
+    /// The sources keep reading as for an open notch.
+    func lookedAway() {
+        isOpen = false
+        held = []
         recompute()
     }
 
@@ -258,6 +277,11 @@ final class BuildStore: ObservableObject {
         if snapshot.fetchedAt > 0 { noteTransitions(.bitbucket, items: snapshot.runs.map { ("bb:\($0.id)", $0.state, $0.completedAt) }) }
         // A running pipeline may start an EAS build: EAS reads its list more often meanwhile.
         easSource?.setOthersActive(snapshot.runs.contains { $0.state.isRunning })
+        let mineRunning = snapshot.runs.contains { $0.state.isRunning && snapshot.owner?.owns($0) == true }
+        if mineRunning != myPipelineRunning {
+            myPipelineRunning = mineRunning
+            onMyPipelineRunning?(mineRunning)
+        }
         recompute()
         measure(started)
     }
@@ -290,11 +314,18 @@ final class BuildStore: ObservableObject {
         // "All" is for looking: only my own runs notify.
         guard let row = rows.first(where: { $0.id == id }), row.isMine, !prefs.muted.contains(row.muteKey) else { return }
         let failed = row.state == .failed
+        posted.insert(id)
         let source = row.source == .eas ? "EAS build" : "Bitbucket pipeline"
         Notifier.shared.postBuild(id: id, title: "\(source) \(failed ? "failed" : "passed")",
                                   subtitle: ([row.title] + row.chips.prefix(1)).joined(separator: " · "),
                                   body: failed ? (row.failure ?? row.detail ?? "") : (row.detail ?? "Took \(elapsed((row.finishedAt ?? row.startedAt) - row.startedAt))"),
                                   failed: failed)
+    }
+
+    /// Whether Pipelines posted this run's finish: the pull-request lane then does not announce
+    /// the same failed build again.
+    func hasNotified(_ ref: PipelineRef) -> Bool {
+        posted.contains("bb:\(ref.key)")
     }
 
     private func notificationAction(_ id: String, _ action: Notifier.BuildAction) {

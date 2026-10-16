@@ -168,14 +168,16 @@ enum KeychainItem {
         }
     }
 
-    static func read(service: String) -> Found? {
-        guard let secret = runProcess("/usr/bin/security", ["find-generic-password", "-s", service, "-w"], timeout: 5),
+    /// The item for `service` (and `account`, when one service holds several secrets).
+    static func read(service: String, account: String? = nil) -> Found? {
+        let match = ["-s", service] + (account.map { ["-a", $0] } ?? [])
+        guard let secret = runProcess("/usr/bin/security", ["find-generic-password"] + match + ["-w"], timeout: 5),
               secret.status == 0 else { return nil }
         let value = String(decoding: secret.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
         var found = Found(secret: value)
         // The attributes (no secret in them): the account and the comment.
-        if let attributes = runProcess("/usr/bin/security", ["find-generic-password", "-s", service], timeout: 5), attributes.status == 0 {
+        if let attributes = runProcess("/usr/bin/security", ["find-generic-password"] + match, timeout: 5), attributes.status == 0 {
             let text = String(decoding: attributes.output, as: UTF8.self)
             found.account = attribute("acct", in: text)
             found.comment = attribute("icmt", in: text)
