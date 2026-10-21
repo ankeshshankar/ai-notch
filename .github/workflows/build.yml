@@ -21,3 +21,16 @@ jobs:
         run: swift build -c release
       - name: VPN helper self-check
         run: .build/release/ai-notch-vpnd selfcheck
+      # A look at the open notch with sample sessions, for a design check. Never fails the build.
+      - name: Screenshots
+        continue-on-error: true
+        timeout-minutes: 3
+        run: scripts/dev/ci-screenshots.sh screenshots
+      - name: Upload screenshots
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: notch-screenshots
+          path: screenshots/
+          if-no-files-found: ignore
