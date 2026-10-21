@@ -130,6 +130,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   </dict></array>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>AI Notch selects the Terminal or iTerm2 tab a session runs in when you click its row.</string>
 </dict>
 </plist>
 PLIST

@@ -226,6 +226,18 @@ func mcpServer(of tool: String) -> String? {
     return String(rest[..<end.lowerBound])
 }
 
+/// A process's controlling terminal, as /dev/ttys…; nil without one.
+func terminal(of pid: Int32) -> String? {
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+    let device = info.kp_eproc.e_tdev
+    guard device != -1, let name = devname(device, S_IFCHR) else { return nil }
+    let text = String(cString: name)
+    return text.isEmpty || text == "??" ? nil : "/dev/" + text
+}
+
 /// The Claude Code process above this hook: the first ancestor whose executable path says claude.
 func claudePid() -> Int32? {
     var pid = getppid()
@@ -290,6 +302,9 @@ if isCursor {
     if state.appBundleId == nil { state.appBundleId = env["__CFBundleIdentifier"] }
     if state.entrypoint == nil { state.entrypoint = env["CLAUDE_CODE_ENTRYPOINT"] }
 }
+// The terminal it runs in, once: the agent's controlling terminal, and tmux's pane.
+if state.tty == nil, let pid = state.pid { state.tty = terminal(of: pid) }
+if state.tmuxPane == nil, env["TMUX"] != nil, let pane = env["TMUX_PANE"], !pane.isEmpty { state.tmuxPane = pane }
 // A rename: every event carries the name as it is now.
 if let title = string("session_title") { state.sessionTitle = oneLine(title, max: 120) }
 
