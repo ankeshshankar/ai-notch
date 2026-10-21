@@ -40,25 +40,28 @@ struct VPNChip: View {
     }
 }
 
-/// The VPN panel: a row per imported profile with its state and Connect or Disconnect, the
-/// connection's address, time and traffic, and why the last one ended.
+/// The VPN panel, compact: a line per imported profile with its state and Connect or
+/// Disconnect. The chevron opens the rest: each connection's address, time and traffic, the
+/// server, Import… and the log. A problem or a sign-in waiting shows either way.
 struct VPNPanel: View {
     @ObservedObject var vpn: VPNStore
     var now: Double
     @State private var showsLog = false
+    /// The details are open; remembered.
+    @AppStorage("vpn.panelDetails") private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text("VPN").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.done)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Capsule().fill(Palette.doneHue.opacity(0.16)))
-                InfoMark(text: Self.about)
                 if let working = vpn.working {
                     Text(working).font(.system(size: 10)).foregroundStyle(Palette.ink3)
                 }
                 Spacer(minLength: 6)
-                if vpn.helper == .running {
+                if expanded, vpn.helper == .running {
+                    InfoMark(text: Self.about)
                     if !vpn.profiles.isEmpty {
                         small(showsLog ? "Hide log" : "Log") {
                             showsLog.toggle()
@@ -67,13 +70,25 @@ struct VPNPanel: View {
                     }
                     small("Import…") { vpn.importProfile() }
                 }
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        expanded.toggle()
+                        if !expanded { showsLog = false }
+                    }
+                } label: {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
+                        .frame(width: 18, height: 16).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(expanded ? "Fewer details" : "Details, Import… and the log")
             }
             content
             if let note = vpn.note {
                 Text(note).font(.system(size: 10)).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(10)
+        .padding(.horizontal, 10).padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
     }
@@ -107,37 +122,57 @@ struct VPNPanel: View {
                 Text("OpenVPN is missing beside the helper. Setup → VPN can install it again.").font(.system(size: 11)).foregroundStyle(Palette.failed)
             }
             if vpn.profiles.isEmpty {
-                Text("No profiles yet. Import… takes an .ovpn file from your VPN provider or admin.")
-                    .font(.system(size: 11)).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Text("No profiles yet.").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+                    Spacer(minLength: 6)
+                    small("Import…") { vpn.importProfile() }
+                }
             } else {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: expanded ? 6 : 4) {
                     ForEach(vpn.profiles) { profile in row(profile) }
                 }
             }
             if vpn.session == nil, let end = vpn.status?.lastEnd, !end.byUser, let reason = end.reason {
                 Text("\(vpn.profile(end.profileId)?.name ?? "VPN"): \(reason)")
-                    .font(.system(size: 10)).foregroundStyle(Palette.failed).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                    .font(.system(size: 10)).foregroundStyle(Palette.failed).lineLimit(expanded ? 3 : 1)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(reason)
             }
-            if showsLog { logView }
+            if expanded, showsLog { logView }
         }
     }
 
     private func row(_ profile: VPNProfileInfo) -> some View {
         let session = vpn.session?.profileId == profile.id ? vpn.session : nil
+        // Closed, the second line only for what needs you: a problem, a sign-in.
+        let showsDetail = expanded || session?.problem != nil || session?.prompt != nil
         return HStack(spacing: 8) {
             Image(systemName: session?.phase == .connected ? "lock.shield.fill" : "network")
                 .font(.system(size: 11)).frame(width: 14)
                 .foregroundStyle(session.map { $0.phase == .connected ? Palette.done : Palette.waiting } ?? Palette.ink2)
             VStack(alignment: .leading, spacing: 1) {
-                Text(profile.name).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.9)).lineLimit(1)
-                Text(detail(profile, session)).font(.system(size: 10).monospacedDigit())
-                    .foregroundStyle(session?.problem != nil ? Palette.failed : Palette.ink3)
-                    .lineLimit(1).truncationMode(.tail)
+                HStack(spacing: 6) {
+                    Text(profile.name).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.9)).lineLimit(1)
+                    if !showsDetail, let session {
+                        Text(short(session)).font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3).lineLimit(1)
+                    }
+                }
+                if showsDetail {
+                    Text(detail(profile, session)).font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(session?.problem != nil ? Palette.failed : Palette.ink3)
+                        .lineLimit(1).truncationMode(.tail)
+                }
             }
             Spacer(minLength: 6)
             button(profile, session)
         }
-        .help(profile.servers.joined(separator: ", "))
+        .help(session.map { detail(profile, $0) } ?? profile.servers.joined(separator: ", "))
+    }
+
+    /// Beside the name while the details are closed: how long it has been up, or its state.
+    private func short(_ session: VPNSession) -> String {
+        if session.phase == .connected, let since = session.connectedAt { return elapsed(now - since) }
+        return session.phase.label + "…"
     }
 
     /// Under the name: the server when idle; the state, or address, time and traffic once connected.
