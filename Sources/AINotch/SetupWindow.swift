@@ -13,12 +13,17 @@ final class SetupModel: ObservableObject {
     @Published private(set) var claude: ItemStatus = .notSetUp
     /// Nil when there is no `~/.cursor`: the row is not shown.
     @Published private(set) var cursor: ItemStatus?
+    /// Nil without `~/.codex` or `~/.gemini`: their rows are not shown.
+    @Published private(set) var codex: ItemStatus?
+    @Published private(set) var gemini: ItemStatus?
     @Published private(set) var login: ItemStatus = .notSetUp
     @Published private(set) var notifications: UNAuthorizationStatus?
     @Published private(set) var accessibility = false
     /// The optional items Set Up asks for.
     @Published var wantsNotifications = true
     @Published var wantsAccessibility = false
+    /// The agent process watcher (AgentWatcher): on unless turned off here.
+    @Published private(set) var watchAgents = AgentWatcher.isEnabled
     /// The last Set Up's or Disconnect's errors, by item.
     @Published private(set) var errors: [String: String] = [:]
     @Published private(set) var backups: [String] = []
@@ -50,9 +55,14 @@ final class SetupModel: ObservableObject {
     private var timer: Timer?
 
     var hookBlocked: Bool { probe.map { !$0.runs } ?? false }
-    var requiredDone: Bool { location.problem == nil && !hookBlocked && claude.isDone && (cursor?.isDone ?? true) && login.isDone }
+    var requiredDone: Bool {
+        location.problem == nil && !hookBlocked && claude.isDone && (cursor?.isDone ?? true)
+            && (codex?.isDone ?? true) && (gemini?.isDone ?? true) && login.isDone
+    }
     /// Hooks in the user's files point at this copy (all of them or some).
-    var connected: Bool { claude == .done || claude == .incomplete || cursor == .done || cursor == .incomplete }
+    var connected: Bool {
+        [claude, cursor, codex, gemini].contains { $0 == .done || $0 == .incomplete }
+    }
     var unquarantineCommand: String { HookProbe.unquarantineCommand(location.bundle) }
 
     func start() {
@@ -88,6 +98,8 @@ final class SetupModel: ObservableObject {
         set(\.claude, Setup.claudeStatus(location))
         if claude.isDone { UserDefaults.standard.set(location.bundle.path, forKey: SetupWindowController.connectedKey) }
         set(\.cursor, Setup.hasCursor ? Setup.cursorStatus(location) : nil)
+        set(\.codex, Setup.hasCodex ? Setup.codexStatus(location) : nil)
+        set(\.gemini, Setup.hasGemini ? Setup.geminiStatus(location) : nil)
         set(\.login, Setup.loginStatus(location))
         set(\.accessibility, AXIsProcessTrusted())
         set(\.buildsConfig, BuildsConfigInfo(BuildsConfig.current, exists: BuildsConfig.fileExists))
@@ -195,6 +207,11 @@ final class SetupModel: ObservableObject {
     func recheckBitbucket() {
         SetupWindowController.shared.builds?.recheckBitbucket()
         SetupWindowController.shared.reviews?.recheckToken()
+    }
+
+    func setWatchAgents(_ on: Bool) {
+        watchAgents = on
+        UserDefaults.standard.set(on, forKey: AgentWatcher.enabledKey)
     }
 
     func setMachineOn(_ on: Bool) {
@@ -395,6 +412,8 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         let here: [ItemStatus] = [.done, .incomplete]
         let connected = here.contains(Setup.claudeStatus(location))
             || (Setup.hasCursor && here.contains(Setup.cursorStatus(location)))
+            || (Setup.hasCodex && here.contains(Setup.codexStatus(location)))
+            || (Setup.hasGemini && here.contains(Setup.geminiStatus(location)))
             || UserDefaults.standard.string(forKey: Self.connectedKey) == location.bundle.path
         guard connected else { return }
         model.checkHook { [weak self] runs in
@@ -646,6 +665,20 @@ struct SetupView: View {
                         status(cursor, done: "Connected", error: model.errors["cursor"])
                     }
                 }
+                if let codex = model.codex {
+                    divider
+                    row("Codex", icon: "chevron.left.forwardslash.chevron.right", tint: Color(red: 0.06, green: 0.55, blue: 0.42),
+                        info: "Adds the hook to 10 Codex events, in ~/.codex/hooks.json: its turns, tools, subagents and permission prompts (answered in Codex, not the notch). Codex runs a new hook only once you trust it: in Codex, type /hooks and trust AI Notch's. A backup is saved first.") {
+                        status(codex, done: "Connected", error: model.errors["codex"])
+                    }
+                }
+                if let gemini = model.gemini {
+                    divider
+                    row("Gemini CLI", icon: "sparkles", tint: Color(red: 0.26, green: 0.52, blue: 0.96),
+                        info: "Adds the hook to 7 Gemini CLI events, in ~/.gemini/settings.json: its turns, tools and the notification it raises when a tool waits for you. Not its model hooks, which run on every request. Your other settings stay as they are. A backup is saved first.") {
+                        status(gemini, done: "Connected", error: model.errors["gemini"])
+                    }
+                }
                 divider
                 row("Open at login", icon: "power", tint: Color(red: 0.36, green: 0.62, blue: 0.40),
                     info: "A login item (~/Library/LaunchAgents/info.ankeshshiv.notch.plist) starts AI Notch when you log in and restarts it if it crashes. Quit in the notch keeps it quit until your next login.") {
@@ -666,6 +699,12 @@ struct SetupView: View {
                     info: "Accessibility access lets a click on a session raise its exact window. Without it, the app it runs in comes to the front.") {
                     optional(granted: model.accessibility, unavailable: false, denied: false,
                              wants: $model.wantsAccessibility, ask: model.askForAccessibility)
+                }
+                divider
+                row("Other agents", icon: "cpu", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
+                    info: "Coding agents without hooks, found as processes: Aider, Goose, Amp, Factory Droid, Crush, GitHub Copilot CLI, OpenCode, Qwen Code, Kimi and others, and Codex or Gemini CLI where their hooks are not set up. Each shows as a row with its folder and the app it runs in; working or idle is read from its CPU. Add names in \(BuildsConfig.displayPath): \"agents\": {\"watch\": {\"mybot\": \"My Bot\"}, \"ignore\": [\"amp\"]}. Any agent or script can also report itself: ai-notch-hook report working --agent \"My Bot\" (see the README).") {
+                    Toggle("", isOn: Binding(get: { model.watchAgents }, set: { model.setWatchAgents($0) }))
+                        .toggleStyle(.switch).controlSize(.small).labelsHidden()
                 }
                 divider
                 if hasWidget {

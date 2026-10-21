@@ -68,6 +68,15 @@ enum ProcessList {
         return String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
+    /// The process's current folder, or nil when it cannot be read (another user's process).
+    static func cwd(of pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        let path = withUnsafeBytes(of: &info.pvi_cdir.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        return path.isEmpty ? nil : path
+    }
+
     /// Whether `pid` leads its session (a terminal's or a login's shell does).
     static func leadsSession(_ pid: pid_t) -> Bool { getsid(pid) == pid }
 

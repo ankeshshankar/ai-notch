@@ -159,6 +159,42 @@ public struct SessionState: Codable, Sendable, Equatable {
     public var runningAgents: [AgentNow] { agents.filter(\.isRunning) }
     /// A chat of Cursor's own agent, not a Claude Code session.
     public var isCursorAgent: Bool { entrypoint == "cursor-agent" }
+    /// Who runs the session (see AgentKind).
+    public var kind: AgentKind { AgentKind(entrypoint: entrypoint) }
+}
+
+/// Who runs a session. Claude Code's own hooks leave `entrypoint` as Claude Code names it (`cli`,
+/// `claude-vscode`, …); the other hooks write `cursor-agent`, `codex-agent` or `gemini-agent`; an
+/// agent the notch only sees as a process, or one that reports itself (`ai-notch-hook report`),
+/// `agent:<its name>`.
+public enum AgentKind: Equatable, Sendable {
+    case claude, cursor, codex, gemini
+    /// Seen by the process watcher, or reported: its name.
+    case other(String)
+
+    public static let codexEntrypoint = "codex-agent"
+    public static let geminiEntrypoint = "gemini-agent"
+    public static let otherPrefix = "agent:"
+
+    public init(entrypoint: String?) {
+        switch entrypoint {
+        case "cursor-agent": self = .cursor
+        case AgentKind.codexEntrypoint: self = .codex
+        case AgentKind.geminiEntrypoint: self = .gemini
+        case let value? where value.hasPrefix(AgentKind.otherPrefix): self = .other(String(value.dropFirst(AgentKind.otherPrefix.count)))
+        default: self = .claude
+        }
+    }
+
+    public var name: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .cursor: return "Cursor Agent"
+        case .codex: return "Codex"
+        case .gemini: return "Gemini CLI"
+        case .other(let name): return name.isEmpty ? "Agent" : name
+        }
+    }
 }
 
 /// A model id as people say it: `claude-opus-5-5` is "Opus 5.5", `claude-haiku-4-5-20251001`

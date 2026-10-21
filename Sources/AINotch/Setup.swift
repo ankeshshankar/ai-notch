@@ -1,8 +1,9 @@
 import AppKit
 import Foundation
 
-// First-launch setup: points Claude Code's and Cursor's hooks at this copy of the app, adds the
-// login item, and undoes the hooks again (Disconnect). Every edit merges into the user's file:
+// First-launch setup: points Claude Code's hooks at this copy of the app (and Cursor's, Codex's
+// and Gemini CLI's where their folder exists), adds the login item, and undoes the hooks again
+// (Disconnect). Every edit merges into the user's file:
 // only AI Notch's hook entries are added, moved to this copy or removed; everything else keeps
 // its place and its bytes. A file is backed up (`<file>.bak-setup-<time>`) before each write, and
 // written atomically; a file setup would not change is not touched at all.
@@ -20,6 +21,10 @@ enum SetupPaths {
     static var claudeSettings: URL { home.appendingPathComponent(".claude/settings.json") }
     static var cursorDir: URL { home.appendingPathComponent(".cursor", isDirectory: true) }
     static var cursorHooks: URL { cursorDir.appendingPathComponent("hooks.json") }
+    static var codexDir: URL { home.appendingPathComponent(".codex", isDirectory: true) }
+    static var codexHooks: URL { codexDir.appendingPathComponent("hooks.json") }
+    static var geminiDir: URL { home.appendingPathComponent(".gemini", isDirectory: true) }
+    static var geminiSettings: URL { geminiDir.appendingPathComponent("settings.json") }
     static let agentLabel = "info.ankeshshiv.notch"
     static var launchAgent: URL { home.appendingPathComponent("Library/LaunchAgents/\(agentLabel).plist") }
 
@@ -308,6 +313,34 @@ enum HookPlan {
     static let cursor = ["sessionStart", "sessionEnd", "beforeSubmitPrompt", "postToolUse",
                          "postToolUseFailure", "afterMCPExecution", "subagentStop", "stop"]
     static let cursorTimeout = 5
+
+    /// Codex (`~/.codex/hooks.json`): Claude Code's event names, timeouts in seconds (SessionEnd and
+    /// Interrupt take at most 3). Its PermissionRequest only marks the session waiting: the
+    /// prompt is answered in Codex.
+    static let codex: [Event] = [
+        Event(name: "SessionStart", timeout: 5),
+        Event(name: "SessionEnd", timeout: 3),
+        Event(name: "UserPromptSubmit", timeout: 5),
+        Event(name: "Stop", timeout: 5),
+        Event(name: "Interrupt", timeout: 3),
+        Event(name: "SubagentStart", timeout: 5),
+        Event(name: "SubagentStop", timeout: 5),
+        Event(name: "PreToolUse", timeout: 5),
+        Event(name: "PostToolUse", timeout: 5),
+        Event(name: "PermissionRequest", timeout: 5),
+    ]
+
+    /// Gemini CLI (`~/.gemini/settings.json`): its turn, its tools and its notifications,
+    /// timeouts in milliseconds. Not its model hooks, which run on every request.
+    static let gemini: [Event] = [
+        Event(name: "SessionStart", timeout: 5000),
+        Event(name: "SessionEnd", timeout: 5000),
+        Event(name: "BeforeAgent", timeout: 5000),
+        Event(name: "AfterAgent", timeout: 5000),
+        Event(name: "BeforeTool", timeout: 5000),
+        Event(name: "AfterTool", timeout: 5000),
+        Event(name: "Notification", timeout: 5000),
+    ]
 }
 
 struct SetupError: Error, CustomStringConvertible {
@@ -332,10 +365,59 @@ enum ClaudeSettingsEdit {
     static func connect(_ root: OrderedJSON, hook: String) throws -> OrderedJSON {
         guard root.members != nil else { throw SetupError(description: "settings.json isn't a JSON object") }
         var root = root
-        var hooks = root["hooks"] ?? .object([])
+        let hooks = root["hooks"] ?? .object([])
         guard hooks.members != nil else { throw SetupError(description: "settings.json's \"hooks\" isn't an object") }
         let command = hookCommand(hook)
-        let plan = Dictionary(uniqueKeysWithValues: HookPlan.claude.map { ($0.name, $0) })
+        root["hooks"] = GroupedHooks.connect(hooks, plan: HookPlan.claude, program: command, command: command)
+
+        // The status line: the user's command, run by the hook after it notes the plan limits.
+        if var line = root["statusLine"], line.members != nil {
+            if let current = line["command"]?.stringValue {
+                line["command"] = .string(statusLineCommand(hook, wrapping: unwrapped(current) ?? current))
+                root["statusLine"] = line
+            }
+        } else if root["statusLine"] == nil {
+            root["statusLine"] = .object([
+                .init(key: "type", value: .string("command")),
+                .init(key: "command", value: .string(statusLineCommand(hook, wrapping: ""))),
+            ])
+        }
+        return root
+    }
+
+    static func disconnect(_ root: OrderedJSON) throws -> OrderedJSON {
+        guard root.members != nil else { throw SetupError(description: "settings.json isn't a JSON object") }
+        var root = GroupedHooks.disconnect(root)
+        if var line = root["statusLine"], let current = line["command"]?.stringValue, let inner = unwrapped(current) {
+            if inner.isEmpty {
+                // A status line setup added: it goes. One with settings of its own keeps them.
+                let own = (line.members ?? []).filter { $0.key != "type" && $0.key != "command" }
+                if own.isEmpty { root["statusLine"] = nil } else { line["command"] = nil; root["statusLine"] = line }
+            } else {
+                line["command"] = .string(inner)
+                root["statusLine"] = line
+            }
+        }
+        return root
+    }
+
+    /// The hook paths the file's notch hook entries and status line point at.
+    static func pointsAt(_ root: OrderedJSON) -> Set<String> {
+        var paths = GroupedHooks.pointsAt(root)
+        if let words = Shell.notchWords(root["statusLine"]?["command"]?.stringValue) { paths.insert(words[0]) }
+        return paths
+    }
+}
+
+/// Hooks laid out as Claude Code lays them out (event → matcher groups → handlers), which Codex's
+/// hooks.json and Gemini CLI's settings.json share. Only AI Notch's entries are added, moved to
+/// this copy or removed; every other entry, group and key keeps its place.
+enum GroupedHooks {
+    /// `command` on each planned event. An entry of ours on an event outside the plan keeps its
+    /// own arguments, with `program` (the hook's path, quoted) as its program.
+    static func connect(_ hooks: OrderedJSON, plan events: [HookPlan.Event], program: String, command: String) -> OrderedJSON {
+        var hooks = hooks
+        let plan = Dictionary(uniqueKeysWithValues: events.map { ($0.name, $0) })
 
         for member in hooks.members ?? [] {
             guard let groups = member.value.items else { continue }
@@ -360,7 +442,7 @@ enum ClaudeSettingsEdit {
                     } else {
                         // An event outside the plan keeps its entry, pointed at this copy.
                         var e = entry
-                        e["command"] = .string(([command] + words.dropFirst().map(Shell.quoteIfNeeded)).joined(separator: " "))
+                        e["command"] = .string(([program] + words.dropFirst().map(Shell.quoteIfNeeded)).joined(separator: " "))
                         kept.append(e)
                     }
                 }
@@ -376,24 +458,10 @@ enum ClaudeSettingsEdit {
             if let spec, !found { newGroups.append(newGroup(spec, command: command)) }
             hooks[member.key] = .array(newGroups)
         }
-        for spec in HookPlan.claude where hooks[spec.name] == nil {
+        for spec in events where hooks[spec.name] == nil {
             hooks[spec.name] = .array([newGroup(spec, command: command)])
         }
-        root["hooks"] = hooks
-
-        // The status line: the user's command, run by the hook after it notes the plan limits.
-        if var line = root["statusLine"], line.members != nil {
-            if let current = line["command"]?.stringValue {
-                line["command"] = .string(statusLineCommand(hook, wrapping: unwrapped(current) ?? current))
-                root["statusLine"] = line
-            }
-        } else if root["statusLine"] == nil {
-            root["statusLine"] = .object([
-                .init(key: "type", value: .string("command")),
-                .init(key: "command", value: .string(statusLineCommand(hook, wrapping: ""))),
-            ])
-        }
-        return root
+        return hooks
     }
 
     private static func newGroup(_ spec: HookPlan.Event, command: String) -> OrderedJSON {
@@ -407,8 +475,8 @@ enum ClaudeSettingsEdit {
         return .object(members)
     }
 
-    static func disconnect(_ root: OrderedJSON) throws -> OrderedJSON {
-        guard root.members != nil else { throw SetupError(description: "settings.json isn't a JSON object") }
+    /// `root` without AI Notch's entries in its "hooks": an emptied group, event or "hooks" goes too.
+    static func disconnect(_ root: OrderedJSON) -> OrderedJSON {
         var root = root
         if var hooks = root["hooks"], let events = hooks.members {
             var removedAny = false
@@ -432,20 +500,10 @@ enum ClaudeSettingsEdit {
             }
             if removedAny { root["hooks"] = hooks.members?.isEmpty == true ? nil : hooks }
         }
-        if var line = root["statusLine"], let current = line["command"]?.stringValue, let inner = unwrapped(current) {
-            if inner.isEmpty {
-                // A status line setup added: it goes. One with settings of its own keeps them.
-                let own = (line.members ?? []).filter { $0.key != "type" && $0.key != "command" }
-                if own.isEmpty { root["statusLine"] = nil } else { line["command"] = nil; root["statusLine"] = line }
-            } else {
-                line["command"] = .string(inner)
-                root["statusLine"] = line
-            }
-        }
         return root
     }
 
-    /// The hook paths the file's notch hook entries and status line point at.
+    /// The hook paths AI Notch's entries in `root["hooks"]` point at.
     static func pointsAt(_ root: OrderedJSON) -> Set<String> {
         var paths = Set<String>()
         for member in root["hooks"]?.members ?? [] {
@@ -455,8 +513,35 @@ enum ClaudeSettingsEdit {
                 }
             }
         }
-        if let words = Shell.notchWords(root["statusLine"]?["command"]?.stringValue) { paths.insert(words[0]) }
         return paths
+    }
+}
+
+/// The edits to Codex's `~/.codex/hooks.json` (`ai-notch-hook codex`) and Gemini CLI's
+/// `~/.gemini/settings.json` (`ai-notch-hook gemini`): their hooks, in Claude Code's layout.
+struct GroupedHooksEdit {
+    var file: String
+    var mode: String
+    var plan: [HookPlan.Event]
+
+    static let codex = GroupedHooksEdit(file: "hooks.json", mode: "codex", plan: HookPlan.codex)
+    static let gemini = GroupedHooksEdit(file: "settings.json", mode: "gemini", plan: HookPlan.gemini)
+    static let empty: OrderedJSON = .object([.init(key: "hooks", value: .object([]))])
+
+    func command(_ hook: String) -> String { Shell.quoteIfNeeded(hook) + " " + mode }
+
+    func connect(_ root: OrderedJSON, hook: String) throws -> OrderedJSON {
+        guard root.members != nil else { throw SetupError(description: "\(file) isn't a JSON object") }
+        var root = root
+        let hooks = root["hooks"] ?? .object([])
+        guard hooks.members != nil else { throw SetupError(description: "\(file)'s \"hooks\" isn't an object") }
+        root["hooks"] = GroupedHooks.connect(hooks, plan: plan, program: Shell.quoteIfNeeded(hook), command: command(hook))
+        return root
+    }
+
+    func disconnect(_ root: OrderedJSON) throws -> OrderedJSON {
+        guard root.members != nil else { throw SetupError(description: "\(file) isn't a JSON object") }
+        return GroupedHooks.disconnect(root)
     }
 }
 
@@ -667,6 +752,24 @@ enum Setup {
         return FileManager.default.fileExists(atPath: SetupPaths.cursorDir.path, isDirectory: &isDir) && isDir.boolValue
     }
 
+    static var hasCodex: Bool { isFolder(SetupPaths.codexDir) }
+    static var hasGemini: Bool { isFolder(SetupPaths.geminiDir) }
+
+    private static func isFolder(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    static func codexStatus(_ location: AppLocation) -> ItemStatus {
+        status(of: SetupPaths.codexHooks, hook: location.hook.path,
+               connect: { try GroupedHooksEdit.codex.connect($0, hook: location.hook.path) }, pointsAt: GroupedHooks.pointsAt)
+    }
+
+    static func geminiStatus(_ location: AppLocation) -> ItemStatus {
+        status(of: SetupPaths.geminiSettings, hook: location.hook.path,
+               connect: { try GroupedHooksEdit.gemini.connect($0, hook: location.hook.path) }, pointsAt: GroupedHooks.pointsAt)
+    }
+
     static func claudeStatus(_ location: AppLocation) -> ItemStatus {
         status(of: SetupPaths.claudeSettings, hook: location.hook.path,
                connect: { try ClaudeSettingsEdit.connect($0, hook: location.hook.path) }, pointsAt: ClaudeSettingsEdit.pointsAt)
@@ -723,6 +826,16 @@ enum Setup {
                 if let w = try SettingsFile.edit(SetupPaths.cursorHooks, missing: CursorHooksEdit.empty, { try CursorHooksEdit.connect($0, hook: hook) }) { outcome.written.append(w) }
             } catch { outcome.errors["cursor"] = String(describing: error) }
         }
+        if hasCodex {
+            do {
+                if let w = try SettingsFile.edit(SetupPaths.codexHooks, missing: GroupedHooksEdit.empty, { try GroupedHooksEdit.codex.connect($0, hook: hook) }) { outcome.written.append(w) }
+            } catch { outcome.errors["codex"] = String(describing: error) }
+        }
+        if hasGemini {
+            do {
+                if let w = try SettingsFile.edit(SetupPaths.geminiSettings, missing: .object([]), { try GroupedHooksEdit.gemini.connect($0, hook: hook) }) { outcome.written.append(w) }
+            } catch { outcome.errors["gemini"] = String(describing: error) }
+        }
         do {
             if let w = try LoginItem.install(executable: location.executable) { outcome.written.append(w) }
         } catch { outcome.errors["login"] = String(describing: error) }
@@ -739,6 +852,12 @@ enum Setup {
         do {
             if let w = try SettingsFile.edit(SetupPaths.cursorHooks, missing: nil, CursorHooksEdit.disconnect) { outcome.written.append(w) }
         } catch { outcome.errors["cursor"] = String(describing: error) }
+        do {
+            if let w = try SettingsFile.edit(SetupPaths.codexHooks, missing: nil, GroupedHooksEdit.codex.disconnect) { outcome.written.append(w) }
+        } catch { outcome.errors["codex"] = String(describing: error) }
+        do {
+            if let w = try SettingsFile.edit(SetupPaths.geminiSettings, missing: nil, GroupedHooksEdit.gemini.disconnect) { outcome.written.append(w) }
+        } catch { outcome.errors["gemini"] = String(describing: error) }
         return outcome
     }
 
@@ -806,6 +925,8 @@ enum Setup {
         }
         line("claude", describe(claudeStatus(location)))
         line("cursor", hasCursor ? describe(cursorStatus(location)) : "no ~/.cursor")
+        line("codex", hasCodex ? describe(codexStatus(location)) : "no ~/.codex")
+        line("gemini", hasGemini ? describe(geminiStatus(location)) : "no ~/.gemini")
         line("login", describe(loginStatus(location)))
         return 0
     }

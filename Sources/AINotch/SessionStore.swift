@@ -28,6 +28,8 @@ final class SessionStore: ObservableObject {
     /// What each chat is called in its editor's list (by session id), read from its transcript.
     @Published private(set) var titles: [String: ChatTitles.Found] = [:]
     private let titleReader = ChatTitles()
+    /// Agents without hooks, seen as processes.
+    private let watcher = AgentWatcher()
     /// Permission prompts waiting for a click in the notch.
     let approvals = ApprovalCenter(preview: CommandLine.arguments.contains("--preview"))
     private var scanner: UsageScanner?
@@ -70,6 +72,7 @@ final class SessionStore: ObservableObject {
             Task { @MainActor in self?.took(snapshot) }
         }
         scanner?.start()
+        watcher.start()
         reload()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.reload() }
@@ -101,6 +104,9 @@ final class SessionStore: ObservableObject {
             if let first = usage.firstAt[shown.id], first < shown.startedAt { shown.startedAt = first }
             live.append(shown)
         }
+        // Agents the hooks do not cover, seen as processes; one a hook reports is left to the hook.
+        watcher.setHooked(Set(live.compactMap(\.pid)))
+        live += watcher.sessions.filter { row in !live.contains { $0.pid != nil && $0.pid == row.pid } }
         live.sort(by: order)
         approvals.reconcile(with: live)
         alert(for: live)
@@ -142,7 +148,7 @@ final class SessionStore: ObservableObject {
     /// open, or 15 minutes while a Claude Code session is busy; never twice within 2 minutes.
     private func askForLimits(soon: Bool) {
         let age = now - (claudeLimits?.at ?? 0)
-        let isBusy = sessions.contains { !$0.isCursorAgent && $0.phase != .idle }
+        let isBusy = sessions.contains { $0.kind == .claude && $0.phase != .idle }
         guard !isProbing, now - probeStartedAt > 120, age > (soon ? 180 : 900), soon || isBusy else { return }
         isProbing = true
         probeStartedAt = now
@@ -282,7 +288,12 @@ final class SessionStore: ObservableObject {
     func title(of session: SessionState) -> String {
         let found = titles[session.id]
         let prompt = session.firstPrompt.flatMap { $0.hasPrefix("<") ? nil : $0 }
-        let named = session.isCursorAgent ? found?.cursor : found?.custom ?? session.sessionTitle ?? found?.ai
+        let named: String?
+        switch session.kind {
+        case .cursor: named = found?.cursor
+        case .claude: named = found?.custom ?? session.sessionTitle ?? found?.ai
+        default: named = session.sessionTitle
+        }
         return named ?? prompt ?? session.project
     }
 
@@ -335,8 +346,9 @@ final class SessionStore: ObservableObject {
 
     private func isGone(_ state: SessionState) -> Bool {
         if let pid = state.pid { return kill(pid, 0) != 0 && errno == ESRCH }
-        // Cursor's chats name no process to watch; one quiet for half an hour has left the notch.
-        if state.isCursorAgent { return now - state.updatedAt > 1800 }
+        // Cursor's chats name no process to watch, nor does an agent that reports itself without
+        // --pid: one quiet for half an hour has left the notch.
+        if state.kind != .claude { return now - state.updatedAt > 1800 }
         return now - state.updatedAt > orphanAfter
     }
 
@@ -347,7 +359,8 @@ final class SessionStore: ObservableObject {
     }
 
     private func alert(for live: [SessionState]) {
-        for session in live {
+        // A watched agent's working or idle is read from its CPU: no sounds or notifications on it.
+        for session in live where !session.id.hasPrefix("watch-") {
             let before = phases[session.id]
             defer { phases[session.id] = session.phase }
             guard let before, before != session.phase else { continue }
