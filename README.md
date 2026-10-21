@@ -165,6 +165,25 @@ Edit, MultiEdit and Write prompts show a few lines of the change: removed lines 
 lines in green. While Claude keeps a to-do list, the row shows how far down it is (`3/7`) and the
 item under way; Details lists them all.
 
+### Stop, pause and notes
+
+Open a working session's Details and three small buttons sit beside **Less**:
+
+- **Note** (speech bubble): a small window takes a line ("use pnpm, not npm"); Claude gets it with
+  its next tool call, as context, without stopping.
+- **Pause**: Claude's next tool call waits until you click **Resume** (at most 30 minutes, then it
+  goes on). What it is writing at that moment finishes first.
+- **Stop**: Claude stops before its next tool call, as if you pressed Esc then.
+
+They work through the hooks: the app leaves `~/.claude/notch/sessions/<id>.control`, the hook reads
+it at each tool call and clears it as it acts; a turn's end clears it too. Pause needs the
+`PreToolUse` hook's longer timeout (30 minutes), so after updating, Setup shows the hooks as
+needing an update once. A paused or stopping row keeps its buttons and says so.
+
+Agents found as processes (Aider, Goose…) get Pause, which stops their processes (SIGSTOP; a reply
+being streamed may time out) and Resume, and Stop, which quits them (SIGTERM) on a second click.
+Codex and Gemini rows have no controls yet.
+
 ### Notifications
 
 Only while the screen is locked: a session that needs you, or a turn longer than a minute

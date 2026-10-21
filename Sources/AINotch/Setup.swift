@@ -298,7 +298,8 @@ enum HookPlan {
         Event(name: "Stop", timeout: 5),
         Event(name: "SubagentStart", timeout: 5),
         Event(name: "SubagentStop", timeout: 5),
-        Event(name: "PreToolUse", matcher: "*", timeout: 5),
+        // Long enough for a pause from the notch to hold the next call (the hook answers at once otherwise).
+        Event(name: "PreToolUse", matcher: "*", timeout: 1800),
         Event(name: "PostToolUse", matcher: "*", timeout: 5),
         Event(name: "PostToolUseFailure", matcher: "*", timeout: 5),
         Event(name: "PermissionRequest", matcher: "*", timeout: 1800),
