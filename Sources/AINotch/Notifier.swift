@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import NotchCore
 import UserNotifications
 
 /// macOS notifications for the moments that matter when you are away from the screen: a session
