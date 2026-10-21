@@ -493,8 +493,8 @@ private struct SessionList: View {
                     SessionRow(session: session, title: title, now: store.now, agentActivity: store.agentActivity, agentModels: store.agentModels,
                                usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
                                reserved: space, live: store.usage.live[session.id], compact: looks.compactRows,
-                               paused: controls.isPaused(session), stopping: controls.isStopping(session),
-                               prodWatch: prodWatch(session))
+                               prodWatch: prodWatch(session),
+                               paused: controls.isPaused(session), stopping: controls.isStopping(session))
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(RowButtonStyle())
