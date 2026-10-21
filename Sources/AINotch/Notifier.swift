@@ -16,6 +16,8 @@ final class Notifier: NSObject {
     var onBuild: ((String, BuildAction) -> Void)?
     /// A machine guard notification's Open: the notch on its Machine panel.
     var onMachine: (() -> Void)?
+    /// A VPN notification's Open: the notch on its VPN panel.
+    var onVPN: (() -> Void)?
     /// A Datadog notification's Snooze 1 h.
     var onProdSnooze: (() -> Void)?
 
@@ -136,6 +138,23 @@ final class Notifier: NSObject {
 
     private var prodCount = 0
 
+    /// A VPN connection dropped. Unlike the other status news it notifies while unlocked too:
+    /// traffic has stopped going through the VPN. Its one action opens the VPN panel.
+    func postVPN(title: String, subtitle: String, body: String) {
+        guard isAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = subtitle
+        content.body = body
+        content.categoryIdentifier = "alert"
+        content.userInfo = ["vpn": "1"]
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "vpn-dropped", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in self.note("posted “\(title)”\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
+        }
+    }
+
     /// The machine guard's memory-critical news: only while the screen is locked, like the other
     /// status news. Its one action is Open (the notch's Machine panel); nothing is ever closed
     /// from a notification.
@@ -216,6 +235,7 @@ extension Notifier: UNUserNotificationCenterDelegate {
         let build = info["build"] as? String
         let url = (info["url"] as? String).flatMap(URL.init(string:))
         let machine = info["machine"] != nil
+        let vpn = info["vpn"] != nil
         let prod = info["prod"] != nil
         let action = response.actionIdentifier
         Task { @MainActor in
@@ -231,6 +251,7 @@ extension Notifier: UNUserNotificationCenterDelegate {
             }
             if let url { NSWorkspace.shared.open(url) }
             if machine, action != UNNotificationDismissActionIdentifier { Notifier.shared.onMachine?() }
+            if vpn, action != UNNotificationDismissActionIdentifier { Notifier.shared.onVPN?() }
             if let session { Notifier.shared.onOpen?(session) }
             if let build { Notifier.shared.onBuild?(build, action == "copy" ? .copy : .open) }
             completionHandler()

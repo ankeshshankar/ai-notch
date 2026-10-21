@@ -3,6 +3,7 @@ import ApplicationServices
 import SwiftUI
 import UserNotifications
 import NotchCore
+import VPNCore
 
 /// The setup window's state: each item's live status, re-read every second while it is open.
 /// Nothing is written until Set Up (or Disconnect) is clicked.
@@ -225,6 +226,7 @@ final class SetupModel: ObservableObject {
 /// A section the window can open at.
 enum SetupFocus: Equatable {
     case prod
+    case vpn
 }
 
 /// builds.json in Setup: whether it is there and what it sets up.
@@ -363,6 +365,8 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     weak var prod: ProdStore?
     /// The running notch's machine guard, for the Machine section.
     weak var machine: MachineStore?
+    /// The running notch's VPN, for the VPN section.
+    weak var vpn: VPNStore?
     /// The running notch's pull requests, for the Builds section.
     weak var reviews: ReviewStore?
     let model = SetupModel()
@@ -570,6 +574,8 @@ struct SetupView: View {
     @State private var showsProdSteps = false
     @State private var showsTokenSteps = false
     @ObservedObject private var auth = DatadogAuthModel.shared
+    /// The running notch's VPN (a placeholder that asks nothing in a setup preview).
+    @ObservedObject private var vpn = SetupWindowController.shared.vpn ?? VPNStore()
     /// A team-signed build carries the widget and the app group it reads; an ad-hoc one neither.
     private let hasWidget: Bool = WidgetSnapshot.appGroup != nil
         && FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent("Contents/PlugIns/AINotchWidget.appex").path)
@@ -681,6 +687,9 @@ struct SetupView: View {
                 .id(SetupFocus.prod)
 
             machineSection
+
+            vpnSection
+                .id(SetupFocus.vpn)
 
             if isDone {
                 HStack(spacing: 10) {
@@ -1167,6 +1176,108 @@ struct SetupView: View {
     Optional, in \(BuildsConfig.displayPath):
     \(MachineConfig.example)
     warnBelowMB: amber under this much free memory. idleMinutes: quiet this long counts as idle. exclude: kinds never shown (metro, jest, verify, turbo, emulator, simulator, simulatorApp, gradle, kotlin, adb, watchman).
+    """
+
+    /// The VPN: its helper (install, update, remove), the chip, the drop notification, profiles.
+    private var vpnSection: some View {
+        section("VPN", highlighted: model.focus == .vpn) {
+            row("OpenVPN helper", icon: "lock.shield.fill", tint: Color(red: 0.22, green: 0.52, blue: 0.88), info: Self.vpnHelp) {
+                vpnHelperControl
+            }
+            divider
+            row("Show in the notch", icon: "rectangle.topthird.inset.filled", tint: Color(red: 0.36, green: 0.42, blue: 0.52),
+                info: "The VPN chip in the footer and the VPN panel. Off, both are hidden; a connection keeps running.") {
+                Toggle("", isOn: Binding(get: { vpn.isOn }, set: { vpn.setEnabled($0) }))
+                    .toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
+            row("Notify", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
+                info: "When a connection that was up ends without Disconnect (the network went away, the server ended it). Also while the screen is unlocked: traffic has stopped going through the VPN. Its one action opens the VPN panel.") {
+                Toggle("Connection dropped", isOn: Binding(get: { vpn.notifyDrop }, set: { vpn.setNotify($0) }))
+                    .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+            }
+            if vpn.helper == .running {
+                ForEach(vpn.profiles) { profile in
+                    divider
+                    row(profile.name, icon: "network", tint: Color(red: 0.30, green: 0.60, blue: 0.55),
+                        info: profile.servers.joined(separator: ", ") + (profile.asksPassword ? ". Asks for a username and password." : "")) {
+                        Button("Delete") { vpn.delete(profile.id) }
+                            .controlSize(.small)
+                            .disabled(vpn.session?.profileId == profile.id)
+                            .help(vpn.session?.profileId == profile.id ? "Disconnect it first." : "Deletes the helper's copy and a saved password.")
+                    }
+                }
+                divider
+                HStack {
+                    Text(vpn.profiles.isEmpty ? "No profiles yet." : "\(vpn.profiles.count) profile\(vpn.profiles.count == 1 ? "" : "s")")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Import Profile…") { vpn.importProfile() }.controlSize(.small)
+                }
+                .padding(.horizontal, 12)
+                .frame(minHeight: 36)
+            }
+            if let note = vpn.note {
+                Text(note).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder private var vpnHelperControl: some View {
+        if let working = vpn.working {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(working).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        } else {
+            switch vpn.helper {
+            case .unknown:
+                Text("—").font(.system(size: 12)).foregroundStyle(.secondary)
+            case .notInstalled:
+                if VPNStore.hasBundledEngine {
+                    Button("Install…") { vpn.install() }.controlSize(.small)
+                } else {
+                    Text("Not in this build").font(.system(size: 12)).foregroundStyle(.secondary)
+                        .help("This copy of AI Notch was built without OpenVPN. Run scripts/build-openvpn.sh, then assemble the app again (see the README).")
+                }
+            case .notRunning:
+                HStack(spacing: 8) {
+                    badge("Not running", symbol: "exclamationmark.circle.fill", color: .orange)
+                    if VPNStore.hasBundledEngine { Button("Reinstall…") { vpn.install() }.controlSize(.small) }
+                    vpnRemoveMenu
+                }
+            case .running:
+                HStack(spacing: 8) {
+                    if vpn.needsUpdate {
+                        Button("Update…") { vpn.install() }.controlSize(.small)
+                    } else {
+                        badge("Installed", symbol: "checkmark.circle.fill", color: .green)
+                    }
+                    vpnRemoveMenu
+                }
+            }
+        }
+    }
+
+    private var vpnRemoveMenu: some View {
+        Menu("Remove") {
+            Button("Remove, Keep Profiles") { vpn.uninstall(keepProfiles: true) }
+            Button("Remove with Profiles") { vpn.uninstall(keepProfiles: false) }
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .fixedSize()
+    }
+
+    static let vpnHelp = """
+    An OpenVPN client in the notch, with nothing else to install. Install asks for your admin password once: it copies AI Notch's helper and OpenVPN \(VPNBuild.openvpnVersion) to \(VPNPaths.installDir) (only root can change them there) and starts the helper as a launch daemon, which runs OpenVPN for you and answers only your user.
+
+    Profiles are .ovpn files. Each is checked when imported and refused if it would run a program, load code, or read or write a file by path (OpenVPN runs as root); certificates and keys must be inline. Windows-only lines are left out. DNS is set by OpenVPN's own macOS script. Passwords are asked in a small window and, if you choose, kept in your login Keychain.
+
+    The helper's log: \(VPNPaths.log). Remove takes the helper, OpenVPN and (unless kept) the profiles away.
     """
 
     private var divider: some View { Divider().padding(.leading, 44) }

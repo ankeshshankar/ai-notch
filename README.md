@@ -21,6 +21,8 @@ single-choice questions from the notch.
 - The pin in the header keeps the notch open (see [Pinned open](#pinned-open)).
 - Optionally, a **Prod** chip in the footer shows your Datadog monitors and incidents (see
   [Prod health](#prod-health-datadog)).
+- A **VPN** chip in the footer connects your OpenVPN profiles from the notch, with nothing else
+  to install (see [VPN](#vpn-openvpn)).
 - A **RAM** chip in the footer shows free memory and the dev processes holding it (Metro, Jest,
   `make verify`, the emulator, the Simulator, Gradle), and closes idle ones on request (see
   [Machine guard](#machine-guard)).
@@ -587,6 +589,63 @@ Optional settings, in `~/.claude/notch/builds.json`:
 `exclude` lists kinds never shown: `metro`, `jest`, `verify`, `turbo`, `emulator`, `simulator`,
 `simulatorApp`, `gradle`, `kotlin`, `adb`, `watchman`.
 
+### VPN (OpenVPN)
+
+An OpenVPN client in the notch: a **VPN** chip in the footer, beside Prod and RAM, and a **VPN**
+panel across the full width, like Machine. No other VPN app is needed: AI Notch carries OpenVPN
+2.7 and its own helper, and macOS's built-in VPN (IKEv2, L2TP) is not used, as it has no OpenVPN.
+
+Setting it up:
+
+1. Setup → VPN → **Install…** asks for your admin password once. The helper (`ai-notch-vpnd`)
+   copies itself, OpenVPN and OpenVPN's macOS DNS script to
+   `/Library/PrivilegedHelperTools/info.ankeshshiv.notch.vpn/` and starts as the launch daemon
+   `/Library/LaunchDaemons/info.ankeshshiv.notch.vpn.plist`. OpenVPN needs root to create the
+   tunnel and change routes and DNS; the helper runs it, and only for your user (it checks who
+   is asking on its socket, `/var/run/info.ankeshshiv.notch.vpn.sock`).
+2. **Import Profile…** (in Setup or the panel) takes an `.ovpn` file from your VPN provider or
+   admin. The helper checks it and keeps its own copy, readable only by root.
+
+The chip: green with the profile's name while connected, amber while connecting or reconnecting,
+red after a failure, grey when off. In the panel each profile has Connect, Disconnect or Cancel;
+connected, its address, how long, and the traffic both ways. **Log** shows OpenVPN's last lines.
+Collapsed, a connection that was up and ended without Disconnect shows a red crossed lock in the
+wing until you open the notch, and a notification (also while unlocked, since traffic stopped
+going through the VPN; Setup → VPN turns it off). A connection keeps running when the notch
+closes or AI Notch quits; the helper stops it when it is removed.
+
+Signing in: the notch never takes typing, so a username and password, a private key's passphrase
+or a one-time code is asked in a small window under the notch. Static and dynamic challenges
+(`static-challenge`, CRV1, CR_TEXT) ask for the code there; a sign-in page (SAML/SSO, WEB_AUTH)
+opens in your browser. **Remember the password** keeps it in your login Keychain (not synced)
+and answers the next plain password request by itself, once; a refusal asks again. Closing the
+window cancels the connection.
+
+What a profile may hold: OpenVPN runs as root, so a profile is refused when it would run a
+program (`up`, `down`, `route-up`, `plugin`, `script-security`, …), load code (`engine`,
+`providers`), read or write a file by path (`ca /path`, `auth-user-pass /path`, `log`, `status`,
+`config`), or take over the helper's own settings (`management`, `user`, `daemon`). Certificates
+and keys must be inline (`<ca>…</ca>`, `<cert>`, `<key>`, `<tls-crypt>`, …), as exported profiles
+usually have them. Windows-only lines (`block-outside-dns`, `register-dns`, …) are left out. The
+check reads each line as OpenVPN does (quotes, escapes, `--` prefixes, inline blocks, `setenv
+opt`), allows only directives it knows, and refuses lines over 250 characters (OpenVPN would read
+the rest as a line of its own). Whatever the profile says, the helper starts OpenVPN with
+`--script-security 1` (OpenVPN's own DNS script only) and the management interface it reads. DNS
+pushed by the server is set with OpenVPN's own macOS script; Disconnect takes routes and DNS back.
+Like the app, anything you run as your user can ask the helper to import a (checked) profile,
+connect or disconnect; other users on the Mac cannot.
+
+The helper's and OpenVPN's log: `/Library/Logs/info.ankeshshiv.notch.vpn.log` (OpenVPN at verb 3;
+passwords never appear). A newer AI Notch with a newer helper offers **Update…**, which asks for
+the password again.
+
+To check a profile without importing it, from a build:
+
+```sh
+.build/release/ai-notch-vpnd check ~/Downloads/work.ovpn   # what would be kept, left out or refused
+.build/release/ai-notch-vpnd selfcheck                     # the profile check and the management parser
+```
+
 ### Light and dark
 
 The panel follows the system's appearance, live. The strip on the notch stays black in both to
@@ -629,15 +688,32 @@ security delete-generic-password -s ai-notch.datadog -a oauth      # optional: t
 If the app is already gone, remove the `ai-notch-hook` entries from both files by hand and set
 `statusLine.command` back to the command inside the quotes.
 
+The VPN helper runs as root, so neither uninstall removes it: before uninstalling, click Setup →
+VPN → **Remove** (it asks for your admin password), or afterwards:
+
+```sh
+sudo /Library/PrivilegedHelperTools/info.ankeshshiv.notch.vpn/ai-notch-vpnd uninstall
+security delete-generic-password -s info.ankeshshiv.notch.vpn    # optional: a saved VPN password (once per profile)
+```
+
 ## Building from source
 
 Requires macOS 15 or later and Xcode with the Swift 6 toolchain (Xcode 16 or later).
 
 ```sh
-swift build -c release   # .build/release/AINotch and ai-notch-hook
+scripts/build-openvpn.sh # once: OpenVPN for the VPN, into .build/openvpn (optional)
+swift build -c release   # .build/release/AINotch, ai-notch-hook and ai-notch-vpnd
 scripts/install.sh       # build, assemble, sign and install for development
 scripts/make-dmg.sh      # build dist/AI-Notch-<version>.dmg
 ```
+
+`scripts/build-openvpn.sh` downloads OpenVPN 2.7.8, OpenSSL 3.5.9, LZ4 and LZO (checked against
+SHA-256 sums in the script) and builds OpenVPN for arm64 and x86_64 with them linked in. Its
+script folder and OpenSSL's own folders point into the helper's root-owned install folder, and
+OpenSSL is built without loading modules or engines at run time, so nothing OpenVPN loads as root
+comes from a folder you can write. Assembling then puts OpenVPN, the helper and the DNS script in
+the app (`Contents/Helpers`, `Contents/Resources/OpenVPN`, with their licences and where their
+source is). Without `.build/openvpn` the app is built without the VPN and Setup says so.
 
 `scripts/install.sh` builds the app, signs it and puts it in place of the copy in use:
 `$CLAUDE_NOTCH_APP` if set, else the one the login item starts, else
@@ -698,6 +774,12 @@ from the app's first versions, so usage history carries over.
   GraphQL API is not documented and may change; the CLI then stands in. An EAS build started from
   the CLI counts as yours by the CLI's login, which a team may share. ETAs are medians of recent
   runs, not promises.
+- VPN: OpenVPN 2.7 only (no IKEv2, WireGuard or tap devices). One connection at a time. A profile
+  with certificates or keys in separate files must have them inlined first; BF-CBC and other
+  ciphers of OpenSSL's legacy provider are not available. If OpenVPN is killed outright (not
+  through Disconnect or the helper stopping), the DNS it set stays until the next connection or
+  a network change. The helper's socket serves the user who installed it; on a Mac with several
+  users, the others cannot use it.
 
 ## License
 

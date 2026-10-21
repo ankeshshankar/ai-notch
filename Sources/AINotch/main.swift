@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let builds = BuildStore()
     private let prod = ProdStore()
     private let machine = MachineStore()
+    private let vpn = VPNStore()
     private let reviews = ReviewStore()
     private var controller: NotchController?
 
@@ -25,8 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // CLAUDE_NOTCH_SETUP_HOME it reads and writes a copy of a home folder.
         if args.contains("--setup-preview") {
             setup.quitsOnClose = true
-            // `--focus prod`: opened at a section, as the grey Prod chip's click does.
-            setup.show(focus: args.firstIndex(of: "--focus").flatMap { $0 + 1 < args.count && args[$0 + 1] == "prod" ? .prod : nil })
+            // `--focus prod|vpn`: opened at a section, as the grey Prod chip's click does.
+            let focus = args.firstIndex(of: "--focus").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+            setup.show(focus: focus == "prod" ? .prod : focus == "vpn" ? .vpn : nil)
             // Its number and frame once SwiftUI has laid it out, for `screencapture -l` and clicks.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 guard let info = setup.windowInfo else { return }
@@ -41,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         builds.start()
         prod.start()
         machine.start()
+        vpn.start()
         // Pull requests: notified through Notifier (locked screen only), a failed build Pipelines
         // already announced left out, and read less often while one of my pipelines runs.
         reviews.onEvents = { [weak reviews] events in reviews?.post(events) }
@@ -50,8 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SetupWindowController.shared.builds = builds
         SetupWindowController.shared.prod = prod
         SetupWindowController.shared.machine = machine
+        SetupWindowController.shared.vpn = vpn
         SetupWindowController.shared.reviews = reviews
-        controller = NotchController(store: store, builds: builds, prod: prod, machine: machine, reviews: reviews)
+        controller = NotchController(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews)
         // Another copy opened while this one runs asks this one to show the window (see below).
         DistributedNotificationCenter.default().addObserver(forName: showSetupNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { SetupWindowController.shared.show() }

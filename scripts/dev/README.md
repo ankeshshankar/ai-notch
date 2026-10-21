@@ -140,3 +140,8 @@
   the chip's colours, the wing's memory slot and the notification (with `--notify-unlocked`, from
   the app bundle) without filling the memory. `CLAUDE_NOTCH_BUILDS_CONFIG` with a `machine` part
   (`"idleMinutes": 1`) makes idle show within a minute.
+- `ai-notch-vpnd check <file.ovpn>` (from `.build/release`) — what the VPN helper would keep, leave
+  out or refuse in a profile, without importing it; `ai-notch-vpnd selfcheck` — the profile check
+  (above all the profiles it must refuse) and the management-interface parser on fixed cases.
+- [`vpnctl.py`](vpnctl.py) — talks to the installed VPN helper as the app does (`status`, `import`,
+  `connect`, `answer`, `disconnect`, `log`), for driving a connection without the notch.
