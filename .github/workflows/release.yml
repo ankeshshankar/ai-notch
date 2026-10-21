@@ -1,0 +1,49 @@
+# Publishes a release when a version tag (v0.5.0) is pushed: OpenVPN built for the VPN, the app
+# assembled and signed ad hoc, the disk image made and checked, and the release created with the
+# image and the notes in .github/release-notes/<tag>.md. The tag must match assemble-app.sh's VERSION.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version
+        run: |
+          version="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' scripts/assemble-app.sh)"
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME does not match VERSION=$version in assemble-app.sh"; exit 1; }
+          [ -f ".github/release-notes/$GITHUB_REF_NAME.md" ] || { echo "No .github/release-notes/$GITHUB_REF_NAME.md"; exit 1; }
+      - name: Cache the OpenVPN sources
+        uses: actions/cache@v4
+        with:
+          path: .build/openvpn-src/*.tar.gz
+          key: openvpn-src-${{ hashFiles('scripts/build-openvpn.sh') }}
+      - name: Build OpenVPN
+        run: scripts/build-openvpn.sh
+      - name: Build the app and its disk image
+        run: scripts/make-dmg.sh
+      - name: Check the image
+        run: |
+          dmg="$(ls dist/AI-Notch-*.dmg)"
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg"
+          app="$mount/AINotch.app"
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/Helpers/ai-notch-vpnd" selfcheck
+          "$app/Contents/Helpers/openvpn" --version | head -1
+          lipo -archs "$app/Contents/Helpers/openvpn"
+          hdiutil detach "$mount"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" "dist/AI-Notch-$version.dmg" \
+            --title "AI Notch $version" --notes-file ".github/release-notes/$GITHUB_REF_NAME.md" --verify-tag
