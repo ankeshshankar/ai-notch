@@ -1,0 +1,23 @@
+# Builds AI Notch on macOS for every push and pull request, and runs the VPN helper's self-check
+# (the profile check and the management-interface parser).
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build (release)
+        run: swift build -c release
+      - name: VPN helper self-check
+        run: .build/release/ai-notch-vpnd selfcheck
