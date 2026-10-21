@@ -220,6 +220,12 @@ exception: it notifies while the screen is unlocked too (see [Prod health](#prod
 **Open** unlocks to the session. What the lock screen shows follows System Settings →
 Notifications → Show previews.
 
+### Limit alerts
+
+When Claude's 5-hour or weekly limit passes 80%, and again at 95%, a notification says so (while
+you are at the Mac too), with when the window resets and, from the last two readings, when this
+pace would run out. Once per window and mark. Setup → Optional → Limit alerts turns it off.
+
 ### Tokens and cost
 
 The app reads Claude Code's transcripts (`~/.claude/projects/**/*.jsonl`, subagents included) in

@@ -141,6 +141,7 @@ final class SessionStore: ObservableObject {
                 // The status line names no plan; the last probe did.
                 if limits.plan == nil { limits.plan = claudeLimits?.plan }
                 claudeLimits = limits
+                LimitAlerts.shared.check(limits)
             }
         }
         askForLimits(soon: false)
@@ -165,6 +166,7 @@ final class SessionStore: ObservableObject {
                 if limits.plan == nil { limits.plan = self.claudeLimits?.plan }
                 self.claudeLimits = limits
                 LimitsFile.save(limits)
+                LimitAlerts.shared.check(limits)
                 self.limitsMtime = ((try? FileManager.default.attributesOfItem(atPath: LimitsFile.url.path)[.modificationDate]) as? Date)?.timeIntervalSince1970 ?? 0
             }
         }
