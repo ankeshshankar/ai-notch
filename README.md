@@ -202,6 +202,8 @@ A **terminal** chip in the footer counts the commands running in the background,
 - what agents run: Claude Code's background and long Bash commands and its monitors (shown once
   they have run 5 seconds, without Claude Code's wrapper), a watched agent's shells, each under its
   chat's name;
+- what an agent's command left running after the agent (or its shell) ended, such as a dev server
+  started with `&`, listed as "<chat> (ended)" for as long as it runs;
 - what has run a minute in your terminals (Terminal, iTerm, an editor's terminal): dev servers,
   watch builds. Editors, pagers, shells, REPLs and agents are left out.
 

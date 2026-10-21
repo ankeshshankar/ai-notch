@@ -109,6 +109,9 @@ final class CommandScanner: @unchecked Sendable {
     private let lock = NSLock()
     private var argCache: [String: [String]] = [:]
     private var samples: [String: (cpu: UInt64, at: Double)] = [:]
+    /// Processes an agent's command started (the command and everything under it), by pid and
+    /// start: one still running once its agent or its shell has gone stays listed, as left by it.
+    private var started: [String: (text: String?, owner: String, session: String?)] = [:]
 
     static let shells: Set<String> = ["sh", "bash", "zsh", "dash", "fish"]
     /// Interactive programs and agents in a terminal: what you use there, not what runs on its own.
@@ -165,8 +168,24 @@ final class CommandScanner: @unchecked Sendable {
                 let text = Self.command(from: script)
                 if text.contains("ai-notch-hook") || text.isEmpty { continue }
                 found.append((entry, text, agent.title, agent.sessionId, true))
+                started["\(entry.pid)-\(entry.start)"] = (text, agent.title, agent.sessionId)
+                for pid in below(entry.pid) {
+                    guard let child = byPid[pid] else { continue }
+                    let key = "\(child.pid)-\(child.start)"
+                    if started[key] == nil { started[key] = (nil, agent.title, agent.sessionId) }
+                }
             }
         }
+        // Left running: what an agent's command started, now on its own (its agent or its shell
+        // gone, so it hangs off launchd), listed under the agent that started it.
+        let listed = Set(found.map { $0.entry.pid })
+        for entry in table where entry.uid == me && entry.ppid == 1 && !listed.contains(entry.pid) {
+            guard let origin = started["\(entry.pid)-\(entry.start)"] else { continue }
+            let text = origin.text ?? args(entry).map(Self.shortArg).joined(separator: " ")
+            found.append((entry, text.isEmpty ? entry.comm : text, origin.owner + " (ended)", origin.session, true))
+        }
+        let alive = Set(table.map { "\($0.pid)-\($0.start)" })
+        started = started.filter { alive.contains($0.key) }
         // Your terminals' own: a process under an interactive shell (one without -c) that holds a
         // terminal, has run a minute, and is not an editor, a pager or an agent.
         for entry in table where entry.uid == me && entry.tty != nil {
