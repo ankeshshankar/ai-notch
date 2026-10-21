@@ -77,6 +77,24 @@ public struct AgentNow: Codable, Sendable, Equatable {
     }
 }
 
+/// One item of Claude's to-do list (TodoWrite).
+public struct TodoItem: Codable, Sendable, Equatable {
+    public enum Status: String, Codable, Sendable {
+        case pending, inProgress = "in_progress", completed
+    }
+
+    public var content: String
+    public var status: Status
+    /// What it says while doing it ("Running the tests").
+    public var activeForm: String?
+
+    public init(content: String, status: Status, activeForm: String?) {
+        self.content = content
+        self.status = status
+        self.activeForm = activeForm
+    }
+}
+
 /// An Agent call the main thread made whose subagent has not started yet.
 public struct PendingAgent: Codable, Sendable, Equatable {
     public var toolUseId: String
@@ -142,6 +160,8 @@ public struct SessionState: Codable, Sendable, Equatable {
     public var pendingPermissions: [PendingPermission]?
     /// When the session's prompt cache goes cold, as the status line last said (terminal only).
     public var promptCacheExpiresAt: Double?
+    /// Claude's to-do list, as its last TodoWrite set it.
+    public var todos: [TodoItem]?
 
     public init(id: String, cwd: String, now: Double) {
         self.id = id
