@@ -23,6 +23,20 @@ public struct ApprovalRequest: Codable, Sendable, Equatable, Identifiable {
     /// The ask rule of your settings that covers this call (`Bash(git push *)`): then there is no
     /// "Allow for session", whatever Claude Code suggested.
     public var askRule: String?
+    /// A few lines of what it changes: an edit's removed and added lines, the start of a file it
+    /// writes, the start of a plan.
+    public var preview: [PreviewLine]?
+
+    public struct PreviewLine: Codable, Sendable, Equatable {
+        public enum Kind: String, Codable, Sendable { case removed, added, context }
+        public var kind: Kind
+        public var text: String
+
+        public init(_ kind: Kind, _ text: String) {
+            self.kind = kind
+            self.text = text
+        }
+    }
 
     public struct Question: Codable, Sendable, Equatable {
         public var text: String
@@ -37,8 +51,10 @@ public struct ApprovalRequest: Codable, Sendable, Equatable, Identifiable {
     }
 
     public init(id: String, session: String, agent: String?, agentType: String?, tool: String, server: String?,
-                detail: String, sessionRules: [String], since: Double, question: Question? = nil, askRule: String? = nil) {
+                detail: String, sessionRules: [String], since: Double, question: Question? = nil, askRule: String? = nil,
+                preview: [PreviewLine]? = nil) {
         self.askRule = askRule
+        self.preview = preview
         self.id = id
         self.session = session
         self.agent = agent

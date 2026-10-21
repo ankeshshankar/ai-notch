@@ -360,6 +360,33 @@ func approvalDetail(tool: String, input: [String: Any]) -> String {
     }
 }
 
+/// A few lines of what a call changes, for the approval card: an edit's old and new lines, the
+/// start of a file it writes, the start of a plan. Indentation kept, each line cut at 160.
+func changePreview(tool: String, input: [String: Any]) -> [ApprovalRequest.PreviewLine]? {
+    func lines(_ text: Any?, _ max: Int, skipBlank: Bool = false) -> [String] {
+        let all = ((text as? String) ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let kept = skipBlank ? all.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty } : all
+        return kept.prefix(max).map { line in
+            let trimmed = line.replacingOccurrences(of: "\t", with: "    ").replacingOccurrences(of: "\r", with: "")
+            return trimmed.count > 160 ? String(trimmed.prefix(159)) + "…" : trimmed
+        }
+    }
+    var out: [ApprovalRequest.PreviewLine] = []
+    switch tool {
+    case "Edit", "MultiEdit":
+        let edit = tool == "MultiEdit" ? ((input["edits"] as? [[String: Any]])?.first ?? [:]) : input
+        out += lines(edit["old_string"], 4).map { .init(.removed, $0) }
+        out += lines(edit["new_string"], 4).map { .init(.added, $0) }
+    case "Write":
+        out += lines(input["content"], 6).map { .init(.added, $0) }
+    case "ExitPlanMode":
+        out += lines(input["plan"], 8, skipBlank: true).map { .init(.context, $0) }
+    default:
+        return nil
+    }
+    return out.isEmpty ? nil : out
+}
+
 /// The session-scoped part of Claude Code's own suggestions: rules it would add, directories it
 /// would allow, accept-edits mode. Every one is rewritten to last for the session only; nothing is
 /// ever written to a settings file.
@@ -537,6 +564,14 @@ case "PreToolUse":
         )
         state.pendingAgents = ((state.pendingAgents ?? []) + [pending]).filter { now - $0.since < 600 }
     }
+    // Claude's to-do list: each TodoWrite sets all of it.
+    if isClaude, agentId == nil, tool == "TodoWrite",
+       let items = (event["tool_input"] as? [String: Any])?["todos"] as? [[String: Any]] {
+        state.todos = items.compactMap { item in
+            guard let content = item["content"] as? String, let status = TodoItem.Status(rawValue: item["status"] as? String ?? "") else { return nil }
+            return TodoItem(content: oneLine(content, max: 120), status: status, activeForm: (item["activeForm"] as? String).map { oneLine($0, max: 120) })
+        }
+    }
     if agentId == nil, tool == "AskUserQuestion" {
         wait(for: "your answer")
     } else if agentId == nil, tool == "ExitPlanMode" {
@@ -567,6 +602,18 @@ case "PermissionRequest":
     }
     if agentId == nil, tool == "ExitPlanMode" {
         wait(for: "plan approval")
+        // The plan can be approved from the notch too (Claude Code's own suggestions, such as
+        // accepting edits for the session, as the second button), or sent back to keep planning.
+        if isClaude {
+            let id = UUID().uuidString
+            let input = event["tool_input"] as? [String: Any] ?? [:]
+            let suggestions = sessionSuggestions(event["permission_suggestions"])
+            let request = ApprovalRequest(id: id, session: sessionId, agent: nil, agentType: nil, tool: "ExitPlanMode", server: nil,
+                                          detail: "", sessionRules: suggestions.labels, since: now,
+                                          preview: changePreview(tool: "ExitPlanMode", input: input))
+            approval = (request, suggestions.updates)
+            state.pendingPermissions = (state.pendingPermissions ?? []) + [PendingPermission(id: id, tool: "ExitPlanMode", agent: nil, since: now)]
+        }
         break
     }
     let what = tool.map { mcpServer(of: $0).map { server in "\(server) MCP" } ?? $0 } ?? "a tool"
@@ -585,7 +632,8 @@ case "PermissionRequest":
         let request = ApprovalRequest(
             id: id, session: sessionId, agent: agentId, agentType: agentType, tool: tool, server: server,
             detail: approvalDetail(tool: tool, input: input),
-            sessionRules: suggestions.labels, since: now, askRule: askRule
+            sessionRules: suggestions.labels, since: now, askRule: askRule,
+            preview: changePreview(tool: tool, input: input)
         )
         approval = (request, suggestions.updates)
         state.pendingPermissions = (state.pendingPermissions ?? []) + [PendingPermission(id: id, tool: tool, agent: agentId, since: now)]
@@ -728,7 +776,9 @@ case .allowSession:
     decision = ["behavior": "allow"]
     if !approval.updates.isEmpty { decision["updatedPermissions"] = approval.updates }
 case .deny:
-    decision = ["behavior": "deny", "message": "The user denied this from AI Notch. Do not retry it; ask the user how to proceed if it matters."]
+    decision = ["behavior": "deny", "message": approval.request.tool == "ExitPlanMode"
+        ? "The user did not approve this plan from AI Notch. Stay in plan mode and ask what to change."
+        : "The user denied this from AI Notch. Do not retry it; ask the user how to proceed if it matters."]
 case .answer:
     // Only one of the options it offered, for the question it asked; anything else says nothing.
     guard let question = approval.request.question, let picked = reply!.answer, question.options.contains(picked) else { exit(0) }
@@ -737,6 +787,10 @@ case .answer:
     decision = ["behavior": "allow", "updatedInput": input]
 case .withdraw:
     exit(0)
+}
+// A plan is approved only with its input handed back.
+if approval.request.tool == "ExitPlanMode", decision["behavior"] as? String == "allow", decision["updatedInput"] == nil {
+    decision["updatedInput"] = event["tool_input"] as? [String: Any] ?? [:]
 }
 let output: [String: Any] = ["hookSpecificOutput": ["hookEventName": "PermissionRequest", "decision": decision]]
 guard let json = try? JSONSerialization.data(withJSONObject: output) else { exit(0) }

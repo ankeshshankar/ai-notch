@@ -157,7 +157,13 @@ the timeout: it exits with no output and Claude Code asks as usual.
 
 A question (AskUserQuestion) with one single-choice question shows its options as buttons; a click
 answers with that option's label. Several questions, multiple choice or a typed answer: only in
-the editor. Plan approval cannot be answered by a hook, so the notch only shows that it waits.
+the editor.
+
+When Claude finishes planning, its first lines show with **Approve plan** (and **Approve, accept
+edits** when Claude Code offers it) or **Keep planning**, which sends it back to plan mode.
+Edit, MultiEdit and Write prompts show a few lines of the change: removed lines in red, added
+lines in green. While Claude keeps a to-do list, the row shows how far down it is (`3/7`) and the
+item under way; Details lists them all.
 
 ### Notifications
 

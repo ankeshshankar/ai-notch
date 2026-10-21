@@ -1249,6 +1249,9 @@ private struct ApprovalCard: View {
                     .padding(.horizontal, 7).padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.inset))
             }
+            if request.question == nil, let preview = request.preview, !preview.isEmpty {
+                PreviewLines(lines: preview)
+            }
             if let question = request.question {
                 // A question: each option is its answer.
                 FlowOptions(options: question.options) { option in
@@ -1265,13 +1268,13 @@ private struct ApprovalCard: View {
                 }
             } else {
             HStack(spacing: 6) {
-                answer("Allow once", .allow, fill: Palette.done, ink: Palette.onDone)
+                answer(isPlan ? "Approve plan" : "Allow once", .allow, fill: Palette.done, ink: Palette.onDone)
                 if !request.sessionRules.isEmpty, request.askRule == nil {
-                    answer("Allow for session", .allowSession, fill: Palette.chip, ink: Palette.ink)
-                        .help("Until this session ends: " + request.sessionRules.joined(separator: ", "))
+                    answer(isPlan ? "Approve, accept edits" : "Allow for session", .allowSession, fill: Palette.chip, ink: Palette.ink)
+                        .help((isPlan ? "Approve, and for this session: " : "Until this session ends: ") + request.sessionRules.joined(separator: ", "))
                 }
                 Spacer(minLength: 4)
-                answer("Deny", .deny, fill: Palette.chip, ink: Palette.failed)
+                answer(isPlan ? "Keep planning" : "Deny", .deny, fill: Palette.chip, ink: isPlan ? Palette.ink : Palette.failed)
             }
             }
         }
@@ -1283,14 +1286,20 @@ private struct ApprovalCard: View {
         }
     }
 
+    private var isPlan: Bool { item.request.tool == "ExitPlanMode" }
+
     private var title: String {
         let request = item.request
+        if isPlan { return "Plan ready" }
         if let question = request.question { return question.header ?? "Question" }
         if let server = request.server { return "\(server) · \(ToolNow(id: "", name: request.tool, server: server, since: 0).shortName)" }
         return request.tool
     }
 
     private var note: String {
+        if isPlan {
+            return "Claude finished planning. The editor shows this too; whichever you answer first counts. Keep planning sends it back to plan mode to revise."
+        }
         if item.request.question != nil {
             return "The editor shows this question too; whichever you answer first counts. Pick an option to answer; for anything else, answer in the editor."
         }
@@ -1316,6 +1325,44 @@ private struct ApprovalCard: View {
         .buttonStyle(.plain)
         .disabled(!isArmed)
         .opacity(isArmed ? 1 : 0.55)
+    }
+}
+
+/// A few lines of what a call changes: removed lines tinted red, added ones green, a plan's plain.
+private struct PreviewLines: View {
+    var lines: [ApprovalRequest.PreviewLine]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(mark(line.kind)).foregroundStyle(color(line.kind)).frame(width: 7, alignment: .leading)
+                    Text(line.text.isEmpty ? " " : line.text).foregroundStyle(Palette.ink.opacity(0.8))
+                        .lineLimit(1).truncationMode(.tail)
+                }
+                .font(.system(size: 10, design: .monospaced))
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(background(line.kind))
+            }
+        }
+        .padding(.vertical, 4).padding(.horizontal, 3)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.inset))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func mark(_ kind: ApprovalRequest.PreviewLine.Kind) -> String {
+        switch kind { case .removed: return "−"; case .added: return "+"; case .context: return "" }
+    }
+    private func color(_ kind: ApprovalRequest.PreviewLine.Kind) -> Color {
+        switch kind { case .removed: return Palette.failed; case .added: return Palette.done; case .context: return Palette.ink3 }
+    }
+    private func background(_ kind: ApprovalRequest.PreviewLine.Kind) -> Color {
+        switch kind {
+        case .removed: return Palette.failedHue.opacity(0.10)
+        case .added: return Palette.doneHue.opacity(0.10)
+        case .context: return .clear
+        }
     }
 }
 
@@ -1376,9 +1423,10 @@ private struct SessionRow: View {
                 }
                 // With nothing under it, the last line leaves room on its right for the Details
                 // button instead of a line of its own.
-                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty
+                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil
                 let mcpLine = !isDetailed && !compact && !session.mcp.isEmpty
                 activity.padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
+                if let todos = openTodos { todoLine(todos) }
                 if !session.agents.isEmpty { agents }
                 if isDetailed {
                     details
@@ -1453,6 +1501,27 @@ private struct SessionRow: View {
         return parts.joined(separator: " · ")
     }
 
+    /// Claude's to-do list while some of it is left.
+    private var openTodos: [TodoItem]? {
+        guard let todos = session.todos, !todos.isEmpty, todos.contains(where: { $0.status != .completed }) else { return nil }
+        return todos
+    }
+
+    /// How far down the to-do list it is, and the item under way.
+    private func todoLine(_ todos: [TodoItem]) -> some View {
+        let done = todos.filter { $0.status == .completed }.count
+        let current = todos.first { $0.status == .inProgress }
+        return HStack(spacing: 6) {
+            Image(systemName: "checklist").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
+            Text("\(done)/\(todos.count)").font(.system(size: 10, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.ink2)
+            if let current {
+                Text(current.activeForm ?? current.content).font(.system(size: 10.5)).foregroundStyle(Palette.ink2)
+                    .lineLimit(1).truncationMode(.tail)
+            }
+        }
+        .help(todos.map { "\($0.status == .completed ? "✓" : $0.status == .inProgress ? "▸" : "·") \($0.content)" }.joined(separator: "\n"))
+    }
+
     /// Running subagents first, then the ones that ended in the last few minutes.
     private var agents: some View {
         let ordered = session.runningAgents + session.agents.filter { !$0.isRunning }.sorted { ($0.endedAt ?? 0) > ($1.endedAt ?? 0) }
@@ -1505,6 +1574,9 @@ private struct SessionRow: View {
         }
         if !session.mcp.isEmpty { rows.append(("MCP", top(session.mcp, 12))) }
         if session.backgroundTasks > 0 { rows.append(("Background", "\(session.backgroundTasks) tasks running")) }
+        if let todos = session.todos, !todos.isEmpty {
+            rows.append(("To-dos", todos.map { "\($0.status == .completed ? "✓" : $0.status == .inProgress ? "▸" : "·") \($0.content)" }.joined(separator: "\n")))
+        }
         return VStack(alignment: .leading, spacing: 3) {
             ForEach(rows, id: \.0) { row in
                 HStack(alignment: .top, spacing: 8) {
