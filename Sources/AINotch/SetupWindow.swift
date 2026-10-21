@@ -1246,6 +1246,11 @@ struct SetupView: View {
                 info: "A burst of coloured sparks from the notch when an agent finishes a turn.") {
                 Toggle("", isOn: $effects.sparkles).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
+            divider
+            row("Compact rows", icon: "rectangle.compress.vertical", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
+                info: "Denser session rows: the project and model line goes and the agent's name moves up beside the title, so eight rows fit before the list scrolls instead of six.") {
+                Toggle("", isOn: $effects.compactRows).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
         }
     }
 

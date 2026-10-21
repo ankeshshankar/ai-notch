@@ -44,6 +44,8 @@ final class EffectsPrefs: ObservableObject {
     @Published var pointerGlow: Bool { didSet { save(pointerGlow, "effects.pointerGlow") } }
     /// Sparkles from the notch when a turn finishes.
     @Published var sparkles: Bool { didSet { save(sparkles, "effects.sparkles") } }
+    /// Denser session rows: one line less each, so more fit before the list scrolls.
+    @Published var compactRows: Bool { didSet { save(compactRows, "effects.compactRows") } }
 
     private init() {
         let defaults = UserDefaults.standard
@@ -51,6 +53,7 @@ final class EffectsPrefs: ObservableObject {
         onlyWhileWorking = defaults.object(forKey: "effects.onlyWhileWorking") as? Bool ?? true
         pointerGlow = defaults.object(forKey: "effects.pointerGlow") as? Bool ?? true
         sparkles = defaults.object(forKey: "effects.sparkles") as? Bool ?? true
+        compactRows = defaults.object(forKey: "effects.compactRows") as? Bool ?? false
     }
 
     private func save(_ value: Any, _ key: String) { UserDefaults.standard.set(value, forKey: key) }

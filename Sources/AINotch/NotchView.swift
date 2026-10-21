@@ -148,9 +148,19 @@ struct RootView: View {
                 SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews, controller: controller,
                             isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, maxHeight: g.maxHeight - Self.bezel)
                     .background(
-                        UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
-                                               bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
-                            .fill(Palette.surface)
+                        ZStack(alignment: .top) {
+                            UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
+                                                   bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
+                                .fill(Palette.surface)
+                            // While an agent works, its colour glows down from the top edge.
+                            if let glow = headerGlow {
+                                LinearGradient(colors: [glow.opacity(0.22), glow.opacity(0)], startPoint: .top, endPoint: .bottom)
+                                    .frame(height: 48)
+                                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 12, topTrailingRadius: 12, style: .continuous))
+                                    .transition(.opacity)
+                            }
+                        }
+                        .animation(.easeInOut(duration: 0.5), value: headerGlow)
                     )
                     .padding(.horizontal, Self.bezel)
                     .padding(.bottom, Self.bezel)
@@ -184,9 +194,15 @@ struct RootView: View {
         }
         // The window is a fixed box; the shape hangs from its top centre.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: expanded)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: wings)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: wide)
+        .animation(.spring(response: 0.24, dampingFraction: 0.82), value: expanded)
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: wings)
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: wide)
+    }
+
+    /// The colour of the agent at work (the first working session's), for the open notch's top.
+    private var headerGlow: Color? {
+        guard let working = store.working.first else { return nil }
+        return agentHue(working.kind)
     }
 }
 
@@ -321,8 +337,9 @@ private struct SessionList: View {
     var maxHeight: CGFloat
     /// Each approval card's height, which its row keeps free so the card sits inside it.
     @State private var cardHeights: [String: CGFloat] = [:]
-    /// One column: six rows between agents and pipelines. Two columns: six each.
-    private let maxRows = 6
+    @ObservedObject var looks = EffectsPrefs.shared
+    /// One column: six rows between agents and pipelines (eight compact). Two columns: as many each.
+    private var maxRows: Int { looks.compactRows ? 8 : 6 }
     /// The session whose details are open; one at a time keeps the panel short.
     @State private var detailId: String?
     /// The header's and the footer's heights, for what is left to the rows.
@@ -466,7 +483,8 @@ private struct SessionList: View {
                 .font(.system(size: 12)).foregroundStyle(Palette.ink2)
                 .padding(.vertical, 6)
         }
-        ForEach(store.sessions.prefix(limit), id: \.id) { session in
+        let rows = Array(store.sessions.prefix(limit))
+        ForEach(rows, id: \.id) { session in
             let isOpen = detailId == session.id
             let title = store.title(of: session)
             let asks = approvals.pending(for: session.id)
@@ -480,7 +498,7 @@ private struct SessionList: View {
                 } label: {
                     SessionRow(session: session, title: title, now: store.now, agentActivity: store.agentActivity, agentModels: store.agentModels,
                                usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
-                               reserved: space, live: store.usage.live[session.id])
+                               reserved: space, live: store.usage.live[session.id], compact: looks.compactRows)
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(RowButtonStyle())
@@ -510,7 +528,10 @@ private struct SessionList: View {
                 }
                 .padding(8)
             }
+            // A new session slides in from the top; one that ends fades out.
+            .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: rows.map(\.id))
         if store.sessions.count > limit {
             Text("+\(store.sessions.count - limit) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
         }
@@ -1117,22 +1138,45 @@ private struct EngineTag: View {
     }
 }
 
+/// An agent's colour, for its row's edge, wash and progress line, and the open notch's top.
+func agentHue(_ kind: AgentKind) -> Color { EngineTag.colors(kind).hue }
+
+/// The line along a working row's bottom edge.
+private struct TurnProgress: View {
+    var fraction: Double
+    var color: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            Capsule().fill(Palette.track)
+                .overlay(alignment: .leading) {
+                    Capsule().fill(LinearGradient(colors: [color.opacity(0.5), color], startPoint: .leading, endPoint: .trailing))
+                        .frame(width: max(4, proxy.size.width * fraction))
+                }
+        }
+        .frame(height: 2)
+        .animation(.linear(duration: 1), value: fraction)
+        .allowsHitTesting(false)
+    }
+}
+
 /// A row's card: the fill and the hairline edge every row in the list shares.
 struct RowCard: ViewModifier {
     var tint: Color = Palette.card
     var edge: Color = Palette.hairline
+    var padding: CGFloat = 10
 
     func body(content: Content) -> some View {
         content
-            .padding(10)
+            .padding(padding)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(tint))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(edge, lineWidth: 1))
     }
 }
 
 extension View {
-    func rowCard(tint: Color = Palette.card, edge: Color = Palette.hairline) -> some View {
-        modifier(RowCard(tint: tint, edge: edge))
+    func rowCard(tint: Color = Palette.card, edge: Color = Palette.hairline, padding: CGFloat = 10) -> some View {
+        modifier(RowCard(tint: tint, edge: edge, padding: padding))
     }
 }
 
@@ -1312,6 +1356,8 @@ private struct SessionRow: View {
     var reserved: CGFloat = 0
     /// Its recent spend and prompt cache.
     var live: LiveSpend?
+    /// Setup's Compact rows: the project line goes, its tags move up beside the title.
+    var compact = false
     /// The Details button's width and gap, kept free at the end of the row's last line.
     static let cornerRoom: CGFloat = 70
 
@@ -1323,14 +1369,16 @@ private struct SessionRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 // The chat's name, as its editor lists it.
                 HStack(spacing: 6) {
-                    Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
+                    Text(title).font(.system(size: compact ? 12 : 13, weight: .semibold)).foregroundStyle(Palette.ink)
                         .lineLimit(1).truncationMode(.tail)
                         .help(title)
+                    if compact { EngineTag(kind: session.kind) }
                     Spacer(minLength: 4)
                     StatusChip(session: session, now: now).fixedSize()
                         .help("This turn: time since your last message")
                 }
                 // Under it: the project, who runs it and where, and on what model.
+                if !compact {
                 HStack(spacing: 6) {
                     if title != session.project {
                         Text(session.project).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
@@ -1347,10 +1395,11 @@ private struct SessionRow: View {
                     }
                     pace
                 }
+                }
                 // With nothing under it, the last line leaves room on its right for the Details
                 // button instead of a line of its own.
                 let inline = reserved == 0 && !isDetailed && session.agents.isEmpty
-                let mcpLine = !isDetailed && !session.mcp.isEmpty
+                let mcpLine = !isDetailed && !compact && !session.mcp.isEmpty
                 activity.padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
                 if !session.agents.isEmpty { agents }
                 if isDetailed {
@@ -1365,7 +1414,36 @@ private struct SessionRow: View {
             }
         }
         .rowCard(tint: session.phase == .waiting ? Palette.waitingTint : Palette.card,
-                 edge: session.phase == .waiting ? Palette.waitingEdge : Palette.hairline)
+                 edge: session.phase == .waiting ? Palette.waitingEdge : Palette.hairline,
+                 padding: compact ? 7 : 10)
+        // While it works, a wash of its agent's colour, and a line along the bottom timed by its
+        // last turn.
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(agentHue(session.kind).opacity(session.phase == .working ? 0.07 : 0))
+        )
+        .overlay(alignment: .bottom) {
+            if session.phase == .working, let started = session.turnStartedAt {
+                TurnProgress(fraction: Self.progress(now - started, last: session.lastTurnSeconds), color: agentHue(session.kind))
+                    .padding(.horizontal, 12).padding(.bottom, 2)
+                    .transition(.opacity)
+            }
+        }
+        // Its agent's colour down the left edge.
+        .overlay(alignment: .leading) {
+            Capsule().fill(agentHue(session.kind).opacity(session.phase == .idle ? 0.45 : 0.95))
+                .frame(width: 3)
+                .padding(.vertical, compact ? 9 : 12)
+                .padding(.leading, 2)
+        }
+        .animation(.easeInOut(duration: 0.3), value: session.phase)
+    }
+
+    /// How far along this turn looks, against the last turn's length (a minute when none):
+    /// slowing as it nears the end, and never quite there while it runs.
+    static func progress(_ elapsed: Double, last: Double?) -> Double {
+        let expected = max(last ?? 60, 15)
+        return min(0.97, 1 - exp(-elapsed / expected))
     }
 
     /// While it works, what it spends a minute; while idle, how long its prompt cache stays warm.
@@ -1623,5 +1701,7 @@ struct StatusChip: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 3)
         .background(Capsule().fill(kind == .waiting ? Palette.waitingHue : kind == .failed ? Palette.failedHue.opacity(0.14) : Palette.chip))
+        // A new state cross-fades in and the capsule eases to its new width.
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: kind)
     }
 }
