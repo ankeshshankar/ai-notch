@@ -890,8 +890,10 @@ from the app's first versions, so usage history carries over.
 - An interrupt (Esc) raises no hook either: the app reads it from the end of the session
   transcript.
 - Codex's permission hook is not wired: Codex takes allow or deny but rejects session rules.
-- Jumping to the exact window needs Accessibility access; without it, the app the session runs in
-  comes to the front. macOS ties the grant to the exact ad-hoc build, so after an update you may
+- In Terminal and iTerm2 a click on a row selects the exact tab the session runs in (by its
+  terminal device, which the hook records), and in tmux its window and pane; macOS asks once to
+  let AI Notch control that app (Automation). Elsewhere, jumping to the exact window needs
+  Accessibility access; without it, the app the session runs in comes to the front. macOS ties the grant to the exact ad-hoc build, so after an update you may
   need to turn it on again (System Settings → Privacy & Security → Accessibility).
 - No desktop widget in the ad-hoc build (see above).
 - The Homebrew uninstall step can only edit `~/.claude/settings.json` and `~/.cursor/hooks.json`

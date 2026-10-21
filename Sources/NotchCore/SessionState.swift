@@ -125,6 +125,10 @@ public struct SessionState: Codable, Sendable, Equatable {
     public var sessionTitle: String?
     /// The app the session runs in (`com.microsoft.VSCode`, `com.apple.Terminal`, ...).
     public var appBundleId: String?
+    /// The terminal the agent runs in ("/dev/ttys004"), and its tmux pane ("%3") when in tmux:
+    /// what a jump selects the right tab or pane by.
+    public var tty: String?
+    public var tmuxPane: String?
     /// How Claude Code was started (`cli`, `claude-vscode`, ...).
     public var entrypoint: String?
     /// The Claude Code process, to tell a live session from one that crashed.

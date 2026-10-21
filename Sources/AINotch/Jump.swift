@@ -16,10 +16,89 @@ enum Jump {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         let names = windowNames(for: session)
+        let tty = session.tty, pane = session.tmuxPane
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
             guard let pid = app?.processIdentifier else { return }
-            DispatchQueue.main.async { raiseWindow(of: pid, titledAny: names) }
+            DispatchQueue.main.async {
+                // The exact tab (Terminal, iTerm2) or tmux pane when known, else the window by title.
+                if !selectTab(bundleId: bundleId, tty: tty, tmuxPane: pane) { raiseWindow(of: pid, titledAny: names) }
+            }
         }
+    }
+
+    /// Selects the tmux pane, and the Terminal or iTerm2 tab whose terminal is `tty` (with tmux,
+    /// the tab its client runs in). Asks macOS once for permission to script the terminal app.
+    /// False when it is neither app or there is no terminal to look for.
+    @MainActor
+    private static func selectTab(bundleId: String, tty: String?, tmuxPane: String?) -> Bool {
+        var target = tty
+        if let pane = tmuxPane, pane.range(of: #"^%[0-9]+$"#, options: .regularExpression) != nil, let tmux = tmuxPath() {
+            _ = run(tmux, ["select-window", "-t", pane])
+            _ = run(tmux, ["select-pane", "-t", pane])
+            if let client = run(tmux, ["list-clients", "-F", "#{client_tty}"])?.split(separator: "\n").first { target = String(client) }
+        }
+        guard let target, target.range(of: #"^/dev/ttys[0-9]+$"#, options: .regularExpression) != nil else { return false }
+        let source: String
+        switch bundleId {
+        case "com.apple.Terminal":
+            source = """
+            tell application "Terminal"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if tty of t is "\(target)" then
+                            set selected of t to true
+                            set index of w to 1
+                            return true
+                        end if
+                    end repeat
+                end repeat
+            end tell
+            return false
+            """
+        case "com.googlecode.iterm2":
+            source = """
+            tell application "iTerm2"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        repeat with s in sessions of t
+                            if tty of s is "\(target)" then
+                                select w
+                                select t
+                                select s
+                                return true
+                            end if
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+            return false
+            """
+        default:
+            return false
+        }
+        var error: NSDictionary?
+        let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
+        return error == nil && result?.booleanValue == true
+    }
+
+    private static func tmuxPath() -> String? {
+        ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"].first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// A short command's output, or nil; at most 2 s.
+    private static func run(_ path: String, _ arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        let deadline = Date().addingTimeInterval(2)
+        while process.isRunning, Date() < deadline { usleep(20_000) }
+        if process.isRunning { process.terminate(); return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
     }
 
     /// What the session's window title may say: its folder, or the name of a VS Code / Cursor
