@@ -685,7 +685,7 @@ private struct CodePanel: View {
         let gitMonth = gitTotal(since: monthStart)
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                EngineTag(isCursor: false)
+                EngineTag(kind: .claude)
                 Text("lines per day").font(.system(size: 10)).foregroundStyle(Palette.ink3)
                 InfoMark(text: "From the edits in Claude Code's transcripts, subagents included, by git repository; files outside a repository are left out. Git counts every commit in those repositories, on any branch, by anyone and any tool, once each, without lockfiles.")
                 Spacer()
@@ -1026,21 +1026,26 @@ struct InfoMark: View {
 }
 
 /// Who is doing the work: Claude's mark for a Claude Code session, Cursor's for Cursor's own
-/// agent; the app it runs in rides as a small badge on the corner when that is another app.
+/// agent, a mark in the agent's colour for the others; the app it runs in rides as a small badge
+/// on the corner when that is another app.
 private struct AgentIcon: View {
     var session: SessionState
     var host: NSImage?
 
     var body: some View {
+        let kind = session.kind
         ZStack(alignment: .bottomTrailing) {
             Group {
                 if session.isCursorAgent, let host {
                     Image(nsImage: host).resizable()
-                } else if let claude = AppInfo.of("com.anthropic.claudefordesktop")?.icon {
+                } else if kind == .claude || kind == .cursor, let claude = AppInfo.of("com.anthropic.claudefordesktop")?.icon {
                     Image(nsImage: claude).resizable()
-                } else {
+                } else if kind == .claude || kind == .cursor {
                     RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.claude)
                         .overlay(Image(systemName: "asterisk").font(.system(size: 12, weight: .bold)).foregroundStyle(.white))
+                } else {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous).fill(EngineTag.colors(kind).hue)
+                        .overlay(Image(systemName: EngineTag.symbol(kind)).font(.system(size: 11, weight: .bold)).foregroundStyle(.white))
                 }
             }
             .frame(width: 24, height: 24)
@@ -1063,17 +1068,39 @@ private struct AgentIcon: View {
     }
 }
 
-/// "Claude Code" in Claude's colour, or "Cursor Agent" in Cursor's.
+/// The agent's name in its colour: "Claude Code", "Cursor Agent", "Codex", "Gemini CLI", or the
+/// name of one the process watcher saw or that reported itself.
 private struct EngineTag: View {
-    var isCursor: Bool
+    var kind: AgentKind
 
     var body: some View {
-        Text(isCursor ? "Cursor Agent" : "Claude Code")
-            .font(.system(size: 10, weight: .semibold)).foregroundStyle(isCursor ? Palette.mcp : Palette.claude)
+        let colors = Self.colors(kind)
+        Text(kind.name)
+            .font(.system(size: 10, weight: .semibold)).foregroundStyle(colors.ink)
             .padding(.horizontal, 6).padding(.vertical, 1)
-            .background(Capsule().fill((isCursor ? Palette.mcpHue : Palette.claudeHue).opacity(0.16)))
+            .background(Capsule().fill(colors.hue.opacity(0.16)))
             .lineLimit(1)
             .fixedSize()
+    }
+
+    /// The text colour and the hue behind it.
+    static func colors(_ kind: AgentKind) -> (ink: Color, hue: Color) {
+        switch kind {
+        case .claude: return (Palette.claude, Palette.claudeHue)
+        case .cursor: return (Palette.mcp, Palette.mcpHue)
+        case .codex: return (Palette.done, Palette.doneHue)
+        case .gemini: return (Palette.bitbucket, Palette.bitbucketHue)
+        case .other: return (Palette.ink2, Color.gray)
+        }
+    }
+
+    /// The mark for an agent without an app icon of its own.
+    static func symbol(_ kind: AgentKind) -> String {
+        switch kind {
+        case .codex: return "chevron.left.forwardslash.chevron.right"
+        case .gemini: return "sparkles"
+        default: return "cpu"
+        }
     }
 }
 
@@ -1295,7 +1322,7 @@ private struct SessionRow: View {
                     if title != session.project {
                         Text(session.project).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
                     }
-                    EngineTag(isCursor: session.isCursorAgent)
+                    EngineTag(kind: session.kind)
                     if !session.isCursorAgent {
                         Text(app.map { "in \($0.name)" } ?? "in Terminal").font(.system(size: 10)).foregroundStyle(Palette.ink3).lineLimit(1)
                     }
@@ -1397,7 +1424,8 @@ private struct SessionRow: View {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var rows: [(String, String)] = [
             ("Folder", session.cwd.replacingOccurrences(of: home, with: "~")),
-            ("Runs in", session.isCursorAgent ? "Cursor's own agent" : "Claude Code · \(AppInfo.of(session.appBundleId)?.name ?? session.entrypoint ?? "terminal")"),
+            ("Runs in", session.isCursorAgent ? "Cursor's own agent"
+                : "\(session.kind.name) · \(AppInfo.of(session.appBundleId)?.name ?? (session.kind == .claude ? session.entrypoint : nil) ?? "terminal")"),
             ("Model", session.model.map { "\(modelName($0)) · \($0)" } ?? "—"),
             ("Session", "started \(elapsed(now - session.startedAt)) ago · \(session.toolCount) tool calls"),
         ]

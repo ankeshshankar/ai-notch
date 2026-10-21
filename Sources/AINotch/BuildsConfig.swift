@@ -21,6 +21,8 @@ import Foundation
 ///       "datadog": { "site": "us3", "monitors": "<monitor search>", …}   the footer's Prod chip
 ///                                                 (DatadogConfig.example has all of it)
 ///       "machine": { "warnBelowMB": 4096, "idleMinutes": 15, "exclude": [] }   optional: the RAM chip
+///       "agents": { "watch": { "mybot": "My Bot" }, "ignore": ["amp"] }   optional: the agent
+///                                                 process watcher's extra names and the ones it skips
 ///     }
 ///
 /// A repository is "name" (in `workspace`), "workspace/name", or {"workspace", "repo", "path"}.
@@ -81,6 +83,9 @@ struct BuildsConfig: Equatable, Sendable {
     var datadog: Datadog?
     /// The machine guard's settings; it runs with the defaults without them.
     var machine: MachineConfig?
+    /// The agent watcher's extra process names (name → what to call it) and names it skips.
+    var watchAgents: [String: String] = [:]
+    var ignoreAgents: Set<String> = []
     /// Whose runs are mine: these commit emails, else the git identity.
     var emails: [String] = []
     var name: String?
@@ -241,6 +246,14 @@ struct BuildsConfig: Equatable, Sendable {
                 }
             }
             config.machine = settings
+        }
+        if let agents = object["agents"] as? [String: Any] {
+            if let named = agents["watch"] as? [String: Any] {
+                for (process, title) in named { config.watchAgents[process] = string(title) ?? process }
+            } else {
+                for item in agents["watch"] as? [Any] ?? [] { if let process = string(item) { config.watchAgents[process] = process } }
+            }
+            config.ignoreAgents = Set((agents["ignore"] as? [Any] ?? []).compactMap(string))
         }
         if let me = object["me"] as? [String: Any] {
             let emails = (me["emails"] as? [Any] ?? []).compactMap(string) + [string(me["email"])].compactMap { $0 }

@@ -8,7 +8,10 @@ import NotchCore
 // exception is a permission prompt you answer by clicking in the notch: then it prints that
 // answer (see the end of this file). Without a click it prints nothing, as before.
 // Cursor's own agent runs it too (`ai-notch-hook cursor`, from ~/.cursor/hooks.json), on
-// the events that act on nothing it answers; see the Cursor section below.
+// the events that act on nothing it answers; see the Cursor section below. So do Codex
+// (`ai-notch-hook codex`, ~/.codex/hooks.json: Claude Code's event names, no answers from the
+// notch) and Gemini CLI (`ai-notch-hook gemini`, ~/.gemini/settings.json; see its section).
+// `ai-notch-hook report …` is for any other agent or script to report itself (see runReport).
 
 // `ai-notch-hook --probe`: the app's setup runs this to learn whether macOS lets the hook run at
 // all (a quarantined helper hangs in exec). It reads nothing, writes nothing, prints nothing.
@@ -19,7 +22,106 @@ let maxAgents = 20
 /// Ended subagents stay listed this long.
 let agentLinger: Double = 180
 
-let isCursor = CommandLine.arguments.dropFirst().first == "cursor"
+let mode = CommandLine.arguments.dropFirst().first ?? ""
+let isCursor = mode == "cursor"
+let isCodex = mode == "codex"
+let isGemini = mode == "gemini"
+/// Claude Code itself (any other first argument is an older setup's and means Claude Code too).
+let isClaude = !isCursor && !isCodex && !isGemini
+
+/// The shells a hook command runs under, skipped when looking for the agent above it.
+let shells: Set<String> = ["sh", "bash", "zsh", "dash", "fish", "env"]
+
+/// The agent process above this hook: the first ancestor whose executable path names `needle`,
+/// else the first one that is not a shell (Gemini CLI runs under node).
+func agentPid(named needle: String) -> Int32? {
+    var pid = getppid()
+    var firstOther: Int32?
+    for _ in 0..<8 where pid > 1 {
+        var path = [CChar](repeating: 0, count: 4096)
+        let length = proc_pidpath(pid, &path, UInt32(path.count))
+        let full = length > 0 ? String(cString: path) : ""
+        if full.lowercased().contains(needle) { return pid }
+        if firstOther == nil, !full.isEmpty, !shells.contains((full as NSString).lastPathComponent) { firstOther = pid }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { break }
+        pid = info.kp_eproc.e_ppid
+    }
+    return firstOther
+}
+
+/// `ai-notch-hook report <start|working|waiting|idle|end> --agent <name> [--id <id>]
+/// [--title <text>] [--detail <text>] [--cwd <folder>] [--pid <pid>]`: any agent, wrapper or
+/// script reports itself, and shows as a row of its own. Without --id the row is the caller's
+/// (its parent process); without --pid it leaves the notch after 30 minutes without a report.
+/// Prints nothing, always exits 0, like the hook.
+func runReport() -> Never {
+    let args = Array(CommandLine.arguments.dropFirst(2))
+    func value(_ flag: String) -> String? {
+        guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+        return args[i + 1].isEmpty ? nil : args[i + 1]
+    }
+    let phaseWord = args.first ?? ""
+    guard ["start", "working", "waiting", "idle", "end"].contains(phaseWord),
+          let agent = value("--agent").map({ oneLine($0, max: 40) }) else {
+        FileHandle.standardError.write(Data("usage: ai-notch-hook report <start|working|waiting|idle|end> --agent <name> [--id <id>] [--title <text>] [--detail <text>] [--cwd <folder>] [--pid <pid>]\n".utf8))
+        exit(0)
+    }
+    let id = "report-" + (value("--id") ?? "\(agent)-\(getppid())")
+    try? FileManager.default.createDirectory(at: NotchPaths.sessions, withIntermediateDirectories: true)
+    if phaseWord == "end" {
+        try? FileManager.default.removeItem(at: NotchPaths.state(id))
+        try? FileManager.default.removeItem(at: NotchPaths.lock(id))
+        exit(0)
+    }
+    let fd = open(NotchPaths.lock(id).path, O_CREAT | O_RDWR, 0o600)
+    guard fd >= 0 else { exit(0) }
+    var locked = false
+    for _ in 0..<60 {
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 { locked = true; break }
+        usleep(5_000)
+    }
+    guard locked else { exit(0) }
+    let file = NotchPaths.state(id)
+    var state = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder.notch.decode(SessionState.self, from: $0) }
+        ?? SessionState(id: id, cwd: value("--cwd") ?? FileManager.default.currentDirectoryPath, now: now)
+    state.entrypoint = AgentKind.otherPrefix + agent
+    state.updatedAt = now
+    if let cwd = value("--cwd") { state.cwd = cwd }
+    if let pid = value("--pid").flatMap({ Int32($0) }), pid > 1 { state.pid = pid }
+    if state.appBundleId == nil { state.appBundleId = ProcessInfo.processInfo.environment["__CFBundleIdentifier"] }
+    // A row needs a name to show (one with none is taken for a helper's run and hidden).
+    state.sessionTitle = value("--title").map { oneLine($0, max: 120) } ?? state.sessionTitle ?? agent
+    let detail = value("--detail").map { oneLine($0, max: 120) }
+    switch phaseWord {
+    case "working":
+        if state.phase != .working { state.turnStartedAt = now }
+        state.phase = .working
+        state.finishedAt = nil
+        state.waitingFor = nil
+        state.waitingSince = nil
+        if let detail { state.current = ToolNow(id: UUID().uuidString, name: detail, server: nil, since: now) }
+    case "waiting":
+        if state.phase != .waiting { state.waitingSince = now }
+        state.phase = .waiting
+        state.waitingFor = detail ?? "you"
+    case "idle":
+        if state.phase != .idle, let started = state.turnStartedAt { state.lastTurnSeconds = now - started }
+        if state.phase != .idle { state.finishedAt = now }
+        state.phase = .idle
+        state.waitingFor = nil
+        state.waitingSince = nil
+        if let current = state.current { state.lastTool = current }
+        state.current = nil
+    default:
+        state.phase = .idle
+    }
+    if let encoded = try? JSONEncoder.notch.encode(state) { try? encoded.write(to: file, options: .atomic) }
+    flock(fd, LOCK_UN)
+    exit(0)
+}
 
 /// `ai-notch-hook statusline '<your status line command>'`, as `statusLine.command`: notes the
 /// limits and the prompt cache from the status line's input, then becomes your own command with
@@ -76,17 +178,24 @@ func noteCache(session id: String, expiresAt: Double) {
     if let encoded = try? JSONEncoder.notch.encode(state) { try? encoded.write(to: file, options: .atomic) }
 }
 
-if CommandLine.arguments.dropFirst().first == "statusline" { runStatusLine() }
+if mode == "statusline" { runStatusLine() }
+if mode == "report" { runReport() }
+
+// Gemini CLI reads a hook's output as JSON: an empty answer, once, whatever happens below.
+if isGemini {
+    FileHandle.standardOutput.write(Data("{}\n".utf8))
+}
 
 guard let data = try? FileHandle.standardInput.readToEnd(),
       let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
       let name = event["hook_event_name"] as? String
 else { exit(0) }
 
-// Cursor names a chat by its conversation; Claude Code by its session.
+// Cursor names a chat by its conversation; the others by their session. Each but Claude Code's
+// gets a prefix, so two tools' ids never meet.
 let rawId = (isCursor ? event["conversation_id"] : event["session_id"]) as? String ?? ""
 guard !rawId.isEmpty else { exit(0) }
-let sessionId = isCursor ? "cursor-\(rawId)" : rawId
+let sessionId = (isCursor ? "cursor-" : isCodex ? "codex-" : isGemini ? "gemini-" : "") + rawId
 
 /// Cursor's beforeSubmitPrompt reads a `continue` answer; say yes explicitly rather than nothing.
 if isCursor, name == "beforeSubmitPrompt" { print("{\"continue\":true}") }
@@ -160,6 +269,11 @@ if isCursor {
     state.entrypoint = "cursor-agent"
     if let model = string("model") { state.model = model }
     if state.appBundleId == nil { state.appBundleId = env["__CFBundleIdentifier"] ?? "com.todesktop.230313mzl4w4u92" }
+} else if isCodex || isGemini {
+    state.entrypoint = isCodex ? AgentKind.codexEntrypoint : AgentKind.geminiEntrypoint
+    if let model = string("model") { state.model = model }
+    if state.pid == nil { state.pid = agentPid(named: isCodex ? "codex" : "gemini") }
+    if state.appBundleId == nil { state.appBundleId = env["__CFBundleIdentifier"] }
 } else {
     if state.pid == nil { state.pid = claudePid() }
     if state.appBundleId == nil { state.appBundleId = env["__CFBundleIdentifier"] }
@@ -171,7 +285,8 @@ if let title = string("session_title") { state.sessionTitle = oneLine(title, max
 let agentId = string("agent_id")
 let tool = string("tool_name")
 let toolUseId = string("tool_use_id") ?? UUID().uuidString
-if agentId == nil, let path = string("transcript_path") { state.transcriptPath = path }
+// Only Claude Code's transcripts are read (for interrupts and titles); the others' differ.
+if isClaude, agentId == nil, let path = string("transcript_path") { state.transcriptPath = path }
 
 func agentIndex(_ id: String?) -> Int? {
     guard let id else { return nil }
@@ -321,6 +436,49 @@ if isCursor {
     default:
         break
     }
+} else if isGemini {
+    // Gemini CLI: its turn (BeforeAgent … AfterAgent), its tools, and the notification it raises
+    // when a tool waits for your confirmation. Its other hooks (the model's) are not hooked.
+    switch name {
+    case "SessionStart":
+        state.phase = .idle
+        clearWait()
+        state.current = nil
+    case "BeforeAgent":
+        state.phase = .working
+        clearWait()
+        state.turnStartedAt = now
+        state.finishedAt = nil
+        if let prompt = string("prompt"), state.firstPrompt == nil { state.firstPrompt = oneLine(prompt, max: 120) }
+    case "BeforeTool":
+        guard let tool else { break }
+        let server = (event["mcp_context"] as? [String: Any])?["server_name"] as? String
+        state.current = ToolNow(id: toolUseId, name: tool, server: server, since: now)
+        state.toolCount += 1
+        if let server { state.mcp[server, default: 0] += 1 }
+        if state.phase != .waiting { state.phase = .working }
+    case "AfterTool":
+        if let current = state.current, current.name == tool {
+            state.lastTool = current
+            state.current = nil
+        }
+        if state.phase == .waiting {
+            state.phase = .working
+            clearWait()
+        }
+    case "Notification":
+        if (string("notification_type") ?? "").lowercased().contains("permission") {
+            wait(for: "permission: \(state.current?.name ?? "a tool")")
+        }
+    case "AfterAgent":
+        state.phase = .idle
+        clearWait()
+        state.current = nil
+        state.finishedAt = now
+        if let started = state.turnStartedAt { state.lastTurnSeconds = now - started }
+    default:
+        break
+    }
 } else {
 switch name {
 case "SessionStart":
@@ -414,7 +572,8 @@ case "PermissionRequest":
     let what = tool.map { mcpServer(of: $0).map { server in "\(server) MCP" } ?? $0 } ?? "a tool"
     let agentType = agentIndex(agentId).map { state.agents[$0].type }
     wait(for: "permission: \(what)\(agentType.map { " (\($0))" } ?? "")")
-    if let tool, tool != "AskUserQuestion", tool != "ExitPlanMode" {
+    // Codex's prompts are answered in Codex: it takes no session rules, so the notch offers none.
+    if isClaude, let tool, tool != "AskUserQuestion", tool != "ExitPlanMode" {
         let id = UUID().uuidString
         let server = mcpServer(of: tool)
         let input = event["tool_input"] as? [String: Any] ?? [:]
@@ -484,6 +643,15 @@ case "SubagentStart":
 case "SubagentStop":
     resolvePending { $0.agent == agentId }
     if let index = agentIndex(agentId) { state.agents[index].end(.done, at: now) }
+
+case "Interrupt":
+    // Codex: Esc. The turn is over, as at Stop.
+    state.phase = .idle
+    clearWait()
+    state.current = nil
+    state.finishedAt = now
+    if let started = state.turnStartedAt { state.lastTurnSeconds = now - started }
+    for index in state.agents.indices where state.agents[index].isRunning { state.agents[index].end(.stopped, at: now) }
 
 case "Stop":
     resolvePending { $0.agent == nil }

@@ -1,6 +1,8 @@
 # AI Notch
 
-A macOS app that shows your Claude Code and Cursor agent sessions in the MacBook notch.
+A macOS app that shows your coding agents' sessions in the MacBook notch: Claude Code, Cursor's
+agent, Codex and Gemini CLI through their hooks, and other agents (Aider, Goose, Amp, Copilot CLI,
+OpenCode and more) as processes (see [Other agents](#other-agents)).
 
 Hover the notch to see every open session in VS Code, Cursor and the terminal: the chat's title,
 the project, the model, whether it is working, waiting for you or idle, the tool or MCP server it
@@ -91,6 +93,9 @@ nothing and shows the command above. Then it:
   `ai-notch-hook statusline '<your command>'`, which prints exactly what your command prints;
 - adds the hook to 8 events of Cursor's own agent in `~/.cursor/hooks.json`, when `~/.cursor`
   exists (none of Cursor's permission events);
+- adds the hook to 10 Codex events in `~/.codex/hooks.json`, when `~/.codex` exists, and to 7
+  Gemini CLI events in `~/.gemini/settings.json`, when `~/.gemini` exists (see
+  [Other agents](#other-agents));
 - writes the login item `~/Library/LaunchAgents/info.ankeshshiv.notch.plist`, which starts the
   app at login and restarts it after a crash;
 - optionally asks for notifications and for Accessibility (to raise a session's exact window).
@@ -199,6 +204,52 @@ stays warm.
 `postToolUseFailure`, `afterMCPExecution`, `subagentStop` and `stop`. Cursor's permission hooks
 are left alone, because an answer there can block or allow an action. So Cursor rows show the last
 finished tool rather than the one in flight, subagents once they stop, and no approval waits.
+
+### Other agents
+
+Codex and Gemini CLI report through their hooks, the way Claude Code does; other agents show as
+processes; and any agent or script can report itself.
+
+**Codex** (`ai-notch-hook codex`, in `~/.codex/hooks.json`): `SessionStart`, `SessionEnd`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `SubagentStart`,
+`SubagentStop`, `Stop` and `Interrupt`. A row shows its turn, the tool in flight, its subagents and
+the model, and turns amber while a command waits for your approval; you answer that in Codex (it
+takes no session rules, so the notch offers no buttons). Codex runs a hook only once you trust it:
+after Set Up, type `/hooks` in Codex and trust AI Notch's.
+
+**Gemini CLI** (`ai-notch-hook gemini`, in `~/.gemini/settings.json`): `SessionStart`,
+`SessionEnd`, `BeforeAgent`, `AfterAgent`, `BeforeTool`, `AfterTool` and `Notification` (a tool
+waiting for your confirmation). Not its model hooks, which run on every request. The hook answers
+`{}`, the empty answer Gemini CLI reads.
+
+**Other agents, as processes.** Every 3 seconds AI Notch looks for coding agents among your
+processes: Aider, Goose, Amp, Factory Droid, Crush, GitHub Copilot CLI, OpenCode, Qwen Code, Cursor
+CLI, Augment, Kiro, Cline, Kimi, Plandex and OpenHands, and Codex or Gemini CLI where their hooks
+are not set up. A script run by node, bun or python counts by its file name or its npm or pip
+package. Each one is a row with its folder and the app it runs in (a click raises it); working
+means it (or a process it started) used the CPU in the last 15 seconds, else idle. That is all a
+process says: no tools, prompts or titles, and no sounds or notifications for these rows. A
+process a hook already reports is left to the hook, and servers (`mcp`, `app-server`, `serve`,
+`--acp`) are not sessions. Setup → Optional → Other agents turns the watcher off. More names, and
+names to skip, in `~/.claude/notch/builds.json`:
+
+```json
+"agents": { "watch": { "mybot": "My Bot" }, "ignore": ["amp"] }
+```
+
+**Anything else reports itself** with the hook, from a wrapper, a script or an agent's own hooks:
+
+```sh
+H=/Applications/AINotch.app/Contents/MacOS/ai-notch-hook
+$H report working --agent "My Bot" --title "Fix the login bug" --detail "running tests"
+$H report waiting --agent "My Bot" --detail "your review"
+$H report idle --agent "My Bot"
+$H report end --agent "My Bot"
+```
+
+Each call is one row (`--id` names it; else it is the calling process's). `--cwd` sets its folder
+(else the current one) and `--pid` a process whose exit removes the row; without one, a row
+without a report for 30 minutes leaves the notch. It prints nothing and always exits 0.
 
 ### Builds and pipelines
 
@@ -774,6 +825,10 @@ from the app's first versions, so usage history carries over.
   GraphQL API is not documented and may change; the CLI then stands in. An EAS build started from
   the CLI counts as yours by the CLI's login, which a team may share. ETAs are medians of recent
   runs, not promises.
+- Codex: a permission prompt is answered in Codex, not in the notch. Gemini CLI: its hooks run
+  only in versions that have them (0.26 and later); its tools show once Gemini calls them, and a
+  wait shows when it notifies. Agents seen as processes: working or idle is a guess from CPU
+  time, and a process name another program also uses can show as an agent (`"ignore"` it).
 - VPN: OpenVPN 2.7 only (no IKEv2, WireGuard or tap devices). One connection at a time. A profile
   with certificates or keys in separate files must have them inlined first; BF-CBC and other
   ciphers of OpenSSL's legacy provider are not available. If OpenVPN is killed outright (not
