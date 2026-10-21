@@ -697,6 +697,23 @@ To check a profile without importing it, from a build:
 .build/release/ai-notch-vpnd selfcheck                     # the profile check and the management parser
 ```
 
+### Effects
+
+Light around the closed notch, set in Setup → Effects. The notch is the camera's cut-out, so it
+lies along the outside of its edge and just under it:
+
+- **Scanner** (the default): a light running to and fro along the edge, in the working agent's
+  colour (Claude's orange, Codex's green, Gemini's blue…).
+- **Neon**: the edge in a slowly turning rainbow.
+- **Lights**: a string of coloured bulbs under the notch, twinkling.
+- **Aurora**: green, teal and violet light drifting under it.
+
+The style plays while an agent works, a subagent or a pipeline runs (or always: turn off **Only
+while working**), and gives way to the amber glow while a session waits on you. **Pointer glow**
+lights the edge where the pointer is as it comes within 100 points; **Sparkles when done** sends
+a burst of coloured sparks from the notch when a turn finishes. Like the spinner, they are Core
+Animation layers at 30 fps at most: the app does no work per frame.
+
 ### Light and dark
 
 The panel follows the system's appearance, live. The strip on the notch stays black in both to
