@@ -148,19 +148,9 @@ struct RootView: View {
                 SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews, controller: controller,
                             isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, maxHeight: g.maxHeight - Self.bezel)
                     .background(
-                        ZStack(alignment: .top) {
-                            UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
-                                                   bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
-                                .fill(Palette.surface)
-                            // While an agent works, its colour glows down from the top edge.
-                            if let glow = headerGlow {
-                                LinearGradient(colors: [glow.opacity(0.22), glow.opacity(0)], startPoint: .top, endPoint: .bottom)
-                                    .frame(height: 48)
-                                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 12, topTrailingRadius: 12, style: .continuous))
-                                    .transition(.opacity)
-                            }
-                        }
-                        .animation(.easeInOut(duration: 0.5), value: headerGlow)
+                        UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
+                                               bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
+                            .fill(Palette.surface)
                     )
                     .padding(.horizontal, Self.bezel)
                     .padding(.bottom, Self.bezel)
@@ -199,11 +189,6 @@ struct RootView: View {
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: wide)
     }
 
-    /// The colour of the agent at work (the first working session's), for the open notch's top.
-    private var headerGlow: Color? {
-        guard let working = store.working.first else { return nil }
-        return agentHue(working.kind)
-    }
 }
 
 /// Sizes its one subview to its natural height up to `cap`, then gives it exactly `cap`: a
@@ -1138,23 +1123,16 @@ private struct EngineTag: View {
     }
 }
 
-/// An agent's colour, for its row's edge, wash and progress line, and the open notch's top.
-func agentHue(_ kind: AgentKind) -> Color { EngineTag.colors(kind).hue }
-
-/// The line along a working row's bottom edge.
+/// The line along a working row's bottom edge: a hairline, filled in the text's own grey.
 private struct TurnProgress: View {
     var fraction: Double
-    var color: Color
 
     var body: some View {
         GeometryReader { proxy in
-            Capsule().fill(Palette.track)
-                .overlay(alignment: .leading) {
-                    Capsule().fill(LinearGradient(colors: [color.opacity(0.5), color], startPoint: .leading, endPoint: .trailing))
-                        .frame(width: max(4, proxy.size.width * fraction))
-                }
+            Capsule().fill(Palette.ink3.opacity(0.6))
+                .frame(width: max(4, proxy.size.width * fraction))
         }
-        .frame(height: 2)
+        .frame(height: 1.5)
         .animation(.linear(duration: 1), value: fraction)
         .allowsHitTesting(false)
     }
@@ -1416,25 +1394,13 @@ private struct SessionRow: View {
         .rowCard(tint: session.phase == .waiting ? Palette.waitingTint : Palette.card,
                  edge: session.phase == .waiting ? Palette.waitingEdge : Palette.hairline,
                  padding: compact ? 7 : 10)
-        // While it works, a wash of its agent's colour, and a line along the bottom timed by its
-        // last turn.
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(agentHue(session.kind).opacity(session.phase == .working ? 0.07 : 0))
-        )
+        // While it works, a quiet line along the bottom, timed by its last turn.
         .overlay(alignment: .bottom) {
             if session.phase == .working, let started = session.turnStartedAt {
-                TurnProgress(fraction: Self.progress(now - started, last: session.lastTurnSeconds), color: agentHue(session.kind))
-                    .padding(.horizontal, 12).padding(.bottom, 2)
+                TurnProgress(fraction: Self.progress(now - started, last: session.lastTurnSeconds))
+                    .padding(.horizontal, 14).padding(.bottom, 1.5)
                     .transition(.opacity)
             }
-        }
-        // Its agent's colour down the left edge.
-        .overlay(alignment: .leading) {
-            Capsule().fill(agentHue(session.kind).opacity(session.phase == .idle ? 0.45 : 0.95))
-                .frame(width: 3)
-                .padding(.vertical, compact ? 9 : 12)
-                .padding(.leading, 2)
         }
         .animation(.easeInOut(duration: 0.3), value: session.phase)
     }
