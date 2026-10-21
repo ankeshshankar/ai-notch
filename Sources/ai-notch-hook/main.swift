@@ -55,7 +55,8 @@ func runStatusLine() -> Never {
         dup2(fd, STDIN_FILENO)
         close(fd)
     }
-    let args: [UnsafeMutablePointer<CChar>?] = ["/bin/sh", "-c", rest].map { strdup($0) } + [nil]
+    let words: [String] = ["/bin/sh", "-c", rest]
+    let args: [UnsafeMutablePointer<CChar>?] = words.map { strdup($0) } + [nil]
     execv("/bin/sh", args)
     exit(0)
 }
