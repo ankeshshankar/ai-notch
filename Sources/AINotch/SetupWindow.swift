@@ -593,6 +593,7 @@ struct SetupView: View {
     @State private var showsProdSteps = false
     @State private var showsTokenSteps = false
     @ObservedObject private var auth = DatadogAuthModel.shared
+    @ObservedObject private var effects = EffectsPrefs.shared
     /// The running notch's VPN (a placeholder that asks nothing in a setup preview).
     @ObservedObject private var vpn = SetupWindowController.shared.vpn ?? VPNStore()
     /// A team-signed build carries the widget and the app group it reads; an ad-hoc one neither.
@@ -719,6 +720,8 @@ struct SetupView: View {
                     }
                 }
             }
+
+            effectsSection
 
             buildsSection
 
@@ -1216,6 +1219,35 @@ struct SetupView: View {
     \(MachineConfig.example)
     warnBelowMB: amber under this much free memory. idleMinutes: quiet this long counts as idle. exclude: kinds never shown (metro, jest, verify, turbo, emulator, simulator, simulatorApp, gradle, kotlin, adb, watchman).
     """
+
+    /// The light effects around the closed notch (NotchEffects): the style and when it plays.
+    private var effectsSection: some View {
+        section("Effects") {
+            row("Style", icon: "sparkles", tint: Color(red: 0.93, green: 0.36, blue: 0.62),
+                info: "Light around the closed notch. Scanner: a light running to and fro along its edge, in the working agent's colour. Neon: its edge in a turning rainbow. Lights: coloured bulbs under it, twinkling. Aurora: green, teal and violet light drifting under it. A session waiting on you shows the amber glow instead. Drawn by Core Animation at 30 fps at most, like the spinner.") {
+                Picker("", selection: $effects.style) {
+                    ForEach(EffectsPrefs.Style.allCases) { style in Text(style.title).tag(style) }
+                }
+                .labelsHidden().pickerStyle(.menu).fixedSize()
+            }
+            divider
+            row("Only while working", icon: "bolt.fill", tint: Color(red: 0.96, green: 0.62, blue: 0.14),
+                info: "On: the style plays while an agent works, a subagent runs or a pipeline runs. Off: whenever the notch is closed.") {
+                Toggle("", isOn: $effects.onlyWhileWorking).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                    .disabled(effects.style == .off)
+            }
+            divider
+            row("Pointer glow", icon: "cursorarrow.motionlines", tint: Color(red: 0.40, green: 0.55, blue: 0.95),
+                info: "A soft light under the closed notch where the pointer is, brighter as it comes nearer (within 100 points).") {
+                Toggle("", isOn: $effects.pointerGlow).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
+            row("Sparkles when done", icon: "party.popper.fill", tint: Color(red: 0.30, green: 0.76, blue: 0.54),
+                info: "A burst of coloured sparks from the notch when an agent finishes a turn.") {
+                Toggle("", isOn: $effects.sparkles).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+        }
+    }
 
     /// The VPN: its helper (install, update, remove), the chip, the drop notification, profiles.
     private var vpnSection: some View {

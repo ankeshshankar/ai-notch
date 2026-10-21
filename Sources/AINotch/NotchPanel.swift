@@ -172,6 +172,8 @@ final class NotchController: ObservableObject {
     var headsUpRect: CGRect = .zero
     /// Hover for the views in the panel (see HoverHub): SwiftUI's onHover never fires there.
     let hover = HoverHub()
+    /// The pointer near the closed notch, for the effects' glow.
+    let pointer = PointerFeed()
 
     private static let pinnedKey = "notch.pinned"
     private let store: SessionStore
@@ -394,6 +396,7 @@ final class NotchController: ObservableObject {
             return
         }
         let point = NSEvent.mouseLocation
+        pointer.update(pointer: point, shape: shapeOnScreen, active: !isExpanded && EffectsPrefs.shared.pointerGlow)
         // A little slop, and up to the very top edge, so the screen's edge counts as the notch.
         var zone = shapeOnScreen.insetBy(dx: -6, dy: -6)
         zone.size.height += 6

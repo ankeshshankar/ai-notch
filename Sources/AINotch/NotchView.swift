@@ -116,6 +116,7 @@ struct RootView: View {
     @ObservedObject var vpn: VPNStore
     @ObservedObject var reviews: ReviewStore
     @ObservedObject var controller: NotchController
+    @ObservedObject var effects = EffectsPrefs.shared
     /// The black edge left around the body's card.
     static let bezel: CGFloat = 5
 
@@ -166,6 +167,18 @@ struct RootView: View {
         .background(NotchShape(radius: expanded ? 22 : 11).fill(Color.black))
         .overlay(WaitingGlow(isOn: !store.waiting.isEmpty && !expanded, radius: 11))
         .clipShape(NotchShape(radius: expanded ? 22 : 11))
+        // The light effects around the closed notch, outside its clip (the notch itself is the
+        // camera's cut-out). A session waiting on you has the amber glow to itself.
+        .overlay(alignment: .top) {
+            if !expanded {
+                let busy = !store.working.isEmpty || store.runningAgents > 0 || builds.hasActive
+                NotchEffects(pointer: controller.pointer,
+                             size: CGSize(width: g.collapsedWidth(showsWings: wings), height: g.notchHeight),
+                             playing: store.waiting.isEmpty && (busy || !effects.onlyWhileWorking),
+                             accent: NotchEffects.accent(for: store.working.first?.kind),
+                             doneAt: store.lastDoneAt)
+            }
+        }
         .onGeometryChange(for: CGSize.self, of: { $0.size }) { size in
             controller.shapeSize = size
         }
