@@ -165,6 +165,16 @@ Edit, MultiEdit and Write prompts show a few lines of the change: removed lines 
 lines in green. While Claude keeps a to-do list, the row shows how far down it is (`3/7`) and the
 item under way; Details lists them all.
 
+### Keyboard shortcuts
+
+- **⌃⌥Space** opens the notch, or closes it.
+- **⌃⌥J** jumps to the session that needs you: one waiting first, else the one that finished last.
+- While a prompt waits: **⌃⌥Y** answers the oldest with Allow once (Approve plan for a plan),
+  **⌃⌥N** with Deny (Keep planning). These two are taken only while a prompt waits.
+
+They are global hot keys (no Accessibility permission). One another app already holds stays
+with it. Setup → Effects → Keyboard shortcuts turns them off.
+
 ### Stop, pause and notes
 
 Open a working session's Details and three small buttons sit beside **Less**:

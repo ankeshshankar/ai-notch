@@ -46,6 +46,7 @@ final class SetupModel: ObservableObject {
     /// The machine guard: on or off, and whether memory critical notifies.
     @Published private(set) var machineOn = UserDefaults.standard.object(forKey: "machine.enabled") as? Bool ?? true
     @Published private(set) var commandsOn = CommandsStore.isEnabled
+    @Published private(set) var hotkeysOn = Hotkeys.isEnabled
     @Published private(set) var telemetryOn = AgentTelemetry.isOn()
     @Published private(set) var telemetryProblem: String?
     @Published private(set) var machineNotify = UserDefaults.standard.object(forKey: "machine.notifyCritical") as? Bool ?? true
@@ -225,6 +226,12 @@ final class SetupModel: ObservableObject {
     func setTelemetry(_ on: Bool) {
         telemetryProblem = on ? AgentTelemetry.turnOn(hook: location.hook) : AgentTelemetry.turnOff()
         telemetryOn = AgentTelemetry.isOn()
+    }
+
+    func setHotkeys(_ on: Bool) {
+        hotkeysOn = on
+        UserDefaults.standard.set(on, forKey: Hotkeys.enabledKey)
+        Hotkeys.shared.apply()
     }
 
     func setCommandsOn(_ on: Bool) {
@@ -1047,6 +1054,8 @@ struct SetupView: View {
         }
     }
 
+    static let hotkeysHelp = "⌃⌥Space opens or closes the notch. ⌃⌥J jumps to the session that needs you (one waiting first, else the one that finished last). While a prompt waits, ⌃⌥Y answers the oldest with Allow once (Approve plan for a plan) and ⌃⌥N with Deny (Keep planning); those two are taken only then. A shortcut another app already holds is left to it."
+
     static let telemetryHelp = "Sends Claude Code's own telemetry (sessions, tokens, cost, each tool call's name, outcome and time, how long prompts wait, API errors) to Datadog over OTLP, for Datadog's Agent Console and your own dashboards. Not your prompts, code or tool inputs. It needs a Datadog API key, kept in ~/.claude/notch/datadog-otlp.key (only you can read it) and handed over by AI Notch's hook; ~/.claude/settings.json gets the exporter settings, never the key. Sessions started after turning it on send it. Turn Off takes it all back out."
 
     static let prodAlertsHelp = "Datadog alerts notify even while you're at your Mac. Serious ones (a monitor alerting, an incident declared) also pop the notch open for about 6 s; Warn and recoveries only notify. Each news notifies once. Right-click the Prod chip to snooze everything for an hour."
@@ -1252,6 +1261,11 @@ struct SetupView: View {
     /// The light effects around the closed notch (NotchEffects): the style and when it plays.
     private var effectsSection: some View {
         section("Effects") {
+            row("Keyboard shortcuts", icon: "keyboard", tint: Color(red: 0.35, green: 0.38, blue: 0.45), info: Self.hotkeysHelp) {
+                Toggle("", isOn: Binding(get: { model.hotkeysOn }, set: { model.setHotkeys($0) }))
+                    .toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
             row("Style", icon: "sparkles", tint: Color(red: 0.93, green: 0.36, blue: 0.62),
                 info: "Light around the closed notch. Scanner: a light running to and fro along its edge, in the working agent's colour. Neon: its edge in a turning rainbow. Lights: coloured bulbs under it, twinkling. Aurora: green, teal and violet light drifting under it. A session waiting on you shows the amber glow instead. Drawn by Core Animation at 30 fps at most, like the spinner.") {
                 Picker("", selection: $effects.style) {

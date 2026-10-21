@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SetupWindowController.shared.vpn = vpn
         SetupWindowController.shared.reviews = reviews
         controller = NotchController(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews)
+        if let controller, !args.contains("--preview") { Hotkeys.shared.start(controller: controller, store: store) }
         // Another copy opened while this one runs asks this one to show the window (see below).
         DistributedNotificationCenter.default().addObserver(forName: showSetupNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { SetupWindowController.shared.show() }
