@@ -52,7 +52,7 @@ final class EffectsPrefs: ObservableObject {
         style = Style(rawValue: defaults.string(forKey: "effects.style") ?? "") ?? .scanner
         onlyWhileWorking = defaults.object(forKey: "effects.onlyWhileWorking") as? Bool ?? true
         pointerGlow = defaults.object(forKey: "effects.pointerGlow") as? Bool ?? true
-        sparkles = defaults.object(forKey: "effects.sparkles") as? Bool ?? true
+        sparkles = defaults.object(forKey: "effects.sparkles") as? Bool ?? false
         compactRows = defaults.object(forKey: "effects.compactRows") as? Bool ?? false
     }
 
@@ -241,29 +241,21 @@ final class EffectLayerView: NSView {
     /// A bright spot that sweeps from one side of the notch to the other and back, lighting its
     /// bottom edge and corners, with a dim trace of the whole edge.
     private func scanner() {
-        let trace = CAShapeLayer()
-        trace.frame = bounds
-        trace.path = outline(shape: shape, in: bounds, offset: 1.5)
-        trace.fillColor = nil
-        trace.strokeColor = cg(accent, 0.22)
-        trace.lineWidth = 1.5
-        root.addSublayer(trace)
-
         let lit = CALayer()
         lit.frame = bounds
-        lit.mask = edgeMask(width: 3, offset: 1.5)
+        lit.mask = edgeMask(width: 1.5, offset: 1)
         let beam = CAGradientLayer()
         let width = max(60, shape.width * 0.35)
         beam.bounds = CGRect(x: 0, y: 0, width: width, height: bounds.height)
         beam.position = CGPoint(x: NotchEffects.pad, y: bounds.midY)
         beam.startPoint = CGPoint(x: 0, y: 0.5)
         beam.endPoint = CGPoint(x: 1, y: 0.5)
-        beam.colors = [cg(accent, 0), cg(accent, 1), cg(.white, 1), cg(accent, 1), cg(accent, 0)]
-        beam.locations = [0, 0.4, 0.5, 0.6, 1]
+        beam.colors = [cg(accent, 0), cg(accent, 0.85), cg(accent, 0)]
+        beam.locations = [0, 0.5, 1]
         lit.addSublayer(beam)
         lit.shadowColor = accent.cgColor
-        lit.shadowOpacity = 1
-        lit.shadowRadius = 4
+        lit.shadowOpacity = 0.6
+        lit.shadowRadius = 2
         lit.shadowOffset = .zero
         root.addSublayer(lit)
 
@@ -271,7 +263,7 @@ final class EffectLayerView: NSView {
         sweep.fromValue = NotchEffects.pad - 4
         sweep.toValue = NotchEffects.pad + shape.width + 4
         sweep.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        beam.add(looped(sweep, period: 1.6, reverses: true), forKey: "loop")
+        beam.add(looped(sweep, period: 2.2, reverses: true), forKey: "loop")
     }
 
     /// The edge in every colour, turning: a conic rainbow behind a stroke of the outline.
@@ -421,9 +413,9 @@ final class PointerGlowView: NSView {
 
     func update(shape: CGSize, near: (x: CGFloat, strength: CGFloat)?, color: NSColor) {
         self.shape = shape
-        spot.colors = [cg(color, 0.9), cg(color, 0.35), cg(color, 0)]
-        spot.locations = [0, 0.45, 1]
-        spot.bounds = CGRect(x: 0, y: 0, width: 110, height: 28)
+        spot.colors = [cg(color, 0.45), cg(color, 0.12), cg(color, 0)]
+        spot.locations = [0, 0.5, 1]
+        spot.bounds = CGRect(x: 0, y: 0, width: 80, height: 18)
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.12)
         if let near {

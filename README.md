@@ -710,16 +710,14 @@ lies along the outside of its edge and just under it:
 
 The style plays while an agent works, a subagent or a pipeline runs (or always: turn off **Only
 while working**), and gives way to the amber glow while a session waits on you. **Pointer glow**
-lights the edge where the pointer is as it comes within 100 points; **Sparkles when done** sends
-a burst of coloured sparks from the notch when a turn finishes. Like the spinner, they are Core
+lights the edge faintly where the pointer is as it comes within 100 points; **Sparkles when done**
+(off unless turned on) sends a burst of coloured sparks from the notch when a turn finishes. Like the spinner, they are Core
 Animation layers at 30 fps at most: the app does no work per frame.
 
-In the open notch each session's row carries its agent's colour down its left edge; while it
-works, a wash of that colour and a line along its bottom, which fills against the length of its
-last turn (a minute for a first one) and slows as it nears the end. The top of the open notch
-glows in the colour of the agent at work. New rows slide in, and a row's state changes fade
-across. **Compact rows** (Setup → Effects) drops each row's project and model line, so eight fit
-before the list scrolls.
+While a session works, a hairline along the bottom of its row fills against the length of its
+last turn (a minute for a first one), slowing as it nears the end. New rows slide in, and a row's
+state changes fade across. **Compact rows** (Setup → Effects) drops each row's project and model
+line, so eight fit before the list scrolls.
 
 ### Light and dark
 
