@@ -17,8 +17,8 @@ APP="$1"
 case "$APP" in *.app) ;; *) echo "$0: the path must end in .app" >&2; exit 2 ;; esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE_ID="info.ankeshshiv.notch"
-VERSION="0.4.0"
-BUILD="5"
+VERSION="0.5.0"
+BUILD="6"
 IDENTITY="${NOTCH_SIGN_IDENTITY:-}"
 TEAM="${NOTCH_TEAM_ID:-}"
 if [ -n "$IDENTITY" ] && [ -n "$TEAM" ]; then
