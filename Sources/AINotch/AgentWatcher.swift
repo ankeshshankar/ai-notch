@@ -13,7 +13,7 @@ final class AgentWatcher: @unchecked Sendable {
     static let known: [String: String] = [
         "aider": "Aider", "goose": "Goose", "amp": "Amp", "droid": "Factory Droid", "crush": "Crush",
         "copilot": "GitHub Copilot CLI", "opencode": "OpenCode", "qwen": "Qwen Code", "gemini": "Gemini CLI",
-        "codex": "Codex", "cursor-agent": "Cursor CLI", "auggie": "Augment", "kiro-cli": "Kiro",
+        "codex": "Codex", "cursor-agent": "Cursor CLI", "opencode-cli": "OpenCode", "auggie": "Augment", "kiro-cli": "Kiro",
         "cline": "Cline", "kimi": "Kimi CLI", "plandex": "Plandex", "openhands": "OpenHands",
     ]
 
@@ -183,7 +183,8 @@ final class AgentWatcher: @unchecked Sendable {
             args = ProcessList.arguments(of: entry.pid) ?? []
             arguments[key] = args
         }
-        if args.dropFirst().contains(where: Self.serverArgs.contains) { return nil }
+        // OpenCode's desktop app runs its agent as `opencode-cli serve`: that server is the agent.
+        if comm != "opencode-cli", args.dropFirst().contains(where: Self.serverArgs.contains) { return nil }
         if names[comm] != nil, !isInterpreter { return comm }
         // node <script> …: the first argument that is not an option is the script.
         guard let script = args.dropFirst().first(where: { !$0.hasPrefix("-") }) else { return nil }

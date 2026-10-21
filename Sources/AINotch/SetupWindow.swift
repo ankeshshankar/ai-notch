@@ -16,6 +16,8 @@ final class SetupModel: ObservableObject {
     /// Nil without `~/.codex` or `~/.gemini`: their rows are not shown.
     @Published private(set) var codex: ItemStatus?
     @Published private(set) var gemini: ItemStatus?
+    /// Nil without `~/.config/opencode`.
+    @Published private(set) var opencode: ItemStatus?
     @Published private(set) var login: ItemStatus = .notSetUp
     @Published private(set) var notifications: UNAuthorizationStatus?
     @Published private(set) var accessibility = false
@@ -62,11 +64,11 @@ final class SetupModel: ObservableObject {
     var hookBlocked: Bool { probe.map { !$0.runs } ?? false }
     var requiredDone: Bool {
         location.problem == nil && !hookBlocked && claude.isDone && (cursor?.isDone ?? true)
-            && (codex?.isDone ?? true) && (gemini?.isDone ?? true) && login.isDone
+            && (codex?.isDone ?? true) && (gemini?.isDone ?? true) && (opencode?.isDone ?? true) && login.isDone
     }
     /// Hooks in the user's files point at this copy (all of them or some).
     var connected: Bool {
-        [claude, cursor, codex, gemini].contains { $0 == .done || $0 == .incomplete }
+        [claude, cursor, codex, gemini, opencode].contains { $0 == .done || $0 == .incomplete }
     }
     var unquarantineCommand: String { HookProbe.unquarantineCommand(location.bundle) }
 
@@ -105,6 +107,7 @@ final class SetupModel: ObservableObject {
         set(\.cursor, Setup.hasCursor ? Setup.cursorStatus(location) : nil)
         set(\.codex, Setup.hasCodex ? Setup.codexStatus(location) : nil)
         set(\.gemini, Setup.hasGemini ? Setup.geminiStatus(location) : nil)
+        set(\.opencode, OpenCodePlugin.hasOpenCode ? OpenCodePlugin.status(hook: location.hook.path) : nil)
         set(\.login, Setup.loginStatus(location))
         set(\.accessibility, AXIsProcessTrusted())
         set(\.buildsConfig, BuildsConfigInfo(BuildsConfig.current, exists: BuildsConfig.fileExists))
@@ -704,6 +707,13 @@ struct SetupView: View {
                     row("Gemini CLI", icon: "sparkles", tint: Color(red: 0.26, green: 0.52, blue: 0.96),
                         info: "Adds the hook to 7 Gemini CLI events, in ~/.gemini/settings.json: its turns, tools and the notification it raises when a tool waits for you. Not its model hooks, which run on every request. Your other settings stay as they are. A backup is saved first.") {
                         status(gemini, done: "Connected", error: model.errors["gemini"])
+                    }
+                }
+                if let opencode = model.opencode {
+                    divider
+                    row("OpenCode", icon: "chevron.left.forwardslash.chevron.right", tint: Color(red: 0.20, green: 0.20, blue: 0.22),
+                        info: "Adds a small plugin, ~/.config/opencode/plugins/ai-notch.js, that reports each OpenCode session (terminal, opencode serve or the desktop app) to the notch: working with its tool, waiting on a permission, idle. It only reports; nothing is answered or blocked. OpenCode loads it when it next starts. Disconnect removes it.") {
+                        status(opencode, done: "Connected", error: model.errors["opencode"])
                     }
                 }
                 divider
