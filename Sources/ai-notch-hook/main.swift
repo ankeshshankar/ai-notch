@@ -178,6 +178,17 @@ func noteCache(session id: String, expiresAt: Double) {
     if let encoded = try? JSONEncoder.notch.encode(state) { try? encoded.write(to: file, options: .atomic) }
 }
 
+// `ai-notch-hook otel-headers`: Claude Code's otelHeadersHelper, when Setup sends its telemetry to
+// Datadog. Prints the API key AI Notch keeps in ~/.claude/notch/datadog-otlp.key as the header.
+if mode == "otel-headers" {
+    let keyFile = NotchPaths.sessions.deletingLastPathComponent().appendingPathComponent("datadog-otlp.key")
+    guard let raw = try? String(contentsOf: keyFile, encoding: .utf8) else { exit(1) }
+    let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !key.isEmpty, let json = try? JSONSerialization.data(withJSONObject: ["dd-api-key": key]) else { exit(1) }
+    FileHandle.standardOutput.write(json + Data("\n".utf8))
+    exit(0)
+}
+
 if mode == "statusline" { runStatusLine() }
 if mode == "report" { runReport() }
 
@@ -358,6 +369,24 @@ func approvalDetail(tool: String, input: [String: Any]) -> String {
         let pairs = input.sorted { $0.key < $1.key }.prefix(3).map { key, value in "\(key): \(oneLine("\(value)", max: 60))" }
         return oneLine(pairs.joined(separator: " · "), max: 240)
     }
+}
+
+/// The push or deploy a shell command makes, as a short name: "git push", "vercel --prod"…
+func shipCommand(_ command: String) -> String? {
+    let patterns: [(String, String)] = [
+        (#"\bgit\s+push\b"#, "git push"),
+        (#"\b(vercel|netlify)\b.*--prod\b"#, "deploy"),
+        (#"\b(fly|flyctl)\s+deploy\b"#, "fly deploy"),
+        (#"\bkubectl\s+(apply|rollout|set\s+image)\b"#, "kubectl"),
+        (#"\bhelm\s+(upgrade|install)\b"#, "helm"),
+        (#"\bterraform\s+apply\b"#, "terraform apply"),
+        (#"\beas\s+(submit|update)\b"#, "eas"),
+        (#"\b(npm|pnpm|yarn|bun)\s+(run\s+)?deploy\b"#, "deploy"),
+        (#"\bgh\s+(pr\s+merge|release\s+create)\b"#, "gh"),
+        (#"\b(cap|serverless|sls|cdk)\s+deploy\b"#, "deploy"),
+    ]
+    for (pattern, name) in patterns where command.range(of: pattern, options: .regularExpression) != nil { return name }
+    return nil
 }
 
 /// A few lines of what a call changes, for the approval card: an edit's old and new lines, the
@@ -563,6 +592,12 @@ case "PreToolUse":
             since: now
         )
         state.pendingAgents = ((state.pendingAgents ?? []) + [pending]).filter { now - $0.since < 600 }
+    }
+    // A push or a deploy: the notch watches Prod for a while after it.
+    if tool == "Bash", let command = (event["tool_input"] as? [String: Any])?["command"] as? String,
+       let shipped = shipCommand(command) {
+        state.shippedAt = now
+        state.shipped = shipped
     }
     // Claude's to-do list: each TodoWrite sets all of it.
     if isClaude, agentId == nil, tool == "TodoWrite",

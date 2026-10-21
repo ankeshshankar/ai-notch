@@ -162,6 +162,9 @@ public struct SessionState: Codable, Sendable, Equatable {
     public var promptCacheExpiresAt: Double?
     /// Claude's to-do list, as its last TodoWrite set it.
     public var todos: [TodoItem]?
+    /// When the session last pushed or deployed (git push, a deploy command), and what it ran.
+    public var shippedAt: Double?
+    public var shipped: String?
 
     public init(id: String, cwd: String, now: Double) {
         self.id = id
