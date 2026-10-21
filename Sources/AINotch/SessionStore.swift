@@ -113,6 +113,9 @@ final class SessionStore: ObservableObject {
         alert(for: live)
         if live != sessions { sessions = live }
         AgentControls.shared.refresh(sessions)
+        CommandsStore.shared.setAgents(sessions.compactMap { session in
+            session.pid.map { CommandScanner.Agent(pid: $0, sessionId: session.id, title: title(of: session)) }
+        })
         titleReader.refresh(live) { [weak self] found in
             MainActor.assumeIsolated {
                 guard let self, found != self.titles else { return }

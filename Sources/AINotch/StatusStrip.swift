@@ -141,12 +141,16 @@ struct StatusStrip: View {
     @ObservedObject var machine: MachineStore
     @ObservedObject var vpn: VPNStore
     var controller: NotchController
+    @ObservedObject private var commands = CommandsStore.shared
 
     var body: some View {
         HStack(spacing: 8) {
             if prod.isOn { ProdChip(prod: prod, controller: controller, hover: controller.hover) }
             if machine.isOn { RamChip(machine: machine, feed: machine.feed, controller: controller) }
             if vpn.showsChip { VPNChip(vpn: vpn, controller: controller) }
+            if commands.count > 0 || controller.openPanel == NotchController.commandsPanel {
+                CommandsChip(commands: commands, controller: controller)
+            }
         }
     }
 }

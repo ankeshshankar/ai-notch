@@ -364,6 +364,7 @@ private struct SessionList: View {
                         if openPanel == "Code" { CodePanel(lines: store.usage.lines, git: store.gitLines, now: store.now) }
                         if openPanel == NotchController.machinePanel, machine.isOn { MachinePanel(machine: machine, feed: machine.feed) }
                         if openPanel == NotchController.vpnPanel, vpn.isOn { VPNPanel(vpn: vpn, now: store.now) }
+                        if openPanel == NotchController.commandsPanel { CommandsPanel(commands: CommandsStore.shared, now: store.now) }
                         if openPanel == NotchController.pullRequestsPanel, reviews.isOn {
                             PullRequestsPanel(reviews: reviews, controller: controller, now: store.now, isWide: isWide)
                         }

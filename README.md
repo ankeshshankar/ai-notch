@@ -184,6 +184,22 @@ Agents found as processes (Aider, Goose…) get Pause, which stops their process
 being streamed may time out) and Resume, and Stop, which quits them (SIGTERM) on a second click.
 Codex and Gemini rows have no controls yet.
 
+### Background commands
+
+A **terminal** chip in the footer counts the commands running in the background, and opens the
+**Commands** panel:
+
+- what agents run: Claude Code's background and long Bash commands and its monitors (shown once
+  they have run 5 seconds, without Claude Code's wrapper), a watched agent's shells, each under its
+  chat's name;
+- what has run a minute in your terminals (Terminal, iTerm, an editor's terminal): dev servers,
+  watch builds. Editors, pagers, shells, REPLs and agents are left out.
+
+Each line: the command, who runs it, how long, CPU and memory (everything under it counted), the
+folder, its ports (a click opens `http://localhost:<port>`), and **Stop**, which takes a second
+click within 5 s: SIGTERM to it and everything under it, SIGKILL 4 s later to what is left.
+Claude Code sees its command end and carries on. Setup → Machine → Background commands turns it off.
+
 ### Notifications
 
 Only while the screen is locked: a session that needs you, or a turn longer than a minute
