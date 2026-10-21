@@ -463,6 +463,13 @@ private struct SessionList: View {
         }
     }
 
+    /// For 20 minutes after a session pushed or deployed: Prod's level, and its alerting monitor.
+    private func prodWatch(_ session: SessionState) -> ProdWatch? {
+        guard prod.isOn, let at = session.shippedAt, store.now - at < 1200, store.now >= at else { return nil }
+        return ProdWatch(level: prod.level, since: at, what: session.shipped ?? "push",
+                         alerting: prod.alertingMonitors.first?.name)
+    }
+
     /// The sessions, at most `limit` of them, and how many more there are.
     @ViewBuilder private func sessionRows(limit: Int) -> some View {
         if store.sessions.isEmpty {
@@ -486,7 +493,8 @@ private struct SessionList: View {
                     SessionRow(session: session, title: title, now: store.now, agentActivity: store.agentActivity, agentModels: store.agentModels,
                                usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
                                reserved: space, live: store.usage.live[session.id], compact: looks.compactRows,
-                               paused: controls.isPaused(session), stopping: controls.isStopping(session))
+                               paused: controls.isPaused(session), stopping: controls.isStopping(session),
+                               prodWatch: prodWatch(session))
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(RowButtonStyle())
@@ -1336,6 +1344,37 @@ private struct ApprovalCard: View {
     }
 }
 
+/// Prod after a session's push or deploy.
+struct ProdWatch: Equatable {
+    var level: ProdStore.Level
+    var since: Double
+    var what: String
+    var alerting: String?
+}
+
+private struct ProdWatchLine: View {
+    var watch: ProdWatch
+    var now: Double
+
+    var body: some View {
+        let (color, state): (Color, String) = {
+            switch watch.level {
+            case .unknown: return (Palette.ink3, "no answer yet")
+            case .ok: return (Palette.done, "all OK")
+            case .warn: return (Palette.waiting, "warning")
+            case .alert: return (Palette.failed, watch.alerting.map { "alerting: \($0)" } ?? "alerting")
+            }
+        }()
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text("Prod \(elapsed(now - watch.since)) after \(watch.what): \(state)")
+                .font(.system(size: 10.5)).foregroundStyle(watch.level >= .warn ? color : Palette.ink2)
+                .lineLimit(1).truncationMode(.tail)
+        }
+        .help("For 20 minutes after this session ran \(watch.what), its row shows the Prod chip's state: your Datadog monitors, incidents and numbers. It does not know which service the push went to.")
+    }
+}
+
 /// Stop, Pause or Resume, and Note, beside a row's Details button: open details show them, and a
 /// paused or stopping row keeps them. A watched agent's Stop quits it, so it takes a second click.
 private struct RowControls: View {
@@ -1445,6 +1484,8 @@ private struct SessionRow: View {
     var live: LiveSpend?
     /// Setup's Compact rows: the project line goes, its tags move up beside the title.
     var compact = false
+    /// Prod while it settles after this session's push or deploy.
+    var prodWatch: ProdWatch?
     /// Paused or being stopped from the notch.
     var paused = false
     var stopping = false
@@ -1488,10 +1529,11 @@ private struct SessionRow: View {
                 }
                 // With nothing under it, the last line leaves room on its right for the Details
                 // button instead of a line of its own.
-                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil && !paused && !stopping
+                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil && !paused && !stopping && prodWatch == nil
                 let mcpLine = !isDetailed && !compact && !session.mcp.isEmpty
                 activity.padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
                 if let todos = openTodos { todoLine(todos) }
+                if let prodWatch { ProdWatchLine(watch: prodWatch, now: now) }
                 if !session.agents.isEmpty { agents }
                 if isDetailed {
                     details

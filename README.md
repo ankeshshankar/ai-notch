@@ -611,6 +611,23 @@ optional reminder every 2 hours for a monitor still alerting (off by default) ar
 as `prod.alerts`. `notch.log` gets each change's kind and id (`prod: monitorAlert (m:123)`), never
 a monitor's or incident's name.
 
+#### After a push: Prod on the row
+
+When a session runs `git push` or a deploy (`vercel --prod`, `fly deploy`, `kubectl apply`, `helm
+upgrade`, `terraform apply`, `eas submit`, `npm run deploy`, `gh pr merge`…), its row shows the
+Prod chip's state for the next 20 minutes: "Prod 4m after git push: all OK", amber on a warning,
+red with the alerting monitor's name. It is the whole Prod view, not that service's alone.
+
+#### Agent analytics in Datadog
+
+Setup → Prod → **Agent analytics → Turn On…** sends Claude Code's own telemetry to Datadog over
+OTLP (sessions, tokens, cost, each tool call's name, outcome and time, prompt waits, API errors;
+not prompts, code or tool inputs), for Datadog's Agent Console and your dashboards. It asks for a
+Datadog API key once and keeps it in `~/.claude/notch/datadog-otlp.key` (0600). The exporter
+settings go into `~/.claude/settings.json`'s `env`, and its `otelHeadersHelper` runs
+`ai-notch-hook otel-headers` to hand the key over, so the key is never in the settings. Sessions
+started after that send. **Turn Off** takes all of it back out.
+
 ### Machine guard
 
 A **RAM** chip on the left of the footer, beside Prod: the free memory in the colour of the

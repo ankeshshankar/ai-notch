@@ -46,6 +46,8 @@ final class SetupModel: ObservableObject {
     /// The machine guard: on or off, and whether memory critical notifies.
     @Published private(set) var machineOn = UserDefaults.standard.object(forKey: "machine.enabled") as? Bool ?? true
     @Published private(set) var commandsOn = CommandsStore.isEnabled
+    @Published private(set) var telemetryOn = AgentTelemetry.isOn()
+    @Published private(set) var telemetryProblem: String?
     @Published private(set) var machineNotify = UserDefaults.standard.object(forKey: "machine.notifyCritical") as? Bool ?? true
     /// The section the window was opened for (the Prod chip's click): outlined for a moment.
     @Published private(set) var focus: SetupFocus?
@@ -218,6 +220,11 @@ final class SetupModel: ObservableObject {
     func setMachineOn(_ on: Bool) {
         machineOn = on
         if let machine = SetupWindowController.shared.machine { machine.setEnabled(on) } else { UserDefaults.standard.set(on, forKey: "machine.enabled") }
+    }
+
+    func setTelemetry(_ on: Bool) {
+        telemetryProblem = on ? AgentTelemetry.turnOn(hook: location.hook) : AgentTelemetry.turnOff()
+        telemetryOn = AgentTelemetry.isOn()
     }
 
     func setCommandsOn(_ on: Bool) {
@@ -1024,12 +1031,23 @@ struct SetupView: View {
                 if showsProdSteps && !isSignedIn { datadogSteps }
             }
             divider
+            row("Agent analytics", icon: "chart.xyaxis.line", tint: Color(red: 0.39, green: 0.17, blue: 0.64), info: Self.telemetryHelp) {
+                if let problem = model.telemetryProblem {
+                    Text(problem).font(.system(size: 11)).foregroundStyle(.orange).lineLimit(2).frame(maxWidth: 220, alignment: .trailing)
+                }
+                Button(model.telemetryOn ? "Turn Off" : "Turn On…") { model.setTelemetry(!model.telemetryOn) }
+                    .controlSize(.small)
+                    .disabled(!model.telemetryOn && prod.needsConfig)
+            }
+            divider
             row("Datadog alerts", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27), info: Self.prodAlertsHelp) {
                 EmptyView()
             }
             prodAlertsGroup
         }
     }
+
+    static let telemetryHelp = "Sends Claude Code's own telemetry (sessions, tokens, cost, each tool call's name, outcome and time, how long prompts wait, API errors) to Datadog over OTLP, for Datadog's Agent Console and your own dashboards. Not your prompts, code or tool inputs. It needs a Datadog API key, kept in ~/.claude/notch/datadog-otlp.key (only you can read it) and handed over by AI Notch's hook; ~/.claude/settings.json gets the exporter settings, never the key. Sessions started after turning it on send it. Turn Off takes it all back out."
 
     static let prodAlertsHelp = "Datadog alerts notify even while you're at your Mac. Serious ones (a monitor alerting, an incident declared) also pop the notch open for about 6 s; Warn and recoveries only notify. Each news notifies once. Right-click the Prod chip to snooze everything for an hour."
 
