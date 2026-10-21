@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         prod.start()
         machine.start()
         vpn.start()
+        CommandsStore.shared.start()
         // Pull requests: notified through Notifier (locked screen only), a failed build Pipelines
         // already announced left out, and read less often while one of my pipelines runs.
         reviews.onEvents = { [weak reviews] events in reviews?.post(events) }

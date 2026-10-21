@@ -45,6 +45,7 @@ final class SetupModel: ObservableObject {
     @Published private(set) var prodAlerts = ProdAlertPrefs.load()
     /// The machine guard: on or off, and whether memory critical notifies.
     @Published private(set) var machineOn = UserDefaults.standard.object(forKey: "machine.enabled") as? Bool ?? true
+    @Published private(set) var commandsOn = CommandsStore.isEnabled
     @Published private(set) var machineNotify = UserDefaults.standard.object(forKey: "machine.notifyCritical") as? Bool ?? true
     /// The section the window was opened for (the Prod chip's click): outlined for a moment.
     @Published private(set) var focus: SetupFocus?
@@ -217,6 +218,11 @@ final class SetupModel: ObservableObject {
     func setMachineOn(_ on: Bool) {
         machineOn = on
         if let machine = SetupWindowController.shared.machine { machine.setEnabled(on) } else { UserDefaults.standard.set(on, forKey: "machine.enabled") }
+    }
+
+    func setCommandsOn(_ on: Bool) {
+        commandsOn = on
+        UserDefaults.standard.set(on, forKey: CommandsStore.enabledKey)
     }
 
     func setMachineNotify(_ on: Bool) {
@@ -1208,6 +1214,11 @@ struct SetupView: View {
                 Toggle("Memory critical", isOn: Binding(get: { model.machineNotify }, set: { model.setMachineNotify($0) }))
                     .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
                     .disabled(!model.machineOn)
+            }
+            divider
+            row("Background commands", icon: "terminal", tint: Color(red: 0.35, green: 0.38, blue: 0.45), info: CommandsPanel.about) {
+                Toggle("", isOn: Binding(get: { model.commandsOn }, set: { model.setCommandsOn($0) }))
+                    .toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
         }
     }

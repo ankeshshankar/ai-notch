@@ -149,6 +149,7 @@ final class NotchController: ObservableObject {
             }
             machine.setPanelOpen(isExpanded && openPanel == Self.machinePanel)
             vpn.setPanelOpen(isExpanded && openPanel == Self.vpnPanel)
+            CommandsStore.shared.setPanelOpen(isExpanded && openPanel == Self.commandsPanel)
         }
     }
     /// Which full-width panel is open under the header: Usage, Code, Machine, VPN or PRs, one at a time.
@@ -156,9 +157,11 @@ final class NotchController: ObservableObject {
         didSet {
             machine.setPanelOpen(isExpanded && openPanel == Self.machinePanel)
             vpn.setPanelOpen(isExpanded && openPanel == Self.vpnPanel)
+            CommandsStore.shared.setPanelOpen(isExpanded && openPanel == Self.commandsPanel)
         }
     }
     static let machinePanel = "Machine"
+    static let commandsPanel = "Commands"
     static let vpnPanel = "VPN"
     static let pullRequestsPanel = "PRs"
     @Published private(set) var geometry = NotchGeometry.current()
