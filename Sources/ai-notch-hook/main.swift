@@ -746,6 +746,50 @@ if let encoded = try? JSONEncoder.notch.encode(state) {
 }
 flock(lockFd, LOCK_UN)
 
+func applyControl() {
+    guard var control = SessionControl.read(sessionId) else { return }
+    // Paused: the next tool call waits until you resume or stop (at most the hook's 30 minutes).
+    if name == "PreToolUse" {
+        let until = now + 1780
+        while control.pause == true, control.stop != true, Date().timeIntervalSince1970 < until {
+            if getppid() == 1 { exit(0) }
+            usleep(500_000)
+            guard let next = SessionControl.read(sessionId) else { return }
+            control = next
+        }
+    }
+    if control.stop == true {
+        SessionControl.write(nil, for: sessionId)
+        let output: [String: Any] = ["continue": false, "stopReason": "Stopped from AI Notch."]
+        if let json = try? JSONSerialization.data(withJSONObject: output) {
+            FileHandle.standardOutput.write(json + Data("\n".utf8))
+        }
+        exit(0)
+    }
+    if name == "PreToolUse", let note = control.note, !note.isEmpty {
+        control.note = nil
+        SessionControl.write(control, for: sessionId)
+        let output: [String: Any] = ["hookSpecificOutput": [
+            "hookEventName": "PreToolUse",
+            "additionalContext": "A note from the user, sent from AI Notch while you work: \(note)",
+        ]]
+        if let json = try? JSONSerialization.data(withJSONObject: output) {
+            FileHandle.standardOutput.write(json + Data("\n".utf8))
+        }
+        exit(0)
+    }
+}
+
+// Stop, pause or a note from the notch (Claude Code only). A turn's end clears what was asked;
+// otherwise a stop or a note is acted on at the next tool call, a pause holds it.
+if isClaude {
+    if name == "Stop" || name == "SessionEnd" {
+        SessionControl.write(nil, for: sessionId)
+    } else if name == "PreToolUse" || name == "PostToolUse" || name == "PostToolUseFailure" {
+        applyControl()
+    }
+}
+
 guard let approval else { exit(0) }
 
 // Ask the app, outside the lock: the wait can be long and other events of this session must not

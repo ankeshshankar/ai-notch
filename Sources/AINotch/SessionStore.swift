@@ -96,6 +96,7 @@ final class SessionStore: ObservableObject {
             if isGone(state) || isEmpty {
                 try? FileManager.default.removeItem(at: file)
                 try? FileManager.default.removeItem(at: NotchPaths.lock(state.id))
+                try? FileManager.default.removeItem(at: NotchPaths.control(state.id))
                 continue
             }
             var shown = settled(state)
@@ -111,6 +112,7 @@ final class SessionStore: ObservableObject {
         approvals.reconcile(with: live)
         alert(for: live)
         if live != sessions { sessions = live }
+        AgentControls.shared.refresh(sessions)
         titleReader.refresh(live) { [weak self] found in
             MainActor.assumeIsolated {
                 guard let self, found != self.titles else { return }

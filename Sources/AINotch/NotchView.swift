@@ -305,6 +305,7 @@ private struct RightWing: View {
 private struct SessionList: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var approvals: ApprovalCenter
+    @ObservedObject private var controls = AgentControls.shared
     @ObservedObject var builds: BuildStore
     @ObservedObject var prod: ProdStore
     @ObservedObject var machine: MachineStore
@@ -483,7 +484,8 @@ private struct SessionList: View {
                 } label: {
                     SessionRow(session: session, title: title, now: store.now, agentActivity: store.agentActivity, agentModels: store.agentModels,
                                usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
-                               reserved: space, live: store.usage.live[session.id], compact: looks.compactRows)
+                               reserved: space, live: store.usage.live[session.id], compact: looks.compactRows,
+                               paused: controls.isPaused(session), stopping: controls.isStopping(session))
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(RowButtonStyle())
@@ -496,6 +498,10 @@ private struct SessionList: View {
                             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { height in
                                 if cardHeights[session.id] != height { cardHeights[session.id] = height }
                             }
+                    }
+                    HStack(spacing: 6) {
+                    if isOpen || controls.isPaused(session) || controls.isStopping(session) {
+                        RowControls(controls: controls, session: session, title: title)
                     }
                     Button {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { detailId = isOpen ? nil : session.id }
@@ -510,6 +516,7 @@ private struct SessionList: View {
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    }
                 }
                 .padding(8)
             }
@@ -1328,6 +1335,60 @@ private struct ApprovalCard: View {
     }
 }
 
+/// Stop, Pause or Resume, and Note, beside a row's Details button: open details show them, and a
+/// paused or stopping row keeps them. A watched agent's Stop quits it, so it takes a second click.
+private struct RowControls: View {
+    @ObservedObject var controls: AgentControls
+    var session: SessionState
+    var title: String
+    @State private var confirmQuit = false
+
+    var body: some View {
+        let kind = AgentControls.kind(of: session)
+        if kind != .none, session.phase != .idle || controls.isPaused(session) {
+            HStack(spacing: 4) {
+                if kind == .hooked {
+                    icon("text.bubble", help: controls.hasNote(session) ? "A note waits for its next step; click to change it" : "Send Claude a note with its next step") {
+                        controls.askNote(session, title: title)
+                    }
+                    .opacity(controls.hasNote(session) ? 1 : 0.85)
+                }
+                icon(controls.isPaused(session) ? "play.fill" : "pause.fill",
+                     help: controls.isPaused(session) ? "Resume"
+                        : kind == .hooked ? "Pause: its next step waits until you resume (up to 30 minutes)"
+                        : "Pause its processes (a reply it is streaming may time out)") {
+                    controls.togglePause(session)
+                }
+                if !controls.isStopping(session) {
+                    icon("stop.fill", tint: Palette.failed,
+                         help: kind == .hooked ? "Stop before its next step" : confirmQuit ? "Click again to quit it" : "Quit this agent") {
+                        if kind == .process, !confirmQuit {
+                            confirmQuit = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { confirmQuit = false }
+                        } else {
+                            controls.stop(session)
+                        }
+                    }
+                    .overlay {
+                        if confirmQuit { Capsule().strokeBorder(Palette.failed, lineWidth: 1) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func icon(_ symbol: String, tint: Color = Palette.ink2, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 9, weight: .semibold)).foregroundStyle(tint)
+                .frame(width: 22, height: 18)
+                .background(Capsule().fill(Palette.chip))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
 /// A few lines of what a call changes: removed lines tinted red, added ones green, a plan's plain.
 private struct PreviewLines: View {
     var lines: [ApprovalRequest.PreviewLine]
@@ -1383,6 +1444,9 @@ private struct SessionRow: View {
     var live: LiveSpend?
     /// Setup's Compact rows: the project line goes, its tags move up beside the title.
     var compact = false
+    /// Paused or being stopped from the notch.
+    var paused = false
+    var stopping = false
     /// The Details button's width and gap, kept free at the end of the row's last line.
     static let cornerRoom: CGFloat = 70
 
@@ -1423,7 +1487,7 @@ private struct SessionRow: View {
                 }
                 // With nothing under it, the last line leaves room on its right for the Details
                 // button instead of a line of its own.
-                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil
+                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil && !paused && !stopping
                 let mcpLine = !isDetailed && !compact && !session.mcp.isEmpty
                 activity.padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
                 if let todos = openTodos { todoLine(todos) }
@@ -1475,6 +1539,18 @@ private struct SessionRow: View {
     }
 
     @ViewBuilder private var activity: some View {
+        if stopping {
+            Label("Stopping before its next step", systemImage: "stop.fill")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.failed).lineLimit(1)
+        } else if paused {
+            Label(session.id.hasPrefix("watch-") ? "Paused" : "Paused: its next step waits for you", systemImage: "pause.fill")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.waiting).lineLimit(1)
+        } else {
+            phaseActivity
+        }
+    }
+
+    @ViewBuilder private var phaseActivity: some View {
         switch session.phase {
         case .waiting:
             Label("Waiting for \(session.waitingFor ?? "you")", systemImage: "hand.raised.fill")

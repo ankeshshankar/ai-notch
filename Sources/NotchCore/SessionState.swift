@@ -256,6 +256,11 @@ public enum NotchPaths {
         sessions.appendingPathComponent("\(safe(id)).lock")
     }
 
+    /// What you asked of the session from the notch (stop, pause, a note); the hook acts on it.
+    public static func control(_ id: String) -> URL {
+        sessions.appendingPathComponent("\(safe(id)).control")
+    }
+
     /// A session id as a file name: never a path.
     static func safe(_ id: String) -> String {
         String(id.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" }.prefix(120))
@@ -272,4 +277,38 @@ public extension JSONEncoder {
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()
+}
+
+/// What you asked of a Claude Code session from the notch, left beside its state for the hook:
+/// stop it before its next step, hold its next step until you resume, or hand it a note with
+/// its next step. The hook clears stop and the note when it acts on them; a turn's end clears all.
+public struct SessionControl: Codable, Sendable, Equatable {
+    public var stop: Bool?
+    public var pause: Bool?
+    public var note: String?
+    public var at: Double
+
+    public init(stop: Bool? = nil, pause: Bool? = nil, note: String? = nil, at: Double) {
+        self.stop = stop
+        self.pause = pause
+        self.note = note
+        self.at = at
+    }
+
+    public var isEmpty: Bool { stop != true && pause != true && (note ?? "").isEmpty }
+
+    public static func read(_ id: String) -> SessionControl? {
+        guard let data = try? Data(contentsOf: NotchPaths.control(id)) else { return nil }
+        return try? JSONDecoder.notch.decode(SessionControl.self, from: data)
+    }
+
+    /// Written whole, or removed when nothing is asked.
+    public static func write(_ control: SessionControl?, for id: String) {
+        let url = NotchPaths.control(id)
+        guard let control, !control.isEmpty, let data = try? JSONEncoder.notch.encode(control) else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try? data.write(to: url, options: .atomic)
+    }
 }
