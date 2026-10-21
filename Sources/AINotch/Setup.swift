@@ -837,6 +837,11 @@ enum Setup {
                 if let w = try SettingsFile.edit(SetupPaths.geminiSettings, missing: .object([]), { try GroupedHooksEdit.gemini.connect($0, hook: hook) }) { outcome.written.append(w) }
             } catch { outcome.errors["gemini"] = String(describing: error) }
         }
+        if OpenCodePlugin.hasOpenCode {
+            do {
+                if let w = try OpenCodePlugin.install(hook: hook) { outcome.written.append(w) }
+            } catch { outcome.errors["opencode"] = String(describing: error) }
+        }
         do {
             if let w = try LoginItem.install(executable: location.executable) { outcome.written.append(w) }
         } catch { outcome.errors["login"] = String(describing: error) }
@@ -859,6 +864,9 @@ enum Setup {
         do {
             if let w = try SettingsFile.edit(SetupPaths.geminiSettings, missing: nil, GroupedHooksEdit.gemini.disconnect) { outcome.written.append(w) }
         } catch { outcome.errors["gemini"] = String(describing: error) }
+        do {
+            if let w = try OpenCodePlugin.remove() { outcome.written.append(w) }
+        } catch { outcome.errors["opencode"] = String(describing: error) }
         return outcome
     }
 
@@ -928,6 +936,7 @@ enum Setup {
         line("cursor", hasCursor ? describe(cursorStatus(location)) : "no ~/.cursor")
         line("codex", hasCodex ? describe(codexStatus(location)) : "no ~/.codex")
         line("gemini", hasGemini ? describe(geminiStatus(location)) : "no ~/.gemini")
+        line("opencode", OpenCodePlugin.hasOpenCode ? describe(OpenCodePlugin.status(hook: location.hook.path)) : "no ~/.config/opencode")
         line("login", describe(loginStatus(location)))
         return 0
     }

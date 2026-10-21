@@ -279,6 +279,13 @@ after Set Up, type `/hooks` in Codex and trust AI Notch's.
 waiting for your confirmation). Not its model hooks, which run on every request. The hook answers
 `{}`, the empty answer Gemini CLI reads.
 
+**OpenCode** (a plugin, `~/.config/opencode/plugins/ai-notch.js`, written by Set Up where
+OpenCode is installed): on its session, tool and permission events it runs `ai-notch-hook report`,
+so each OpenCode session is a row with its title, the tool in flight, amber while a permission
+waits, and idle when done, from the terminal UI, `opencode serve` or the desktop app alike. It only
+reports; nothing is answered or blocked. OpenCode loads it when it next starts. Without the plugin,
+OpenCode still shows as a process (the desktop app's `opencode-cli serve` included).
+
 **Other agents, as processes.** Every 3 seconds AI Notch looks for coding agents among your
 processes: Aider, Goose, Amp, Factory Droid, Crush, GitHub Copilot CLI, OpenCode, Qwen Code, Cursor
 CLI, Augment, Kiro, Cline, Kimi, Plandex and OpenHands, and Codex or Gemini CLI where their hooks
