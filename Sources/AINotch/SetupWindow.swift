@@ -47,6 +47,7 @@ final class SetupModel: ObservableObject {
     @Published private(set) var machineOn = UserDefaults.standard.object(forKey: "machine.enabled") as? Bool ?? true
     @Published private(set) var commandsOn = CommandsStore.isEnabled
     @Published private(set) var hotkeysOn = Hotkeys.isEnabled
+    @Published private(set) var limitAlertsOn = LimitAlerts.isEnabled
     @Published private(set) var telemetryOn = AgentTelemetry.isOn()
     @Published private(set) var telemetryProblem: String?
     @Published private(set) var machineNotify = UserDefaults.standard.object(forKey: "machine.notifyCritical") as? Bool ?? true
@@ -226,6 +227,11 @@ final class SetupModel: ObservableObject {
     func setTelemetry(_ on: Bool) {
         telemetryProblem = on ? AgentTelemetry.turnOn(hook: location.hook) : AgentTelemetry.turnOff()
         telemetryOn = AgentTelemetry.isOn()
+    }
+
+    func setLimitAlerts(_ on: Bool) {
+        limitAlertsOn = on
+        UserDefaults.standard.set(on, forKey: LimitAlerts.enabledKey)
     }
 
     func setHotkeys(_ on: Bool) {
@@ -714,6 +720,12 @@ struct SetupView: View {
                              unavailable: model.notifications == nil,
                              denied: model.notifications == .denied,
                              wants: $model.wantsNotifications, ask: model.askForNotifications)
+                }
+                divider
+                row("Limit alerts", icon: "gauge.with.dots.needle.67percent", tint: Color(red: 0.96, green: 0.62, blue: 0.14),
+                    info: "A notification, while unlocked too, when Claude's 5-hour or weekly limit passes 80% and again at 95%: when it resets and, from the last readings, when this pace runs out. Once per window and mark.") {
+                    Toggle("", isOn: Binding(get: { model.limitAlertsOn }, set: { model.setLimitAlerts($0) }))
+                        .toggleStyle(.switch).controlSize(.small).labelsHidden()
                 }
                 divider
                 row("Jump to window", icon: "macwindow.on.rectangle", tint: Color(red: 0.25, green: 0.52, blue: 0.93),

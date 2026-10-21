@@ -258,3 +258,62 @@ extension Notifier: UNUserNotificationCenterDelegate {
         }
     }
 }
+
+extension Notifier {
+    /// A Claude usage limit crossed 80% or 95%: notifies while unlocked too (you are about to be
+    /// stopped mid-work). One per window, threshold and reset.
+    func postLimit(id: String, title: String, body: String) {
+        guard isAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "limit-\(id)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in self.note("posted limit \(id)\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
+        }
+    }
+}
+
+/// Watches Claude's usage limits for the 80% and 95% marks, with the time to the reset and, when
+/// two readings allow, when this pace runs out.
+@MainActor
+final class LimitAlerts {
+    static let shared = LimitAlerts()
+    static let enabledKey = "limits.alerts"
+    static var isEnabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true }
+    private static let sentKey = "limits.alertsSent"
+    private static let marks: [Double] = [95, 80]
+
+    /// The previous reading per window, for the pace.
+    private var previous: [String: (used: Double, at: Double)] = [:]
+
+    func check(_ limits: ToolLimits) {
+        guard Self.isEnabled else { return }
+        for (name, window) in [("5-hour", limits.fiveHour), ("weekly", limits.weekly)] {
+            guard let window else { continue }
+            let used = window.usedPercent
+            var pace: Double?
+            if let last = previous[name], limits.at > last.at + 60, used > last.used {
+                pace = (used - last.used) / (limits.at - last.at)
+            }
+            if previous[name].map({ used < $0.used }) ?? true || pace != nil { previous[name] = (used, limits.at) }
+            guard let mark = Self.marks.first(where: { used >= $0 }) else { continue }
+            let reset = window.resetsAt.map { Int($0 / 60) } ?? Int(limits.at / 86400)
+            let id = "\(name)-\(Int(mark))-\(reset)"
+            var sent = UserDefaults.standard.stringArray(forKey: Self.sentKey) ?? []
+            guard !sent.contains(id) else { continue }
+            sent = Array((sent + [id]).suffix(40))
+            UserDefaults.standard.set(sent, forKey: Self.sentKey)
+            var parts: [String] = []
+            if let resets = window.resetsAt, resets > limits.at { parts.append("Resets in \(elapsed(resets - limits.at)).") }
+            if let pace, pace > 0 {
+                let left = (100 - used) / pace
+                if let resets = window.resetsAt, limits.at + left < resets {
+                    parts.append("At this pace it runs out in about \(elapsed(left)).")
+                }
+            }
+            Notifier.shared.postLimit(id: id, title: "Claude \(name) limit at \(Int(used.rounded()))%", body: parts.joined(separator: " "))
+        }
+    }
+}
