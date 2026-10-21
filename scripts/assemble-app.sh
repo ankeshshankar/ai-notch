@@ -41,6 +41,19 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/AINotch" "$BIN/ai-notch-hook" "$APP/Contents/MacOS/"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
+# The VPN: its helper with OpenVPN and OpenVPN's DNS script, when scripts/build-openvpn.sh has
+# built them into .build/openvpn. Without them the app has no VPN (Setup says so).
+ENGINE="$ROOT/.build/openvpn"
+HELPERS=""
+if [ -x "$ENGINE/openvpn" ] && [ -f "$ENGINE/dns-updown" ]; then
+  HELPERS="$APP/Contents/Helpers"
+  mkdir -p "$HELPERS" "$APP/Contents/Resources/OpenVPN"
+  cp "$BIN/ai-notch-vpnd" "$ENGINE/openvpn" "$HELPERS/"
+  cp "$ENGINE/dns-updown" "$ENGINE"/licenses/* "$APP/Contents/Resources/OpenVPN/"
+else
+  echo "No VPN engine in .build/openvpn: built without the VPN (scripts/build-openvpn.sh builds it)." >&2
+fi
+
 # The app group's name in both Info.plists (WidgetSnapshot.appGroup reads it); none when ad hoc.
 GROUP_KEY=""
 [ -n "$GROUP" ] && GROUP_KEY="<key>AINotchAppGroup</key><string>$GROUP</string>"
@@ -121,12 +134,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Inside out: the extension, the hook, then the app around them.
+# Inside out: the extension, the hook and the VPN's tools, then the app around them.
 if [ -n "$GROUP" ]; then
   codesign --force --sign "$IDENTITY" --timestamp=none --entitlements "$WORK/widget.entitlements" "$APPEX"
   codesign --force --sign "$IDENTITY" --timestamp=none "$APP/Contents/MacOS/ai-notch-hook"
+  if [ -n "$HELPERS" ]; then
+    codesign --force --sign "$IDENTITY" --timestamp=none "$HELPERS/ai-notch-vpnd" "$HELPERS/openvpn"
+  fi
   codesign --force --sign "$IDENTITY" --timestamp=none --entitlements "$WORK/app.entitlements" "$APP"
 else
   codesign --force --sign - --timestamp=none --identifier "$BUNDLE_ID.hook" "$APP/Contents/MacOS/ai-notch-hook"
+  if [ -n "$HELPERS" ]; then
+    codesign --force --sign - --timestamp=none --identifier "$BUNDLE_ID.vpnd" "$HELPERS/ai-notch-vpnd"
+    codesign --force --sign - --timestamp=none --identifier "$BUNDLE_ID.openvpn" "$HELPERS/openvpn"
+  fi
   codesign --force --sign - --timestamp=none "$APP"
 fi

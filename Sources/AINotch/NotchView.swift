@@ -113,6 +113,7 @@ struct RootView: View {
     @ObservedObject var builds: BuildStore
     @ObservedObject var prod: ProdStore
     @ObservedObject var machine: MachineStore
+    @ObservedObject var vpn: VPNStore
     @ObservedObject var reviews: ReviewStore
     @ObservedObject var controller: NotchController
     /// The black edge left around the body's card.
@@ -131,7 +132,7 @@ struct RootView: View {
             HStack(spacing: 0) {
                 if wings { LeftWing(store: store, builds: builds).frame(width: g.wing) }
                 Color.clear.frame(width: g.notchWidth)
-                if wings { RightWing(store: store, builds: builds, prod: prod, machine: machine, reviews: reviews).frame(width: g.wing) }
+                if wings { RightWing(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews).frame(width: g.wing) }
             }
             .frame(height: g.notchHeight)
             // Something in prod is open (red), else memory is low (amber): a still dot in the
@@ -143,7 +144,7 @@ struct RootView: View {
             if expanded {
                 // The body is a card set into the black shape: on light it hangs under the strip
                 // inside a thin black bezel, on dark it is the black itself.
-                SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, reviews: reviews, controller: controller,
+                SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews, controller: controller,
                             isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, maxHeight: g.maxHeight - Self.bezel)
                     .background(
                         UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
@@ -240,11 +241,12 @@ private struct RightWing: View {
     @ObservedObject var builds: BuildStore
     @ObservedObject var prod: ProdStore
     @ObservedObject var machine: MachineStore
+    @ObservedObject var vpn: VPNStore
     @ObservedObject var reviews: ReviewStore
 
     var body: some View {
         // One slot, in WingSlot's order.
-        let slot = WingSlot.pick(waiting: store.waiting.count, memoryCritical: machine.showsSlot, justDone: store.now - store.lastDoneAt < 4,
+        let slot = WingSlot.pick(waiting: store.waiting.count, vpnDropped: vpn.showsSlot, memoryCritical: machine.showsSlot, justDone: store.now - store.lastDoneAt < 4,
                                  prodAlert: prod.hasUnseenAlert, buildFailure: builds.hasUnseenFailure,
                                  pullRequestNews: reviews.unseenCount, subagents: store.runningAgents, building: builds.activeCount)
         HStack(spacing: 4) {
@@ -267,6 +269,9 @@ private struct RightWing: View {
             case .building(let count):
                 Image(systemName: "hammer.fill").font(.system(size: 9)).foregroundStyle(Strip.ink2)
                 Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
+            case .vpnDropped:
+                // A VPN connection ended without Disconnect: traffic no longer goes through it.
+                Image(systemName: "lock.slash.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.failed)
             case .memoryCritical:
                 // Memory critical: static, no animation.
                 Image(systemName: "memorychip.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.waiting)
@@ -289,11 +294,12 @@ private struct SessionList: View {
     @ObservedObject var builds: BuildStore
     @ObservedObject var prod: ProdStore
     @ObservedObject var machine: MachineStore
+    @ObservedObject var vpn: VPNStore
     @ObservedObject var reviews: ReviewStore
     var controller: NotchController
     /// Pinned open; passed by value so the header redraws when it changes.
     var isPinned: Bool
-    /// Which of the full-width panels is open (Usage, Code or Machine, from the controller);
+    /// Which of the full-width panels is open (Usage, Code, Machine or VPN, from the controller);
     /// by value for the same reason.
     var openPanel: String?
     /// Two columns, agents left and pipelines right, or one with the pipelines under the agents.
@@ -341,6 +347,7 @@ private struct SessionList: View {
                         if openPanel == "Usage" { UsagePanel(usage: store.usage, now: store.now, claudeLimits: store.claudeLimits) }
                         if openPanel == "Code" { CodePanel(lines: store.usage.lines, git: store.gitLines, now: store.now) }
                         if openPanel == NotchController.machinePanel, machine.isOn { MachinePanel(machine: machine, feed: machine.feed) }
+                        if openPanel == NotchController.vpnPanel, vpn.isOn { VPNPanel(vpn: vpn, now: store.now) }
                         if openPanel == NotchController.pullRequestsPanel, reviews.isOn {
                             PullRequestsPanel(reviews: reviews, controller: controller, now: store.now, isWide: isWide)
                         }
@@ -367,8 +374,8 @@ private struct SessionList: View {
             }
 
             HStack(spacing: 12) {
-                // The status chips on the left (Prod, RAM), Setup and Quit on the right.
-                StatusStrip(prod: prod, machine: machine, controller: controller)
+                // The status chips on the left (Prod, RAM, VPN), Setup and Quit on the right.
+                StatusStrip(prod: prod, machine: machine, vpn: vpn, controller: controller)
                 Spacer()
                 Button("Setup") {
                     controller.collapse()

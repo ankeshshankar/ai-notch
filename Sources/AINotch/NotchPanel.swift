@@ -148,13 +148,18 @@ final class NotchController: ObservableObject {
                 builds.panelClosed()
             }
             machine.setPanelOpen(isExpanded && openPanel == Self.machinePanel)
+            vpn.setPanelOpen(isExpanded && openPanel == Self.vpnPanel)
         }
     }
-    /// Which full-width panel is open under the header: Usage, Code, Machine or PRs, one at a time.
+    /// Which full-width panel is open under the header: Usage, Code, Machine, VPN or PRs, one at a time.
     @Published var openPanel: String? {
-        didSet { machine.setPanelOpen(isExpanded && openPanel == Self.machinePanel) }
+        didSet {
+            machine.setPanelOpen(isExpanded && openPanel == Self.machinePanel)
+            vpn.setPanelOpen(isExpanded && openPanel == Self.vpnPanel)
+        }
     }
     static let machinePanel = "Machine"
+    static let vpnPanel = "VPN"
     static let pullRequestsPanel = "PRs"
     @Published private(set) var geometry = NotchGeometry.current()
     /// Pinned open: the notch stays expanded until unpinned, and no click or pointer leaving
@@ -173,6 +178,7 @@ final class NotchController: ObservableObject {
     private let builds: BuildStore
     private let prod: ProdStore
     private let machine: MachineStore
+    private let vpn: VPNStore
     let reviews: ReviewStore
     /// A notification's Open showed the Machine panel: it stays open, as if pinned, until the
     /// pointer has been over it and left, or 20 seconds pass untouched.
@@ -202,18 +208,21 @@ final class NotchController: ObservableObject {
     private var timer: Timer?
     private var watchers: Set<AnyCancellable> = []
 
-    init(store: SessionStore, builds: BuildStore, prod: ProdStore, machine: MachineStore, reviews: ReviewStore) {
+    init(store: SessionStore, builds: BuildStore, prod: ProdStore, machine: MachineStore, vpn: VPNStore, reviews: ReviewStore) {
         self.store = store
         self.builds = builds
         self.prod = prod
         self.machine = machine
+        self.vpn = vpn
         self.reviews = reviews
         panel.contentView = ClickThroughHostingView(rootView: ProdHeadsUpHost(prod: prod, controller: self,
-                                                                              content: RootView(store: store, builds: builds, prod: prod, machine: machine, reviews: reviews, controller: self))
+                                                                              content: RootView(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn,
+                                                                                               reviews: reviews, controller: self))
             .environment(\.hoverHub, hover))
         // Prod's banner gives way to a full-screen app (notification only).
         prod.popBlocker = { [weak self] in self?.fullScreenWindowAhead() == true ? "full screen" : nil }
         machine.reveal = { [weak self] in self?.reveal(panel: Self.machinePanel) }
+        vpn.reveal = { [weak self] in self?.reveal(panel: Self.vpnPanel) }
         if isStill && !isCollapsedPreview {
             isExpanded = true
             isLooking = true
@@ -258,7 +267,7 @@ final class NotchController: ObservableObject {
 
     var showsWings: Bool {
         !store.sessions.isEmpty || !geometry.hasNotch || builds.hasActive || builds.hasUnseenFailure
-            || prod.hasOpenAlert || prod.hasUnseenAlert || machine.showsDot || machine.showsSlot || reviews.unseenCount > 0
+            || prod.hasOpenAlert || prod.hasUnseenAlert || machine.showsDot || machine.showsSlot || vpn.showsSlot || reviews.unseenCount > 0
     }
 
     /// Pinned and nothing full-screen in the way: the notch stays expanded. Also for a while after

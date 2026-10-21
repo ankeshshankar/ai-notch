@@ -2,12 +2,14 @@ import AppKit
 import SwiftUI
 
 // What the status sources share on screen: the footer's strip of chips (Prod, the machine
-// guard), the static corner dot, and the order of the collapsed right
+// guard, the VPN), the static corner dot, and the order of the collapsed right
 // wing's one slot.
 
 /// The collapsed right wing shows one thing, the first that applies.
 enum WingSlot: Equatable {
     case waiting(Int)
+    /// A VPN connection that was up ended without Disconnect, not seen yet.
+    case vpnDropped
     /// The machine guard: memory critical (pressure critical, or under 2 GB for 30 s).
     case memoryCritical
     case done
@@ -22,9 +24,10 @@ enum WingSlot: Equatable {
     case building(Int)
     case none
 
-    static func pick(waiting: Int, memoryCritical: Bool = false, justDone: Bool, prodAlert: Bool, buildFailure: Bool,
+    static func pick(waiting: Int, vpnDropped: Bool = false, memoryCritical: Bool = false, justDone: Bool, prodAlert: Bool, buildFailure: Bool,
                      pullRequestNews: Int = 0, subagents: Int, building: Int) -> WingSlot {
         if waiting > 0 { return .waiting(waiting) }
+        if vpnDropped { return .vpnDropped }
         if memoryCritical { return .memoryCritical }
         if justDone { return .done }
         if prodAlert { return .prodAlert }
@@ -136,12 +139,14 @@ private struct ProdHeadsUpCard: View {
 struct StatusStrip: View {
     @ObservedObject var prod: ProdStore
     @ObservedObject var machine: MachineStore
+    @ObservedObject var vpn: VPNStore
     var controller: NotchController
 
     var body: some View {
         HStack(spacing: 8) {
             if prod.isOn { ProdChip(prod: prod, controller: controller, hover: controller.hover) }
             if machine.isOn { RamChip(machine: machine, feed: machine.feed, controller: controller) }
+            if vpn.showsChip { VPNChip(vpn: vpn, controller: controller) }
         }
     }
 }
