@@ -294,6 +294,21 @@ final class NotchController: ObservableObject {
         }
     }
 
+    /// ⌃⌥Space: opens the notch (held open like a notification's Open), or closes it, pinned or not.
+    func toggleFromKeyboard() {
+        if isExpanded {
+            revealHold = nil
+            collapseWork?.cancel()
+            collapseWork = nil
+            if !isStill { isExpanded = false }
+        } else {
+            guard !isStill else { return }
+            revealHold = Date().addingTimeInterval(20)
+            isLooking = false
+            isExpanded = true
+        }
+    }
+
     /// Collapses at once, after a click sent you somewhere else; pinned, it stays open.
     func collapse() {
         guard !isStill, !holdsOpen else { return }
