@@ -175,7 +175,7 @@ final class Notifier: NSObject {
     }
 
     /// News on a pull request (approved, changes requested, new comments, a review request, a
-    /// failed build): only while the screen is locked, like the other status news. One per pull
+    /// failed build, merged or declined, ready to merge): only while the screen is locked, like the other status news. One per pull
     /// request and kind, a newer one replacing the older. "Open" (or a click) opens it on the web.
     /// The log gets the kind only, never the title.
     func postPullRequest(_ event: PREvent) {
@@ -187,8 +187,15 @@ final class Notifier: NSObject {
         case .newComments: content.title = "New comments"
         case .reviewRequested: content.title = "Review requested"
         case .buildFailed: content.title = "Pull request build failed"
+        case .merged: content.title = "Merged: " + oneLine(event.title, 60)
+        case .declined: content.title = "Declined: " + oneLine(event.title, 60)
+        case .readyToMerge: content.title = "Ready to merge: " + oneLine(event.title, 60)
         }
-        let flat = "\(event.pr.repo) #\(event.pr.id) · " + event.title.split(whereSeparator: \.isNewline).joined(separator: " ")
+        var flat = "\(event.pr.repo) #\(event.pr.id) · " + event.title.split(whereSeparator: \.isNewline).joined(separator: " ")
+        switch event.kind {
+        case .merged, .declined, .readyToMerge: flat = "\(event.pr.repo) #\(event.pr.id)"   // the title is above
+        default: break
+        }
         content.subtitle = flat.count > 80 ? String(flat.prefix(79)) + "…" : flat
         if case .buildFailed(let pipeline?) = event.kind {
             content.body = "Pipeline #\(pipeline.number) failed"
@@ -203,6 +210,11 @@ final class Notifier: NSObject {
         UNUserNotificationCenter.current().add(request) { error in
             Task { @MainActor in self.note("posted a pull-request notification (\(tag))\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
         }
+    }
+
+    private func oneLine(_ text: String, _ limit: Int) -> String {
+        let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return flat.count > limit ? String(flat.prefix(limit - 1)) + "…" : flat
     }
 
     /// Status news notifies only while the screen is locked; a preview may say otherwise.

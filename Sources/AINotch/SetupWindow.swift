@@ -343,7 +343,7 @@ struct PRSetupInfo: Equatable {
     /// steps can show.
     var needsToken = false
 
-    static let about = "Your open pull requests and the ones waiting for your review, in the repositories of bitbucket in \(BuildsConfig.displayPath), with the same token as Pipelines (it needs read:pullrequest; read:user finds your account at once). Mine every 2 minutes, each repository's review list every 10 (20 while one of your pipelines runs), details only for what changed: about 70 requests an hour for 7 repositories, capped at 150, beside Pipelines' own budget. Read only. The switch writes \"pullRequests\" into the bitbucket part of that file."
+    static let about = "Your open pull requests and the ones waiting for your review, in the repositories of bitbucket in \(BuildsConfig.displayPath), with the same token as Pipelines (it needs read:pullrequest; read:user finds your account at once). Mine every 2 minutes, each repository's review list every 10 (20 while one of your pipelines runs), details only for what changed, and the merge checks of up to 4 of yours (those on a live session first) every 15 minutes: about 70 requests an hour for 7 repositories plus up to 18 for those checks, capped at 150, beside Pipelines' own budget. Read only. The switch writes \"pullRequests\" into the bitbucket part of that file."
 
     @MainActor static func make(_ reviews: ReviewStore?) -> PRSetupInfo? {
         guard let bitbucket = BuildsConfig.current?.bitbucket else { return nil }
@@ -966,7 +966,7 @@ struct SetupView: View {
         if prs.on {
             divider
             row("Notify", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
-                info: "Only while the screen is locked, once each: one of your pull requests approved, changes requested on it, new comments (grouped per pull request, at most every 10 minutes), a review asked of you, and a failed build on yours (not when Pipelines already notified that run). Right-click a row in the notch to mute a pull request.") {
+                info: "Only while the screen is locked, once each: one of your pull requests approved, changes requested on it, new comments (grouped per pull request, at most every 10 minutes), a review asked of you, a failed build on yours (not when Pipelines already notified that run), one of yours merged or declined, and one of yours ready to merge (every merge check passes; once per commit). Right-click a row in the notch to mute a pull request.") {
                 let notify = model.prNotify
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 10) {
@@ -977,6 +977,10 @@ struct SetupView: View {
                     HStack(spacing: 10) {
                         Toggle("Review requests", isOn: Binding(get: { notify.reviews }, set: { var next = notify; next.reviews = $0; model.setPRNotify(next) }))
                         Toggle("Failed builds", isOn: Binding(get: { notify.builds }, set: { var next = notify; next.builds = $0; model.setPRNotify(next) }))
+                    }
+                    HStack(spacing: 10) {
+                        Toggle("Merged or declined", isOn: Binding(get: { notify.closed }, set: { var next = notify; next.closed = $0; model.setPRNotify(next) }))
+                        Toggle("Ready to merge", isOn: Binding(get: { notify.ready }, set: { var next = notify; next.ready = $0; model.setPRNotify(next) }))
                     }
                 }
                 .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()

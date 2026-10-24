@@ -328,6 +328,11 @@ final class BuildStore: ObservableObject {
         posted.contains("bb:\(ref.key)")
     }
 
+    /// The uuid of a Bitbucket run Pipelines holds, if it still does.
+    func runUUID(_ ref: PipelineRef) -> String? {
+        bitbucket.runs.first { $0.ref == ref }?.uuid
+    }
+
     private func notificationAction(_ id: String, _ action: Notifier.BuildAction) {
         let row = allRows(now: Date().timeIntervalSince1970).first { $0.id == id }
         switch action {

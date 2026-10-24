@@ -13,7 +13,18 @@ import Foundation
 //   falls back to `reviewers.uuid` alone.
 // - Details, only for what changed: `/statuses` when updated_on moved (and every 4 minutes while
 //   a build of mine is in progress), `/comments?sort=-updated_on&pagelen=10` when comment_count
-//   moved. Merge checks only when asked.
+//   moved.
+// - Merge checks (`/mergeability/checks`), for at most 4 of mine: the ones linked to a live
+//   session first, then the newest. Each is read every 15 minutes (every 5 once its updated_on or
+//   its build moved), at most 18 an hour in all, and only while the lane is under its target.
+//   They show "merge conflict" on a session's pull-request line and decide "ready to merge".
+// - A pull request of mine that leaves the open list is fetched once by id (`closed`): merged
+//   or declined is news. At most 6 an hour, and nothing is taken as closed from a workspace
+//   whose list failed in that poll.
+// - On a click only: the failed run's steps and the end of its log (by the run's uuid, from
+//   Pipelines' runs or `/pipelines/?sort=-created_on`), and the text of new comments, for the
+//   brief "Send to agent" builds. These reads are not cached and the text is not kept here; the
+//   brief is composed in memory and handed to the session (see SessionPullRequests.swift).
 // A token without read:pullrequest (a 403 naming the scope) stops only this lane, quietly; a
 // newer token in the Keychain is looked for every 10 minutes. Nothing here touches Pipelines'
 // lane, status or budget.
@@ -64,6 +75,24 @@ actor PullRequestSource {
     }
     private var details: [String: Details] = [:]
 
+    /// The merge checks last read for a pull request, and what it looked like then (its
+    /// updated_on and build), so a change reads them again sooner.
+    private struct MergeInfo {
+        var checks: PRMergeability?
+        var at: Double
+        var signature: String
+    }
+    private var mergeInfo: [String: MergeInfo] = [:]
+    /// Pull requests linked to a live session: their merge checks are read first.
+    private var watched: Set<String> = []
+    /// My open pull requests at the last look, to see which left the list, and the ones that
+    /// left and wait for their one fetch by id.
+    private var lastMine: [String: PullRequest] = [:]
+    private var closedPending: [String: PullRequest] = [:]
+    /// Workspaces whose list of my open pull requests failed in this poll: nothing is taken as
+    /// closed from them.
+    private var mineFailed: Set<String> = []
+
     private var seen: [String: PRSeenEntry] = [:]
     private var seenLoaded = false
     /// No seen-state file at the start: the first full look only records.
@@ -105,6 +134,9 @@ actor PullRequestSource {
     /// One of my pipelines runs: the review lists are read every 20 minutes instead of 10.
     func setMyPipelineRunning(_ running: Bool) { myPipelineRunning = running }
 
+    /// The pull requests linked to a live session (by key): their merge checks are read first.
+    func setWatched(_ keys: Set<String>) { watched = keys }
+
     /// Setup's "Check Again".
     func recheckToken() async {
         await client.recheck()
@@ -136,6 +168,8 @@ actor PullRequestSource {
             status = nil
             fromMine = [:]
             fromRepo = [:]
+            lastMine = [:]
+            closedPending = [:]
             wantsNow = false
             return publish()
         }
@@ -179,6 +213,7 @@ actor PullRequestSource {
         let locked = BuildPolling.isScreenLocked
         let opened = wantsNow
         wantsNow = false
+        mineFailed = []
         // 1. Mine, per workspace (only the main one once the combined query covers the rest).
         let workspaces = mineWorkspaces(config)
         let mineEvery = PRBudget.mineInterval(workspaces: workspaces.count, locked: locked) * slow
@@ -186,7 +221,7 @@ actor PullRequestSource {
             let since = now - (mineAt[workspace] ?? 0)
             guard since >= mineEvery || (opened && since > PRBudget.openRefresh) else { continue }
             guard await room(1) else { break }
-            await fetchMine(workspace, me: uuid)
+            if await !fetchMine(workspace, me: uuid) { mineFailed.insert(workspace) }
         }
         // 2. Each repository's review list.
         let interval = PRBudget.reviewInterval(repos: repos.count, mineWorkspaces: workspaces.count,
@@ -200,7 +235,9 @@ actor PullRequestSource {
         }
         // 3. Details of what changed.
         await fetchDetails(me: uuid, slow: slow)
-        // 4. Events, then the snapshot.
+        await fetchMergeChecks(slow: slow)
+        // 4. Mine that closed, then events, then the snapshot.
+        await checkClosed(me: uuid)
         derive(me: uuid)
         publish()
     }
@@ -228,14 +265,15 @@ actor PullRequestSource {
 
     // MARK: Reads
 
-    private func fetchMine(_ workspace: String, me uuid: String) async {
+    @discardableResult
+    private func fetchMine(_ workspace: String, me uuid: String) async -> Bool {
         mineAt[workspace] = now
-        guard let user = uuid.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-"))) else { return }
+        guard let user = uuid.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-"))) else { return false }
         let base = "\(BitbucketConfig.apiBase)/workspaces/\(workspace)/pullrequests/\(user)"
         var withSource = !noSource.contains("ws:\(workspace)")
         for _ in 0..<2 {
             let query = [("state", "OPEN"), ("pagelen", "50"), ("fields", PRParse.listFields(withSource: withSource))]
-            guard let url = BuildHTTP.url(base, query), let (data, response) = await get(url, kind: "mine") else { return }
+            guard let url = BuildHTTP.url(base, query), let (data, response) = await get(url, kind: "mine") else { return false }
             if response.statusCode == 400, withSource, PRParse.isSourceError(data) {
                 noSource.insert("ws:\(workspace)")
                 withSource = false
@@ -244,9 +282,9 @@ actor PullRequestSource {
             if response.statusCode == 404 {
                 status = SourceStatus(text: "PRs unavailable", help: "Bitbucket did not find the workspace pull-request list for \(workspace) (404).")
                 noteBuildLog("bitbucket prs: 404 on the workspace list")
-                return
+                return false
             }
-            guard response.statusCode == 200, let page = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+            guard response.statusCode == 200, let page = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
             var found: [String: PullRequest] = [:]
             for value in page["values"] as? [[String: Any]] ?? [] {
                 guard let pr = PRParse.pullRequest(value, me: uuid, repo: nil) else { continue }
@@ -260,8 +298,9 @@ actor PullRequestSource {
             }
             covered.insert("ws:\(workspace)")
             clearTransientStatus()
-            return
+            return true
         }
+        return false
     }
 
     private func fetchRepo(_ repo: BitbucketRepo, me uuid: String) async {
@@ -350,14 +389,129 @@ actor PullRequestSource {
         }
     }
 
-    /// Merge checks for one pull request, read now (never on a schedule). Nil when it is not
-    /// known or the read failed.
+    /// Merge checks for one pull request, read now (Details asks). Nil when it is not known or
+    /// the read failed. What it reads is kept for the slow schedule below too.
     func mergeability(for key: String) async -> PRMergeability? {
         guard let pr = merged().first(where: { $0.id == key }), await room(1) else { return nil }
+        guard let checks = await readMergeability(pr) else { return nil }
+        if pr.role == .mine { mergeInfo[key] = MergeInfo(checks: checks, at: now, signature: Self.signature(pr)) }
+        return checks
+    }
+
+    private func readMergeability(_ pr: PullRequest) async -> PRMergeability? {
         let base = "\(BitbucketConfig.apiBase)/repositories/\(pr.ref.workspace)/\(pr.ref.repo)/pullrequests/\(pr.ref.id)/mergeability/checks"
         guard let url = URL(string: base), let (data, response) = await get(url, kind: "merge"), response.statusCode == 200,
               let page = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         return PRParse.mergeability(page, now: now)
+    }
+
+    private static func signature(_ pr: PullRequest) -> String { pr.updatedOn + "|" + (pr.build?.state.rawValue ?? "") }
+
+    /// Merge checks on a slow schedule for a few of mine (see the top of this file): the ones
+    /// linked to a live session first. At most two reads a poll.
+    private func fetchMergeChecks(slow: Double) async {
+        let now = self.now
+        let all = merged()
+        let open = Set(all.map(\.id))
+        for key in mergeInfo.keys where !open.contains(key) { mergeInfo[key] = nil }
+        let mine = all.filter { $0.role == .mine && !$0.isDraft }
+            .sorted { (watched.contains($0.id) ? 0 : 1, -$0.updatedAt) < (watched.contains($1.id) ? 0 : 1, -$1.updatedAt) }
+        var reads = 0
+        for pr in mine.prefix(PRBudget.mergeMaxPRs) where reads < 2 {
+            let info = mergeInfo[pr.id]
+            let age = now - (info?.at ?? 0)
+            let moved = info.map { $0.signature != Self.signature(pr) } ?? false
+            guard info == nil || age >= PRBudget.mergeEvery * slow || (moved && age >= PRBudget.mergeEarly * slow) else { continue }
+            let (count, _) = await client.counts(Self.lane)
+            guard Double(count.total) < Self.lane.hourlyTarget, count.byKind["merge", default: 0] < PRBudget.mergePerHour,
+                  await room(1) else { return }
+            reads += 1
+            let checks = await readMergeability(pr)
+            // A failed read keeps what was known and waits for the next interval.
+            mergeInfo[pr.id] = MergeInfo(checks: checks ?? info?.checks, at: now, signature: Self.signature(pr))
+        }
+    }
+
+    /// Mine that left the open list: each fetched once by id, to tell merged from declined (and
+    /// from a list that merely missed it). A failed fetch announces nothing.
+    private func checkClosed(me uuid: String) async {
+        let current = Dictionary(uniqueKeysWithValues: merged().filter { $0.role == .mine }.map { ($0.id, $0) })
+        for (key, pr) in lastMine where current[key] == nil && !mineFailed.contains(pr.ref.workspace) { closedPending[key] = pr }
+        for key in current.keys { closedPending[key] = nil }
+        lastMine = current
+        var events: [PREvent] = []
+        // At most PRBudget.closedPerHour reads an hour; the rest wait their turn.
+        var used = await client.counts(Self.lane).0.byKind["closed", default: 0]
+        for (key, pr) in closedPending.sorted(by: { $0.key < $1.key }) {
+            guard seen[key]?.closeChecked != true else { closedPending[key] = nil; continue }
+            guard used < PRBudget.closedPerHour, await room(1) else { break }
+            used += 1
+            closedPending[key] = nil
+            let base = "\(BitbucketConfig.apiBase)/repositories/\(pr.ref.workspace)/\(pr.ref.repo)/pullrequests/\(pr.ref.id)"
+            var object: [String: Any]?
+            if let url = BuildHTTP.url(base, [("fields", "state,closed_by.uuid,closed_by.display_name")]),
+               let (data, response) = await get(url, kind: "closed"), response.statusCode == 200 {
+                object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            }
+            let (event, next) = PREvents.closed(pr, entry: seen[key], fetched: object, now: now)
+            if next != seen[key] { seen[key] = next; seenDirty = true }
+            if let event { events.append(event) }
+        }
+        saveSeen()
+        if !events.isEmpty { onEvents(events) }
+    }
+
+    // MARK: Feedback for an agent
+
+    /// What the brief for a session needs, read now on a click and not kept (these reads are not
+    /// cached either): the failed step of the pull request's build with the end of its log, and
+    /// the text of its new comments (the newest `comments` by others). A part that cannot be read
+    /// is left out. Steps and logs are found by the pipeline's uuid: `runUUID` when Pipelines
+    /// already holds the run, else looked up by build number.
+    func feedback(for key: String, wantBuild: Bool, comments wanted: Int, runUUID: String?) async -> PRFeedbackData {
+        var out = PRFeedbackData()
+        guard let pr = merged().first(where: { $0.id == key }) else { return out }
+        if wantBuild, let ref = pr.build?.pipeline, await room(3) {
+            let base = "\(BitbucketConfig.apiBase)/repositories/\(ref.workspace)/\(ref.repo)/pipelines"
+            let uuid: String?
+            if let runUUID { uuid = runUUID } else { uuid = await pipelineUUID(ref) }
+            if let uuid, let escaped = uuid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+               let url = BuildHTTP.url("\(base)/\(escaped)/steps/", [("pagelen", "100"), ("fields", PRParse.stepFields)]),
+               let (data, response) = await get(url, kind: "feedback", scopeIsLaneWide: false, useCache: false), response.statusCode == 200,
+               let page = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                let steps = (page["values"] as? [[String: Any]] ?? []).compactMap(PipelineRun.parseStep)
+                if let failed = steps.first(where: { $0.state == .failed }) {
+                    out.step = failed.name
+                    if let id = failed.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                       let logURL = URL(string: "\(base)/\(escaped)/steps/\(id)/log") {
+                        var answer = await get(logURL, kind: "feedback", scopeIsLaneWide: false, range: "bytes=-65536", accept: "application/octet-stream", useCache: false)
+                        if answer?.1.statusCode == 416 { answer = await get(logURL, kind: "feedback", scopeIsLaneWide: false, accept: "application/octet-stream", useCache: false) }
+                        if let (log, http) = answer, http.statusCode == 200 || http.statusCode == 206 {
+                            let partial = PRParse.isPartial(status: http.statusCode, contentRange: http.value(forHTTPHeaderField: "Content-Range"))
+                            out.log = PRParse.logTail(log, ranged: partial, lines: PRBrief.logLines)
+                        }
+                    }
+                }
+            }
+        }
+        if wanted > 0, await room(1) {
+            let base = "\(BitbucketConfig.apiBase)/repositories/\(pr.ref.workspace)/\(pr.ref.repo)/pullrequests/\(pr.ref.id)/comments"
+            if let url = BuildHTTP.url(base, [("sort", "-updated_on"), ("pagelen", "20"), ("fields", PRParse.commentTextFields)]),
+               let (data, response) = await get(url, kind: "feedback", useCache: false), response.statusCode == 200,
+               let page = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                out.comments = PRParse.commentTexts(page, me: me?.uuid, limit: min(wanted, PRBrief.maxComments))
+            }
+        }
+        return out
+    }
+
+    /// A run's uuid from its build number: the 100 newest runs of the repository.
+    private func pipelineUUID(_ ref: PipelineRef) async -> String? {
+        let base = "\(BitbucketConfig.apiBase)/repositories/\(ref.workspace)/\(ref.repo)/pipelines/"
+        guard let url = BuildHTTP.url(base, [("sort", "-created_on"), ("pagelen", "100"), ("fields", "values.uuid,values.build_number")]),
+              let (data, response) = await get(url, kind: "feedback", scopeIsLaneWide: false, useCache: false), response.statusCode == 200,
+              let page = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        return PRParse.runUUID(page, number: ref.number)
     }
 
     // MARK: Who I am
@@ -417,8 +571,9 @@ actor PullRequestSource {
 
     /// One request in the pull-request lane. A 403 naming a scope stops the lane quietly (when
     /// `scopeIsLaneWide`); a 401 or 429 sets this lane's status only.
-    private func get(_ url: URL, kind: String, scopeIsLaneWide: Bool = true) async -> (Data, HTTPURLResponse)? {
-        switch await client.get(url, lane: Self.lane, kind: kind) {
+    private func get(_ url: URL, kind: String, scopeIsLaneWide: Bool = true, range: String? = nil,
+                     accept: String = "application/json", useCache: Bool = true) async -> (Data, HTTPURLResponse)? {
+        switch await client.get(url, lane: Self.lane, kind: kind, range: range, accept: accept, useCache: useCache) {
         case .noToken:
             return nil
         case .offline:
@@ -465,6 +620,7 @@ actor PullRequestSource {
                 pr.build = info.build
                 pr.recentComments = info.comments
             }
+            pr.merge = mergeInfo[pr.id]?.checks
             return pr
         }
     }

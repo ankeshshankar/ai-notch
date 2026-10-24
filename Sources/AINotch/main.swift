@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 /// A preview window for screenshots, never the app: it skips the one-copy check and the first-launch setup.
 let isPreviewRun = CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview")
@@ -13,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let vpn = VPNStore()
     private let reviews = ReviewStore()
     private var controller: NotchController?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The panel follows the system's appearance, live. `--preview --theme light|dark` (or
@@ -49,8 +51,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // already announced left out, and read less often while one of my pipelines runs.
         reviews.onEvents = { [weak reviews] events in reviews?.post(events) }
         reviews.pipelineNotified = { [weak builds] ref in builds?.hasNotified(ref) ?? false }
+        reviews.pipelineUUID = { [weak builds] ref in builds?.runUUID(ref) }
         builds.onMyPipelineRunning = { [weak reviews] running in reviews?.setMyPipelineRunning(running) }
         reviews.start()
+        // A session's folder is matched to one of my pull requests for the line under its row.
+        store.$sessions.sink { [weak reviews] sessions in reviews?.sessionLinks.setSessions(sessions) }.store(in: &cancellables)
         SetupWindowController.shared.builds = builds
         SetupWindowController.shared.prod = prod
         SetupWindowController.shared.machine = machine

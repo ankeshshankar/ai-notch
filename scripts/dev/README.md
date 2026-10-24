@@ -47,7 +47,7 @@
   for both lanes, Pipelines and pull requests, in Bitbucket's own JSON shapes: `fields=`, ETags,
   `q=` (a small BBQL), scopes per token (a 403 naming the missing one), `/user`, commits, merge
   checks, and a `timeline` of changes (approve, changes, comment, addReviewer, status, push,
-  merge, a 429, scopes taken away). The docstring has the state file's keys; each request is a
+  merge or decline (with who closed it), a new head commit, a merge conflict, a 429, scopes taken away); pull requests carry comment text and inline file:line, a pipeline has a named failed step and a log of any length. The docstring has the state file's keys; each request is a
   line in the log with its lane (`pl`, `pr`, `owner`). Run the app (or a dev flag) with
   `CLAUDE_NOTCH_BITBUCKET_API=http://127.0.0.1:<port>/2.0`,
   `CLAUDE_NOTCH_BITBUCKET_TEST_TOKEN=<state.token>` and `CLAUDE_NOTCH_BUILDS_CONFIG=<a builds.json
@@ -58,8 +58,10 @@
   (also with the setting turned off mid-grace), and the zombie check the session grace uses;
   exits 1 on any failure.
 - `AINotch --pr-selfcheck` — the pull-request data layer's pure parts (parsing, what needs you,
-  events and the seen-state, the budget split, Setup's switch writing `builds.json`, the wing's
-  order); exits 1 on any failure. `AINotch --pr-watch <seconds> [--prs-only]` — both Bitbucket
+  events and the seen-state, merged, declined and ready-to-merge news and their dedup, the budget
+  split, a session's pull request: Bitbucket remotes, the link by branch (including `git` in a
+  temporary folder), the row's line per state, the brief per kind of feedback, how it is
+  delivered; Setup's switch writing `builds.json`, the wing's order); exits 1 on any failure. `AINotch --pr-watch <seconds> [--prs-only]` — both Bitbucket
   lanes headless, printing each snapshot, each event and the request counts every minute
   (`CLAUDE_NOTCH_TEST_OPENS=70,200` opens the notch at those seconds); against the real API it
   prints counts, states and keys, never a title, branch or name.

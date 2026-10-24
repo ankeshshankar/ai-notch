@@ -70,6 +70,8 @@ struct PRBuild: Equatable, Sendable {
     /// The Pipelines run behind it, when the status links to one.
     var pipeline: PipelineRef?
     var url: URL?
+    /// The status's own name ("Pipeline #45"), when it has one.
+    var name: String? = nil
 }
 
 /// Why a pull request shows as its own row; in this order of urgency.
@@ -111,6 +113,10 @@ struct PullRequest: Equatable, Sendable, Identifiable {
     var recentComments: [PRComment] = []
     /// Comments by others since I last looked (from the seen-state).
     var newComments = 0
+    /// The source branch's head commit, when the list gave it: a push makes a new one.
+    var head: String? = nil
+    /// Merge checks, once read (only for my pull requests, on a slow schedule).
+    var merge: PRMergeability?
 
     var id: String { ref.key }
     var reviewers: [PRParticipant] { participants.filter(\.isReviewer) }
@@ -134,6 +140,14 @@ struct PullRequest: Equatable, Sendable, Identifiable {
     }
 
     var needsSomething: Bool { !needs.isEmpty }
+
+    /// Whether mine can be merged now: every merge check passes and the build is not failed or
+    /// running. Nil while unknown (not mine, a draft, or the checks not read yet).
+    var isReadyToMerge: Bool? {
+        guard role == .mine, !isDraft, let merge, !merge.checks.isEmpty else { return nil }
+        if let state = build?.state, state == .failed || state.isRunning { return false }
+        return merge.canMerge
+    }
 }
 
 /// Merge checks, read only when asked (`/mergeability/checks`).
@@ -145,14 +159,41 @@ struct PRMergeability: Equatable, Sendable {
         var status: String
         var required: Bool
         var blocking: Bool
+        /// Bitbucket's type of the check ("git_mergeability_check" is the conflict check).
+        var type = ""
+        /// Why the git check says what it says: "conflicts", "merge_impossible", ...
+        var reason = ""
+
+        /// Bitbucket's own check of whether the branch merges with git.
+        var isGit: Bool { type.lowercased().contains("git_mergeability") }
+        private var fails: Bool { status == "FAILED" || blocking }
+
+        /// The git check fails because the branches conflict (its reason says "conflicts").
+        var isConflict: Bool { isGit && fails && reason.lowercased() == "conflicts" }
+
+        /// The git check fails for another reason ("merge_impossible", or none given): the branch
+        /// cannot be merged, but not because of a conflict an agent could resolve.
+        var isUnmergeable: Bool { isGit && fails && !isConflict }
+
+        /// The git check has not said yes: still working it out, or unknown.
+        var isUndecided: Bool { isGit && !fails && status != "PASSED" }
     }
 
     var checks: [Check]
     var fetchedAt: Double
 
+    /// The branch no longer merges cleanly.
+    var hasConflict: Bool { checks.contains(where: \.isConflict) }
+    /// The merge checks include an approval rule ("minimum_approvals" and the like).
+    var hasApprovalCheck: Bool { checks.contains { ($0.name + " " + $0.type).lowercased().contains("approval") } }
+    /// The branch cannot be merged, and not by conflict.
+    var cannotMerge: Bool { checks.contains(where: \.isUnmergeable) }
+
     /// The checks that stop a merge now.
     var blocking: [Check] { checks.filter(\.blocking) }
-    var canMerge: Bool { blocking.isEmpty }
+    /// Nothing blocks, and git has said the branch merges (an unknown or pending git check does
+    /// not count as mergeable).
+    var canMerge: Bool { blocking.isEmpty && !checks.contains(where: \.isUndecided) }
 }
 
 /// Something worth telling me about one pull request. Derived on each poll and handed on; a
@@ -164,6 +205,12 @@ struct PREvent: Equatable, Sendable, Identifiable {
         case newComments(count: Int, from: [String])
         case reviewRequested(by: String)
         case buildFailed(pipeline: PipelineRef?)
+        /// One of mine closed: merged (by whom, when Bitbucket says), declined, or every merge
+        /// check now passes.
+        case merged(by: String?)
+        case declined(by: String?)
+        /// `approved`: the merge checks include an approval rule.
+        case readyToMerge(approved: Bool)
     }
 
     var kind: Kind
@@ -181,6 +228,9 @@ struct PREvent: Equatable, Sendable, Identifiable {
         case .newComments: return "comments"
         case .reviewRequested: return "review"
         case .buildFailed: return "build"
+        case .merged: return "merged"
+        case .declined: return "declined"
+        case .readyToMerge: return "ready"
         }
     }
 
@@ -195,6 +245,9 @@ struct PREvent: Equatable, Sendable, Identifiable {
         case .newComments(let count, let from): return "\(count) new comment\(count == 1 ? "" : "s") from \(names(from))"
         case .reviewRequested(let by): return "\(by) asked for your review"
         case .buildFailed: return "Build failed"
+        case .merged(let by): return by.map { "Merged by \($0)" } ?? "Merged"
+        case .declined(let by): return by.map { "Declined by \($0)" } ?? "Declined"
+        case .readyToMerge(let approved): return approved ? "Approved and all merge checks pass" : "All merge checks pass"
         }
     }
 }
@@ -212,11 +265,11 @@ enum PRParse {
                       "participants.user.uuid", "participants.user.display_name",
                       "reviewers.uuid", "reviewers.display_name",
                       "task_count", "comment_count", "updated_on", "links.html.href"]
-        if withSource { fields.insert("source.branch.name", at: 6) }
+        if withSource { fields.insert(contentsOf: ["source.branch.name", "source.commit.hash"], at: 6) }
         return "size,next," + fields.map { "values." + $0 }.joined(separator: ",")
     }
 
-    static let statusFields = "values.state,values.key,values.url,values.updated_on"
+    static let statusFields = "values.state,values.key,values.name,values.url,values.updated_on"
     static let commentFields = "values.id,values.user.uuid,values.user.display_name,values.created_on,values.deleted"
 
     private static func person(_ object: Any?) -> PRPerson? {
@@ -278,7 +331,16 @@ enum PRParse {
             myReview: participants.first { $0.person.uuid == me }?.review ?? .none,
             taskCount: object["task_count"] as? Int ?? 0, commentCount: object["comment_count"] as? Int ?? 0,
             updatedOn: updatedOn, updatedAt: buildTime(updatedOn) ?? 0,
-            url: link.flatMap(URL.init(string:)) ?? URL(string: "https://bitbucket.org/\(ref.workspace)/\(ref.repo)/pull-requests/\(id)"))
+            url: link.flatMap(URL.init(string:)) ?? URL(string: "https://bitbucket.org/\(ref.workspace)/\(ref.repo)/pull-requests/\(id)"),
+            head: (((object["source"] as? [String: Any])?["commit"] as? [String: Any])?["hash"] as? String))
+    }
+
+    /// A pull request fetched by id after it left the open list: how it closed and who closed
+    /// it. Nil when it is still open (or the answer is not a pull request).
+    static func closure(_ object: [String: Any]) -> (merged: Bool, by: String?)? {
+        guard let state = (object["state"] as? String)?.uppercased(), state == "MERGED" || state == "DECLINED" else { return nil }
+        let by = (object["closed_by"] as? [String: Any]).flatMap { person($0)?.name }
+        return (state == "MERGED", by)
     }
 
     /// The builds on the pull request's head as one state: any failed is failed, else any in
@@ -294,7 +356,8 @@ enum PRParse {
         else { chosen = (.succeeded, values[0]) }
         let link = chosen.1["url"] as? String
         let key = "\(chosen.1["key"] as? String ?? "?") \(link ?? "")"
-        return PRBuild(state: chosen.0, key: key, pipeline: link.flatMap(pipelineRef), url: link.flatMap(URL.init(string:)))
+        return PRBuild(state: chosen.0, key: key, pipeline: link.flatMap(pipelineRef), url: link.flatMap(URL.init(string:)),
+                       name: (chosen.1["name"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 
     /// A Pipelines run from a status link: `…/pipelines/results/<n>` (what Bitbucket writes
@@ -321,7 +384,9 @@ enum PRParse {
             let check = item["check"] as? [String: Any]
             let name = (check?["name"] as? String) ?? (check?["kind"] as? String) ?? (item["type"] as? String) ?? "check"
             return PRMergeability.Check(name: name, status: (item["status"] as? String ?? "").uppercased(),
-                                        required: item["required"] as? Bool ?? false, blocking: item["blocking"] as? Bool ?? false)
+                                        required: item["required"] as? Bool ?? false, blocking: item["blocking"] as? Bool ?? false,
+                                        type: item["type"] as? String ?? "",
+                                        reason: (item["reason"] as? String) ?? (check?["reason"] as? String) ?? "")
         }
         return PRMergeability(checks: checks, fetchedAt: now)
     }
@@ -363,6 +428,12 @@ struct PRSeenEntry: Codable, Equatable, Sendable {
     var buildSeen: Bool
     var buildFailedKey: String?
     var reviewRequestNotified: Bool
+    /// Whether every merge check passed when last read (nil: not read yet), and the head commit
+    /// "ready to merge" was announced for: once per commit.
+    var mergeReady: Bool?
+    var readyHead: String?
+    /// Left the open list and was fetched by id once, whatever came back.
+    var closeChecked: Bool?
     /// Last time it was in a list: entries not seen for 3 days are dropped.
     var aliveAt: Double
 }
@@ -410,7 +481,8 @@ enum PREvents {
                 commentsNotifiedAt: max(now, newest), commentEventAt: nil, seenAt: max(now, newest),
                 buildSeen: pr.build != nil, buildFailedKey: pr.build?.state == .failed ? pr.build?.key : nil,
                 // Already acted on, or announced now: not again. A draft waits until it is ready.
-                reviewRequestNotified: pr.role == .reviewing && (wantsReview || pr.myReview != .none), aliveAt: now)
+                reviewRequestNotified: pr.role == .reviewing && (wantsReview || pr.myReview != .none),
+                mergeReady: pr.isReadyToMerge, readyHead: nil, closeChecked: nil, aliveAt: now)
             return (events, entry)
         }
         // Reviews on mine: who newly approved, who newly asked for changes.
@@ -446,6 +518,15 @@ enum PREvents {
                 next.buildFailedKey = build.key
             }
         }
+        // Ready to merge: the merge checks went from blocking to all passing; once per head
+        // commit. The first reading only records.
+        if let ready = pr.isReadyToMerge {
+            if ready, next.mergeReady == false, next.readyHead != (pr.head ?? "-") {
+                emit(.readyToMerge(approved: pr.merge?.hasApprovalCheck == true))
+                next.readyHead = pr.head ?? "-"
+            }
+            next.mergeReady = ready
+        }
         next.role = pr.role
         next.updatedOn = pr.updatedOn
         next.participantsHash = digest
@@ -453,6 +534,20 @@ enum PREvents {
         // Moved hourly, so an unchanged pull request leaves its entry (and the file) alone.
         if now - next.aliveAt > 3600 { next.aliveAt = now }
         return (events, next)
+    }
+
+    /// What a pull request of mine that left the open list, fetched by id, tells. `fetched` nil:
+    /// the fetch failed. Once per pull request: the entry remembers it looked, whatever came back,
+    /// so a failure is not retried and a restart does not announce it again.
+    static func closed(_ pr: PullRequest, entry: PRSeenEntry?, fetched: [String: Any]?, now: Double) -> (event: PREvent?, entry: PRSeenEntry?) {
+        guard pr.role == .mine, entry?.closeChecked != true else { return (nil, entry) }
+        // Still open: the list only missed it. It stays unchecked for when it really closes.
+        if (fetched?["state"] as? String)?.uppercased() == "OPEN" { return (nil, entry) }
+        var next = entry
+        next?.closeChecked = true
+        guard let fetched, let closure = PRParse.closure(fetched) else { return (nil, next) }
+        let kind: PREvent.Kind = closure.merged ? .merged(by: closure.by) : .declined(by: closure.by)
+        return (PREvent(kind: kind, pr: pr.ref, title: pr.title, url: pr.url, at: now), next)
     }
 
     /// Comments by others since I last looked.
@@ -512,6 +607,16 @@ enum PRBudget {
     static let buildRecheck: Double = 240
     /// At most this many detail requests in one poll, so a first look spreads out.
     static let detailsPerTick = 6
+    /// Merge checks: for my pull requests linked to a live session first, then my newest open
+    /// ones, at most `mergeMaxPRs` of them, each read every 15 minutes (5 once its updated_on or
+    /// its build moved), never more than `mergePerHour` an hour in all. The hour's room is kept
+    /// out of the review lists' share, like the details reserve.
+    static let mergeMaxPRs = 4
+    static let mergeEvery: Double = 900
+    static let mergeEarly: Double = 300
+    static let mergePerHour = 18
+    /// Reads by id of mine that left the open list (merged or declined?): at most this many an hour.
+    static let closedPerHour = 6
 
     /// The mine request per workspace, stretched so all of them stay under 60 an hour.
     static func mineInterval(workspaces: Int, locked: Bool) -> Double {
@@ -521,7 +626,7 @@ enum PRBudget {
     static func reviewInterval(repos: Int, mineWorkspaces: Int, pipelineRunning: Bool, locked: Bool) -> Double {
         let base = pipelineRunning || locked ? reviewEveryStretched : reviewEvery
         let mineCost = Double(max(1, mineWorkspaces)) * 3600 / mineInterval(workspaces: mineWorkspaces, locked: locked)
-        let room = max(30, BitbucketLane.pullRequests.hourlyTarget - mineCost - detailsReserve)
+        let room = max(30, BitbucketLane.pullRequests.hourlyTarget - mineCost - detailsReserve - Double(mergePerHour))
         return max(base, 3600 * Double(max(1, repos)) / room)
     }
 

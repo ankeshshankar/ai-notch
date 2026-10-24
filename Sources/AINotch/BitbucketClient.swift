@@ -241,14 +241,14 @@ actor BitbucketClient {
     /// (as 200, or 206 for a range). Handles what is the same for every lane: 401 (the token is
     /// dropped, and the Keychain read again on the next look), 429 and NearLimit (back off).
     /// What a 403 means is the lane's to say (`markLacksScope`).
-    func get(_ url: URL, lane: BitbucketLane, kind: String, range: String? = nil, accept: String = "application/json") async -> BitbucketAnswer {
+    func get(_ url: URL, lane: BitbucketLane, kind: String, range: String? = nil, accept: String = "application/json", useCache: Bool = true) async -> BitbucketAnswer {
         guard hasToken(for: lane), let token else { return .noToken }
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.setValue("Bearer \(token.secret)", forHTTPHeaderField: "Authorization")
         request.setValue(accept, forHTTPHeaderField: "Accept")
         if let range { request.setValue(range, forHTTPHeaderField: "Range") }
         let cacheKey = url.absoluteString + (range ?? "")
-        let cached = state(lane).etags[cacheKey]
+        let cached = useCache ? state(lane).etags[cacheKey] : nil
         if let cached { request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match") }
         let started = Date()
         guard let (data, response) = try? await BuildHTTP.session.data(for: request),
@@ -289,7 +289,7 @@ actor BitbucketClient {
             return .rateLimited(wait: wait ?? 120)
         default:
             update(lane) { if at >= $0.slowUntil { $0.slowFactor = 1 } }
-            if http.statusCode == 200 || http.statusCode == 206, let etag = http.value(forHTTPHeaderField: "ETag"), data.count < 512_000 {
+            if useCache, http.statusCode == 200 || http.statusCode == 206, let etag = http.value(forHTTPHeaderField: "ETag"), data.count < 512_000 {
                 update(lane) {
                     if $0.etags.count > 300 { $0.etags.removeAll() }
                     $0.etags[cacheKey] = (etag, data)

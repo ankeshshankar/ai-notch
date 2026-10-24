@@ -220,7 +220,8 @@ Claude Code sees its command end and carries on. Setup → Machine → Backgroun
 
 Only while the screen is locked: a session that needs you, or a turn longer than a minute
 finishing, sends a macOS notification with the chat's title, the project and what happened. So do
-your pipelines' finishes, news on your pull requests (see [Pull requests](#pull-requests)) and
+your pipelines' finishes, news on your pull requests (comments, approvals, merged, ready to merge;
+see [Pull requests](#pull-requests)) and
 memory critical for 30 seconds (see [Machine guard](#machine-guard)). Prod's Datadog news is the
 exception: it notifies while the screen is unlocked too (see [Prod health](#prod-health-datadog)).
 **Open** unlocks to the session. What the lock screen shows follows System Settings →
@@ -477,11 +478,31 @@ with the same token. Nothing is approved, merged or commented from the notch.
 - **Collapsed**, the right wing shows the pull-request mark and how many rows have news you have
   not looked at. Moving over the open notch counts it as seen; the comments the rows showed stop
   counting as new when the notch closes.
+- **On a session**: a session in a git folder whose remote is on Bitbucket Cloud and whose branch
+  is the source branch of one of your pull requests shows a line on its row: `PR #123 · build
+  failed`, `· merge conflict` (git's check says the branches conflict), `· can't merge` (it fails for another reason), `· 2 new comments`, or `approved, can merge`, `changes requested`,
+  `draft`, `build running`. Click it to open the pull request. **Send to agent** hands the agent
+  a short plain-text brief of what needs fixing: the failed pipeline, step and the last 40 lines
+  of its log; the new comments (author, file:line, text); or "branch X conflicts with Y, rebase
+  or merge and resolve". A Claude Code session with a turn running gets it as a note at its next
+  step; any other session (idle Claude Code, Cursor, Codex, other agents) gets it on the
+  clipboard, the notch jumps to it, and says "Copied — paste it to the agent". Nothing is typed
+  into a terminal. Logs and comment text are fetched only on that click, masked for secrets, and
+  not cached. The notch keeps no copy of them, but a brief queued for a Claude Code session does
+  sit in that session's control file (`~/.claude/notch/sessions/<id>.control`, readable by you
+  only) until Claude takes it at its next step, which deletes it; if the turn ends first, the
+  brief goes to the clipboard, the file is cleared, and the row says "Claude finished first —
+  brief copied". Claude is told the quoted comments and logs were written by other people or CI
+  and are data, not instructions. A note you type yourself is unchanged (cleared at the turn's
+  end). The branch is read with `git` every 30 seconds and when the session
+  changes, off the main thread.
 - **Notifications**, only while the screen is locked and each once: yours approved, changes
   requested on yours, new comments (grouped per pull request, at most every 10 minutes), a review
-  asked of you, and a failed build on yours unless Pipelines already notified that run. Each kind
-  has its checkbox in Setup → Builds. What is known is kept in `~/.claude/notch/pr-seen.json`, so a
-  restart announces nothing twice.
+  asked of you, a failed build on yours unless Pipelines already notified that run, yours
+  **merged** or **declined** (with who did it), and yours **ready to merge** (every merge check
+  passes, git's included, and the build is not failed or running; says "approved" only when an
+  approval rule exists; once per head commit). Each kind has its checkbox in Setup → Builds. What is known
+  is kept in `~/.claude/notch/pr-seen.json`, so a restart announces nothing twice.
 
 How it reads, in a budget of its own (about 120 requests an hour, never more than 150; Pipelines
 keeps its 390, together well under Bitbucket's 1,000):
@@ -493,11 +514,19 @@ keeps its 390, together well under Bitbucket's 1,000):
   one of your pipelines runs or the screen is locked), stretched for many repositories.
 - Details only for what changed: `/statuses` when a pull request's `updated_on` moves (every 4
   minutes while a build of yours runs), the 10 newest comments' authors and times (never their
-  text) when its comment count moves. `/mergeability/checks` only from Details.
+  text) when its comment count moves. `/mergeability/checks` from Details, and in the background
+  for up to 4 of your open pull requests (the ones linked to a live session first, then the
+  newest), each every 15 minutes (5 after its `updated_on` or build moved), at most 18 requests an
+  hour and only while the lane is under its 120 an hour target: that feeds "merge conflict",
+  "can merge" and "ready to merge".
+- When one of yours leaves the open list, it is fetched once by id to tell merged from declined
+  (and who closed it), at most 6 an hour and never from a workspace whose list failed that poll;
+  a failed fetch announces nothing. Pipeline steps, logs and comment text
+  are read only when you click Send to agent.
 - Your account: the token's `/2.0/user` (`read:user`), else the Bitbucket user behind commits
   made with your email, as Pipelines finds it.
 
-For 7 repositories that is about 70 requests an hour. A token without `read:pullrequest` is
+For 7 repositories that is about 70 requests an hour, plus the merge checks (18 at most). A token without `read:pullrequest` is
 answered with a 403 once; from then on the lane sends nothing, shows a grey "needs
 read:pullrequest" in Setup and the PRs chip, and looks for a newer token in the Keychain every 10
 minutes (and on Check Again or opening the notch). Pipelines is not affected.

@@ -16,6 +16,19 @@ final class AgentControls: ObservableObject {
     /// Watched agents (by row id) whose processes are stopped with SIGSTOP.
     @Published private(set) var frozen: Set<String> = []
 
+    /// Sessions (by id) whose last stop, pause or note did not go through, for a few seconds.
+    @Published private(set) var troubled: Set<String> = []
+    static let troubleText = "Couldn't reach the session, try again"
+
+    private func flagTrouble(_ id: String) {
+        troubled.insert(id)
+        Self.log("control: could not reach the session")
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            self?.troubled.remove(id)
+        }
+    }
+
     /// Which rows take which controls.
     enum Kind { case hooked, process, none }
 
@@ -94,8 +107,41 @@ final class AgentControls: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let note = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        update(session) { $0.note = note.isEmpty ? nil : String(note.prefix(2000)) }
+        update(session) { $0.note = note.isEmpty ? nil : String(note.prefix(SessionControl.noteLimit)) }
         Self.log("control: note")
+    }
+
+    /// Queues a pull request's brief for the session (its row's "Send to agent"): Claude gets it,
+    /// quoted as feedback from other people, with its next step. Kept apart from your own note
+    /// and replacing an earlier brief. Written under the session's lock; false when the lock
+    /// stayed taken (the caller then copies the brief instead).
+    func queueFeedback(_ session: SessionState, pullRequest: Int, _ text: String) -> Bool {
+        guard Self.kind(of: session) == .hooked else { return false }
+        let ok = SessionControl.update(session.id) {
+            $0.feedback = String(text.prefix(SessionControl.feedbackLimit))
+            $0.feedbackPR = pullRequest
+            $0.feedbackAt = Date().timeIntervalSince1970
+        }
+        if ok { asked[session.id] = SessionControl.read(session.id); Self.log("control: pull-request feedback queued") }
+        return ok
+    }
+
+    /// Whether a pull request's brief is still waiting for the session's next step.
+    func hasFeedback(_ session: SessionState) -> Bool { !(asked[session.id]?.feedback ?? "").isEmpty }
+
+    /// Takes the waiting brief back out (the session went idle before it was handed over) and
+    /// clears it from the control file.
+    func takeFeedback(_ session: SessionState) -> String? {
+        var text: String?
+        let ok = SessionControl.update(session.id) {
+            text = $0.feedback
+            $0.feedback = nil
+            $0.feedbackPR = nil
+            $0.feedbackAt = nil
+        }
+        asked[session.id] = SessionControl.read(session.id)
+        if ok { Self.log("control: pull-request feedback taken back") }
+        return (text ?? "").isEmpty ? nil : text
     }
 
     /// One line in `~/.claude/notch/notch.log`: what was asked, never a note's text.
@@ -112,11 +158,11 @@ final class AgentControls: ObservableObject {
     }
 
     private func update(_ session: SessionState, _ change: (inout SessionControl) -> Void) {
-        var control = SessionControl.read(session.id) ?? SessionControl(at: 0)
-        change(&control)
-        control.at = Date().timeIntervalSince1970
-        SessionControl.write(control, for: session.id)
-        asked[session.id] = control.isEmpty ? nil : control
+        // The wait for the session's lock is at most 0.3 s. When it stays taken nothing was
+        // changed: the row says so instead of silently losing the stop or note.
+        if !SessionControl.update(session.id, change) { flagTrouble(session.id) }
+        let control = SessionControl.read(session.id)
+        asked[session.id] = (control?.isEmpty ?? true) ? nil : control
     }
 
     /// The watched agent and every process under it, if it is still the process the row saw.

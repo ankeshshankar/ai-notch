@@ -145,7 +145,7 @@ struct RootView: View {
             if expanded {
                 // The body is a card set into the black shape: on light it hangs under the strip
                 // inside a thin black bezel, on dark it is the black itself.
-                SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews, controller: controller,
+                SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews, prLinks: reviews.sessionLinks, controller: controller,
                             isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, maxHeight: g.maxHeight - Self.bezel)
                     .background(
                         UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
@@ -311,6 +311,8 @@ private struct SessionList: View {
     @ObservedObject var machine: MachineStore
     @ObservedObject var vpn: VPNStore
     @ObservedObject var reviews: ReviewStore
+    /// Which session belongs to which of my pull requests (reviews.sessionLinks).
+    @ObservedObject var prLinks: SessionPRStore
     var controller: NotchController
     /// Pinned open; passed by value so the header redraws when it changes.
     var isPinned: Bool
@@ -493,7 +495,7 @@ private struct SessionList: View {
                     SessionRow(session: session, title: title, now: store.now, agentActivity: store.agentActivity, agentModels: store.agentModels,
                                usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
                                reserved: space, live: store.usage.live[session.id], compact: looks.compactRows,
-                               prodWatch: prodWatch(session),
+                               prodWatch: prodWatch(session), hasPRLine: prLinks.linked[session.id] != nil,
                                paused: controls.isPaused(session), stopping: controls.isStopping(session))
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
@@ -528,6 +530,13 @@ private struct SessionList: View {
                     }
                 }
                 .padding(8)
+
+                // The session's pull request, along the bottom left, beside the Details corner.
+                if let pr = prLinks.linked[session.id] {
+                    SessionPRLine(links: prLinks, session: session, pr: pr)
+                        .frame(maxWidth: .infinity, alignment: .bottomLeading)
+                        .padding(.leading, 10).padding(.trailing, 84).padding(.bottom, 10)
+                }
             }
             // A new session slides in from the top; one that ends fades out.
             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
@@ -1387,6 +1396,10 @@ private struct RowControls: View {
         let kind = AgentControls.kind(of: session)
         if kind != .none, session.phase != .idle || controls.isPaused(session) {
             HStack(spacing: 4) {
+                if controls.troubled.contains(session.id) {
+                    Text(AgentControls.troubleText).font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.failed)
+                        .lineLimit(1).fixedSize()
+                }
                 if kind == .hooked {
                     icon("text.bubble", help: controls.hasNote(session) ? "A note waits for its next step; click to change it" : "Send Claude a note with its next step") {
                         controls.askNote(session, title: title)
@@ -1486,6 +1499,8 @@ private struct SessionRow: View {
     var compact = false
     /// Prod while it settles after this session's push or deploy.
     var prodWatch: ProdWatch?
+    /// The pull request's line is laid over the row's bottom left (so the last line leaves room).
+    var hasPRLine = false
     /// Paused or being stopped from the notch.
     var paused = false
     var stopping = false
@@ -1529,7 +1544,7 @@ private struct SessionRow: View {
                 }
                 // With nothing under it, the last line leaves room on its right for the Details
                 // button instead of a line of its own.
-                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil && !paused && !stopping && prodWatch == nil
+                let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil && !paused && !stopping && prodWatch == nil && !hasPRLine
                 let mcpLine = !isDetailed && !compact && !session.mcp.isEmpty
                 activity.padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
                 if let todos = openTodos { todoLine(todos) }

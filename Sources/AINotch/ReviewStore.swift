@@ -33,6 +33,8 @@ final class ReviewStore: ObservableObject {
     /// Whether Pipelines already notified a run (BuildStore's notified set): a failed build on
     /// a pull request of mine is then not announced twice.
     var pipelineNotified: ((PipelineRef) -> Bool)?
+    /// The uuid of a pipeline run Pipelines already holds, for the steps and logs of a failed build.
+    var pipelineUUID: ((PipelineRef) -> String?)?
 
     /// Attention rows with news I have not looked at yet: the collapsed wing's pull-request slot.
     @Published private(set) var unseenCount = 0
@@ -40,6 +42,9 @@ final class ReviewStore: ObservableObject {
     /// until they close.
     @Published private(set) var muted: Set<String>
     @Published private(set) var notify = NotifyPrefs.load()
+    /// Which session belongs to which of my pull requests, for the line under its row.
+    let sessionLinks = SessionPRStore()
+    private var watchedKeys: Set<String> = []
 
     private var source: PullRequestSource?
     private var timer: Timer?
@@ -69,6 +74,10 @@ final class ReviewStore: ObservableObject {
         var comments = true
         var reviews = true
         var builds = true
+        /// One of mine merged or declined.
+        var closed = true
+        /// One of mine went from blocked to every merge check passing.
+        var ready = true
 
         private static let key = "prs.notify"
 
@@ -80,11 +89,14 @@ final class ReviewStore: ObservableObject {
             prefs.comments = object["comments"] as? Bool ?? true
             prefs.reviews = object["reviews"] as? Bool ?? true
             prefs.builds = object["builds"] as? Bool ?? true
+            prefs.closed = object["closed"] as? Bool ?? true
+            prefs.ready = object["ready"] as? Bool ?? true
             return prefs
         }
 
         func save() {
-            UserDefaults.standard.set(["approved": approved, "changes": changes, "comments": comments, "reviews": reviews, "builds": builds], forKey: Self.key)
+            UserDefaults.standard.set(["approved": approved, "changes": changes, "comments": comments, "reviews": reviews, "builds": builds,
+                                          "closed": closed, "ready": ready], forKey: Self.key)
         }
 
         func allows(_ kind: PREvent.Kind) -> Bool {
@@ -94,6 +106,8 @@ final class ReviewStore: ObservableObject {
             case .newComments: return comments
             case .reviewRequested: return reviews
             case .buildFailed: return builds
+            case .merged, .declined: return closed
+            case .readyToMerge: return ready
             }
         }
     }
@@ -107,12 +121,19 @@ final class ReviewStore: ObservableObject {
     init() {
         muted = Set(UserDefaults.standard.stringArray(forKey: Self.mutedKey) ?? [])
         seenNews = Set(UserDefaults.standard.stringArray(forKey: Self.seenKey) ?? [])
+        sessionLinks.onWatched = { [weak self] keys in self?.setWatched(keys) }
+        sessionLinks.feedback = { [weak self] pr, build, comments in
+            await self?.feedback(for: pr, build: build, comments: comments) ?? PRFeedbackData()
+        }
     }
 
     func start() {
         startConfigured()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.startConfigured() }
+            MainActor.assumeIsolated {
+                self?.startConfigured()
+                self?.sessionLinks.tick()
+            }
         }
     }
 
@@ -122,6 +143,7 @@ final class ReviewStore: ObservableObject {
         let config = BuildsConfig.current?.bitbucket
         let on = config?.pullRequests == true
         if on != isOn { isOn = on }
+        sessionLinks.enabled = on
         guard on, source == nil else { return }
         let source = PullRequestSource(onChange: { [weak self] snapshot in
             Task { @MainActor in self?.take(snapshot) }
@@ -129,7 +151,25 @@ final class ReviewStore: ObservableObject {
             Task { @MainActor in self?.take(events) }
         })
         self.source = source
-        Task { await source.start() }
+        let watched = watchedKeys
+        Task {
+            await source.setWatched(watched)
+            await source.start()
+        }
+    }
+
+    /// The pull requests linked to a live session: their merge checks are read first.
+    private func setWatched(_ keys: Set<String>) {
+        watchedKeys = keys
+        if let source { Task { await source.setWatched(keys) } }
+    }
+
+    /// What a session's "Send to agent" needs, read now (see PullRequestSource.feedback).
+    private func feedback(for pr: PullRequest, build: Bool, comments: Int) async -> PRFeedbackData {
+        guard let source else { return PRFeedbackData() }
+        // The run's uuid, when Pipelines already holds the run (else the source looks it up).
+        let uuid = pr.build?.pipeline.flatMap { pipelineUUID?($0) }
+        return await source.feedback(for: pr.id, wantBuild: build, comments: comments, runUUID: uuid)
     }
 
     /// The notch opened: mine is read if older than a minute.
@@ -167,6 +207,7 @@ final class ReviewStore: ObservableObject {
         let toReview = prs.filter { $0.role == .reviewing }
         if mine != self.mine { self.mine = mine }
         if toReview != self.toReview { self.toReview = toReview }
+        sessionLinks.setMine(mine)
         // A muted pull request that closed is forgotten (only from a healthy, read answer).
         if snapshot.status == nil, snapshot.mineFetchedAt > 0, !muted.isEmpty {
             let open = Set(prs.map(\.id))
@@ -302,7 +343,7 @@ final class ReviewStore: ObservableObject {
     }
 
     nonisolated static func summary(_ count: RequestCount, notModified: Int) -> String {
-        let order = ["mine", "review", "statuses", "comments", "merge", "owner"]
+        let order = ["mine", "review", "statuses", "comments", "merge", "closed", "feedback", "owner"]
         let parts = order.compactMap { kind in count.byKind[kind].flatMap { $0 > 0 ? "\(kind) \($0)" : nil } }
         return "\(count.total) in the last hour" + (parts.isEmpty ? "" : " (" + parts.joined(separator: ", ") + ")")
             + (notModified > 0 ? ", \(notModified) unchanged" : "")

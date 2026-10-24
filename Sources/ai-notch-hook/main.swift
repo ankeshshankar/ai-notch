@@ -809,32 +809,58 @@ func applyControl() {
         }
     }
     if control.stop == true {
-        SessionControl.write(nil, for: sessionId)
+        // Only the stop (and pause and note) is given up; a pull request's feedback waits.
+        SessionControl.update(sessionId) { $0.stop = nil; $0.pause = nil; $0.note = nil }
         let output: [String: Any] = ["continue": false, "stopReason": "Stopped from AI Notch."]
         if let json = try? JSONSerialization.data(withJSONObject: output) {
             FileHandle.standardOutput.write(json + Data("\n".utf8))
         }
         exit(0)
     }
-    if name == "PreToolUse", let note = control.note, !note.isEmpty {
-        control.note = nil
-        SessionControl.write(control, for: sessionId)
-        let output: [String: Any] = ["hookSpecificOutput": [
-            "hookEventName": "PreToolUse",
-            "additionalContext": "A note from the user, sent from AI Notch while you work: \(note)",
-        ]]
-        if let json = try? JSONSerialization.data(withJSONObject: output) {
-            FileHandle.standardOutput.write(json + Data("\n".utf8))
+    if name == "PreToolUse", !(control.note ?? "").isEmpty || !(control.feedback ?? "").isEmpty {
+        // Taken under the session's lock, so a brief queued at the same moment is not lost; the
+        // file is cleared as it is handed over.
+        var note: String?
+        var feedback: String?
+        var feedbackPR: Int?
+        let taken = SessionControl.update(sessionId) { current in
+            note = current.note
+            if let text = current.feedback, Date().timeIntervalSince1970 - (current.feedbackAt ?? 0) < SessionControl.feedbackLifetime {
+                feedback = text
+                feedbackPR = current.feedbackPR
+            }
+            current.note = nil
+            current.feedback = nil
+            current.feedbackPR = nil
+            current.feedbackAt = nil
         }
-        exit(0)
+        var parts: [String] = []
+        if let note, !note.isEmpty { parts.append("A note from the user, sent from AI Notch while you work: \(SessionControl.cut(note, 2000))") }
+        if let feedback { parts.append(SessionControl.feedbackContext(feedback, pullRequest: feedbackPR)) }
+        if taken, !parts.isEmpty {
+            let output: [String: Any] = ["hookSpecificOutput": [
+                "hookEventName": "PreToolUse",
+                "additionalContext": parts.joined(separator: "\n\n"),
+            ]]
+            if let json = try? JSONSerialization.data(withJSONObject: output) {
+                FileHandle.standardOutput.write(json + Data("\n".utf8))
+            }
+            exit(0)
+        }
     }
 }
 
 // Stop, pause or a note from the notch (Claude Code only). A turn's end clears what was asked;
 // otherwise a stop or a note is acted on at the next tool call, a pause holds it.
 if isClaude {
-    if name == "Stop" || name == "SessionEnd" {
+    if name == "SessionEnd" {
         SessionControl.write(nil, for: sessionId)
+    } else if name == "Stop" {
+        // A pull request's feedback outlives the turn (the app puts it on the clipboard if Claude
+        // finished first); everything else asked is over.
+        if SessionControl.read(sessionId) != nil {
+            SessionControl.update(sessionId) { $0.stop = nil; $0.pause = nil; $0.note = nil }
+        }
     } else if name == "PreToolUse" || name == "PostToolUse" || name == "PostToolUseFailure" {
         applyControl()
     }

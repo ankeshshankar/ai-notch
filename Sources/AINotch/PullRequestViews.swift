@@ -1,4 +1,5 @@
 import AppKit
+import NotchCore
 import SwiftUI
 
 // Pull requests on screen: the rows that need something (two columns: under Pipelines on the
@@ -496,4 +497,56 @@ private struct PRPanelRowView: View {
 
     /// "minimum_approvals" → "minimum approvals".
     static func checkName(_ name: String) -> String { name.replacingOccurrences(of: "_", with: " ") }
+}
+
+// MARK: A session's pull request
+
+/// The line along a session row's bottom: "PR #123 · build failed", which opens the pull request,
+/// and "Send to agent" when there is feedback to act on. Sending only reads the pull request and
+/// hands text over; nothing is approved, merged or commented from here.
+struct SessionPRLine: View {
+    @ObservedObject var links: SessionPRStore
+    var session: SessionState
+    var pr: PullRequest
+
+    var body: some View {
+        let tone = PRLine.tone(pr)
+        let color: Color = tone == .bad ? Palette.failed : tone == .attention ? Palette.waiting : tone == .good ? Palette.done : Palette.ink3
+        HStack(spacing: 6) {
+            Button {
+                if let url = pr.url { NSWorkspace.shared.open(url) }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.pull").font(.system(size: 8, weight: .semibold))
+                    Text(PRLine.text(pr)).font(.system(size: 10, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                }
+                .foregroundStyle(color)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Capsule().fill(Palette.chip))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("\(pr.title). Opens the pull request in the browser.")
+            if let notice = links.notices[session.id] {
+                Text(notice).font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.done).lineLimit(1).truncationMode(.tail)
+            } else if !pr.feedbackKinds.isEmpty {
+                Button { links.send(session) } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: links.sending.contains(session.id) ? "ellipsis" : "paperplane").font(.system(size: 8, weight: .semibold))
+                        Text("Send to agent").font(.system(size: 10, weight: .medium)).lineLimit(1)
+                    }
+                    .foregroundStyle(Palette.ink2)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Capsule().fill(Palette.chip))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(links.sending.contains(session.id))
+                .help(session.phase != .idle && AgentControls.kind(of: session) == .hooked
+                      ? "Reads the failed build's log and the new comments and hands them to Claude as a note for its next step."
+                      : "Reads the failed build's log and the new comments and copies them as a short brief; the session's window comes forward to paste it into.")
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
 }

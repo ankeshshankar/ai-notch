@@ -26,12 +26,18 @@ The state file (times are seconds relative to the stub's start; `...Ago` is befo
         "ws/repo": {
           "pushes": [-3600, 195],               when updated_on moved
           "pipelines": [{"number": 7, "createdAt": -100, "runsFor": 400, "result": "SUCCESSFUL",
-                         "creator": "{u-me}", "branch": "main", "pr": 5}],
+                         "creator": "{u-me}", "branch": "main", "pr": 5,
+                         "stepName": "Test", "logLines": 100}],   a FAILED run has a failed step with
+                                                                  that many log lines (default 5)
           "pullrequests": [{"id": 5, "title": "…", "author": "{u-me}", "reviewers": ["{u-a}"],
                             "participants": {"{u-a}": "approved"}, "draft": false,
                             "source": "feature/x", "destination": "main", "tasks": 1,
-                            "updatedAt": -600, "comments": [{"user": "{u-a}", "at": -900}],
+                            "updatedAt": -600, "head": "c0ffee1",      head: the source commit's hash
+                            "comments": [{"user": "{u-a}", "at": -900, "text": "Use a guard",
+                                          "inline": {"path": "src/a.swift", "to": 42}}],
                             "statuses": [{"state": "INPROGRESS", "key": "k", "pipeline": 7}],
+                            "conflict": false,        true: the git check fails with reason "conflicts";
+                                                      "impossible": reason "merge_impossible"
                             "mergeChecks": [...]}]      optional: /mergeability/checks as given; else
                                                         made from approvals, changes and statuses
         }
@@ -42,14 +48,17 @@ The state file (times are seconds relative to the stub's start; `...Ago` is befo
         {"at": 150, "pr": "ws/repo#5", "comment": "{u-a}"},
         {"at": 200, "pr": "ws/repo#8", "addReviewer": "{u-me}"},
         {"at": 240, "pr": "ws/repo#5", "status": "FAILED", "pipeline": 9},
-        {"at": 300, "pr": "ws/repo#5", "merge": true},
+        {"at": 300, "pr": "ws/repo#5", "merge": true, "by": "{u-a}"},   MERGED, closed_by {u-a}
+        {"at": 310, "pr": "ws/repo#6", "decline": true, "by": "{u-a}"}, DECLINED
+        {"at": 330, "pr": "ws/repo#5", "head": "d00d", "conflict": true},  a push; the merge check fails
+        {"at": 340, "pr": "ws/repo#5", "mergeChecks": [...]},           replace the merge checks
         {"at": 320, "rateLimitNext": "pr"},      the next pull-request request is a 429 (Retry-After 30)
         {"at": 400, "scopes": ["read:repository", "read:pipeline"]}
       ]
     }
 
 Each request is a line in the log: seconds since start, lane (pl, pr, owner), status, method,
-path and query.
+path and query. Pipelines, their steps and logs are found by uuid only, as the real API does (the list answers `uuid` and `build_number`).
 """
 import hashlib
 import json
@@ -117,7 +126,7 @@ def apply_timeline():
             pr.setdefault('participants', {}).pop(step['unapprove'], None)
             pr['updatedAt'] = at
         if 'comment' in step:
-            pr.setdefault('comments', []).append({"user": step['comment'], "at": at})
+            pr.setdefault('comments', []).append({"user": step['comment'], "at": at, "text": step.get('text'), "inline": step.get('inline')})
             pr['updatedAt'] = at
         if 'addReviewer' in step:
             pr.setdefault('reviewers', []).append(step['addReviewer'])
@@ -128,8 +137,20 @@ def apply_timeline():
         if 'push' in step:
             pr['updatedAt'] = at
             pr['statuses'] = [{"state": "INPROGRESS", "key": "pipeline", "pipeline": step.get('pipeline')}]
+        if 'head' in step:
+            pr['head'] = step['head']
+            pr['updatedAt'] = at
+        if 'conflict' in step:
+            pr['conflict'] = step['conflict']
+        if 'mergeChecks' in step:
+            pr['mergeChecks'] = step['mergeChecks']
         if step.get('merge'):
             pr['state'] = 'MERGED'
+            pr['closedBy'] = step.get('by')
+            pr['updatedAt'] = at
+        if step.get('decline'):
+            pr['state'] = 'DECLINED'
+            pr['closedBy'] = step.get('by')
             pr['updatedAt'] = at
 
 
@@ -158,7 +179,7 @@ def step_objects(run):
     done = now - run['createdAt'] >= run.get('runsFor', 60)
     state = {"name": "COMPLETED", "result": {"name": run.get('result', 'SUCCESSFUL')}} if done else \
         {"name": "IN_PROGRESS", "stage": {"name": "RUNNING"}}
-    return [{"uuid": "{step-%d}" % run['number'], "name": "Build", "started_on": iso(run['createdAt'] + 5),
+    return [{"uuid": "{step-%d}" % run['number'], "name": run.get('stepName', "Build"), "started_on": iso(run['createdAt'] + 5),
              "completed_on": iso(run['createdAt'] + run.get('runsFor', 60)) if done else None,
              "state": state, "trigger": {"type": "pipeline_trigger_automatic"}}]
 
@@ -174,11 +195,12 @@ def pr_object(ws, repo_key, pr):
     name = repo_key.split('/')[1]
     return {"type": "pullrequest", "id": pr['id'], "title": pr.get('title', f"Change {pr['id']}"), "draft": pr.get('draft', False),
             "state": pr.get('state', 'OPEN'), "author": person(pr['author']),
-            "source": {"branch": {"name": pr.get('source', f"feature/{pr['id']}")}, "commit": {"hash": "a" * 12},
+            "source": {"branch": {"name": pr.get('source', f"feature/{pr['id']}")}, "commit": {"hash": pr.get('head', "a" * 12)},
                        "repository": {"full_name": repo_key}},
             "destination": {"branch": {"name": pr.get('destination', 'main')}, "commit": {"hash": "b" * 12},
                             "repository": {"full_name": repo_key, "name": name}},
             "reviewers": [person(u) for u in reviewers], "participants": participants,
+            "closed_by": person(pr.get('closedBy')),
             "task_count": pr.get('tasks', 0), "comment_count": len(pr.get('comments', [])),
             "created_on": iso(pr.get('createdAt', -86400)), "updated_on": iso(pr.get('updatedAt', 0)),
             "links": {"html": {"href": f"https://bitbucket.org/{repo_key}/pull-requests/{pr['id']}"}}}
@@ -220,7 +242,11 @@ def merge_checks(pr):
     def check(kind, ok):
         return {"type": "standard_merge_check", "check": {"kind": kind, "name": None},
                 "status": "PASSED" if ok else "FAILED", "required": True, "blocking": not ok}
-    return [{"type": "git_mergeability_check", "status": "PASSED", "required": True, "blocking": False},
+    conflict = pr.get('conflict', False)
+    git = {"type": "git_mergeability_check", "status": "FAILED" if conflict else "PASSED", "required": True, "blocking": bool(conflict)}
+    if conflict:
+        git["reason"] = "merge_impossible" if conflict == "impossible" else "conflicts"
+    return [git,
             check("minimum_approvals", approved), check("no_changes_requested", not changes), check("failed_builds", not failed)]
 
 
@@ -429,7 +455,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[2] == 'steps':
                 return self.send(200, pick({"values": step_objects(run)}, fields), lane)
             if len(parts) == 5 and parts[4] == 'log':
-                text = ''.join(f"+ step line {i} at {int(elapsed())}\n" for i in range(5)).encode()
+                text = ''.join(f"+ step line {i} at {int(elapsed())}\n" for i in range(run.get('logLines', 5))).encode()
                 return self.send(200, text, lane)
             return self.send(404, {"type": "error", "error": {"message": "Not found"}}, lane)
 
@@ -471,7 +497,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, pick({"values": values, "size": len(values)}, fields), lane)
             if parts[2] == 'comments':
                 comments = [{"id": 1000 + i, "user": person(c['user']), "created_on": iso(c['at']), "updated_on": iso(c['at']),
-                             "deleted": False, "content": {"raw": "stub comment"}} for i, c in enumerate(pr.get('comments', []))]
+                             "deleted": False, "content": {"raw": c.get('text') or "stub comment"}, **({"inline": c['inline']} if c.get('inline') else {})}
+                            for i, c in enumerate(pr.get('comments', []))]
                 if query.get('sort') == ['-updated_on']:
                     comments.reverse()
                 pagelen = int(query.get('pagelen', ['10'])[0])
