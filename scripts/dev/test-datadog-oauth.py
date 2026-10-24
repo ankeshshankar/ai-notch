@@ -173,7 +173,7 @@ try:
     mark = len(log_lines())
     out = run("sign-in")
     lines = since(mark)
-    check("sign-in: signed in as the org, read scopes", "result: signed in to us3.datadoghq.com as Stub Org, scopes incident_read monitors_read timeseries_query" in out, out)
+    check("sign-in: signed in as the org, read scopes", "result: signed in to us3.datadoghq.com as Stub Org, scopes apm_read events_read incident_read monitors_read timeseries_query" in out, out)
     check("sign-in: one DCR with the 4 pup redirects", count(lines, "POST /api/v2/oauth2/register 201", "redirects=4") == 1, "\n".join(lines))
     check("sign-in: authorize redirected, code exchanged", count(lines, "/oauth2/v1/authorize 302") == 1 and count(lines, "grant=authorization_code", " 200 ") == 1, "\n".join(lines))
     url = browser.pages[0][0] if browser.pages else ""
@@ -181,7 +181,7 @@ try:
     redirect_port = urllib.parse.urlparse(q.get("redirect_uri", [""])[0]).port
     check("sign-in: PKCE S256, state, sorted scopes, a pup port",
           q.get("code_challenge_method") == ["S256"] and len(q.get("code_challenge", [""])[0]) == 43 and len(q.get("state", [""])[0]) >= 32
-          and q.get("scope") == ["incident_read monitors_read timeseries_query"] and redirect_port in PUP_PORTS, url)
+          and q.get("scope") == ["apm_read events_read incident_read monitors_read timeseries_query"] and redirect_port in PUP_PORTS, url)
     check("sign-in: the tab says it can close", any(s == 200 and "You can close this tab." in b for u, s, b in browser.pages if "/oauth/callback" in u))
     t = token() or {}
     check("token blob: access, refresh, expiry, scopes, client_id, site", all(t.get(k) for k in ["access", "refresh", "expiry", "scopes", "client_id", "site"]) and t.get("site") == "us3.datadoghq.com", str(sorted(t)))

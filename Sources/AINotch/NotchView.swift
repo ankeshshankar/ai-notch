@@ -262,7 +262,7 @@ private struct RightWing: View {
         // One slot, in WingSlot's order.
         let slot = WingSlot.pick(waiting: store.waiting.count, vpnDropped: vpn.showsSlot, memoryCritical: machine.showsSlot, justDone: store.now - store.lastDoneAt < 4,
                                  prodAlert: prod.hasUnseenAlert, buildFailure: builds.hasUnseenFailure,
-                                 pullRequestNews: reviews.unseenCount, subagents: store.runningAgents, building: builds.activeCount)
+                                 pullRequestNews: reviews.unseenCount, deployWorse: prod.hasDeployNews, watchdog: prod.hasWatchdogNews, subagents: store.runningAgents, building: builds.activeCount)
         HStack(spacing: 4) {
             switch slot {
             case .waiting(let count):
@@ -274,6 +274,12 @@ private struct RightWing: View {
             case .prodAlert:
                 // A monitor went to Alert, or an incident was declared, since the notch was last looked at.
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
+            case .deployWorse:
+                // A linked service's new version has more errors or is slower than the one before.
+                Image(systemName: "chart.line.uptrend.xyaxis").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
+            case .watchdog:
+                // Datadog's Watchdog found something since the notch was last looked at.
+                Image(systemName: "eye.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.waiting)
             case .buildFailure:
                 // A build or run failed since the notch was last opened.
                 Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
@@ -419,6 +425,8 @@ private struct SessionList: View {
                     .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Palette.ink3)
             }
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { if footerHeight != $0 { footerHeight = $0 } }
+            // Above the header only while the Prod card is open, so it covers the header whole.
+            .modifier(RaisedWhileProdCardOpen(hover: controller.hover))
         }
         // With the bezel outside, the same 14 from the shape's edge as before.
         .padding(.horizontal, 14 - RootView.bezel)
@@ -489,7 +497,7 @@ private struct SessionList: View {
 
     /// For 20 minutes after a session pushed or deployed: Prod's level, and its alerting monitor.
     private func prodWatch(_ session: SessionState) -> ProdWatch? {
-        guard prod.isOn, let at = session.shippedAt, store.now - at < 1200, store.now >= at else { return nil }
+        guard prod.isOn, let at = session.shippedAt, DeployWindow.isOpen(pushedAt: at, now: store.now) else { return nil }
         return ProdWatch(level: prod.level, since: at, what: session.shipped ?? "push",
                          alerting: prod.alertingMonitors.first?.name)
     }

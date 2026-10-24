@@ -275,7 +275,7 @@ final class NotchController: ObservableObject {
 
     var showsWings: Bool {
         !store.sessions.isEmpty || !geometry.hasNotch || builds.hasActive || builds.hasUnseenFailure
-            || prod.hasOpenAlert || prod.hasUnseenAlert || machine.showsDot || machine.showsSlot || vpn.showsSlot || reviews.unseenCount > 0
+            || prod.hasOpenAlert || prod.hasUnseenAlert || prod.hasDeployNews || prod.hasWatchdogNews || machine.showsDot || machine.showsSlot || vpn.showsSlot || reviews.unseenCount > 0
     }
 
     /// Pinned and nothing full-screen in the way: the notch stays expanded. Also for a while after

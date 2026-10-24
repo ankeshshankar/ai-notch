@@ -56,6 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reviews.start()
         // A session's folder is matched to one of my pull requests for the line under its row.
         store.$sessions.sink { [weak reviews] sessions in reviews?.sessionLinks.setSessions(sessions) }.store(in: &cancellables)
+        // A push from a repo with a `services` entry starts that service's deploy check.
+        store.$sessions.sink { [weak prod] sessions in prod?.setSessions(sessions) }.store(in: &cancellables)
         SetupWindowController.shared.builds = builds
         SetupWindowController.shared.prod = prod
         SetupWindowController.shared.machine = machine
@@ -115,6 +117,9 @@ DatadogAuthDev.runIfAsked(CommandLine.arguments)
 
 // Dev check of Prod's alerts (snapshot diffing, grouping, flapping), never the app: `--prod-alerts-selfcheck`.
 ProdAlertsCheck.runIfAsked(CommandLine.arguments)
+
+// Dev check of Prod's deploy checks, new errors, deploys list, Watchdog and budget, never the app: `--deploy-check-selfcheck`.
+DeployCheckSelfCheck.runIfAsked(CommandLine.arguments)
 
 // Dev checks of the build sources, never the app: a failure report as Copy failure copies it
 // (`--eas-failure <build id>`, `--bitbucket-failure <ws/repo#n>`), one poll of a repository as

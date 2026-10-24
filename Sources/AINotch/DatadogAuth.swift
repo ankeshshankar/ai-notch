@@ -16,8 +16,9 @@ import Security
 // code or verifier ever reaches a log or a file.
 
 enum DatadogOAuth {
-    /// Read only: the monitor search, the incident search, the scalar query.
-    static let scopes = ["incident_read", "monitors_read", "timeseries_query"]
+    /// Read only: the monitor search, the incident search, the scalar and timeseries queries,
+    /// APM's error spans (deploy checks) and events (Watchdog).
+    static let scopes = ["apm_read", "events_read", "incident_read", "monitors_read", "timeseries_query"]
     static let clientName = "AI Notch"
     /// The loopback ports pup registers; the listener takes the first free one.
     static let ports: [UInt16] = [8000, 8080, 8888, 9000]
@@ -539,6 +540,14 @@ actor DatadogAuth {
         guard let token, token.site == site else { return .none }
         if let ended = token.ended { return .ended(ended) }
         return .signedIn(org: token.org)
+    }
+
+    /// The scopes the sign-in for `site` was granted; nil without one. A sign-in made before
+    /// apm_read and events_read were asked for lacks them until it is made again.
+    func grantedScopes(site: String) -> [String]? {
+        ensureLoaded()
+        guard let token, token.site == site, token.ended == nil else { return nil }
+        return token.scopes
     }
 
     private func derived() -> DatadogSignIn {

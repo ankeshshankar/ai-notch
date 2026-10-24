@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import NotchCore
 
 /// Prod health for the notch: the footer's Prod chip, the corner dot, the ⚠ in the wing, the
 /// alert banner and the notifications. Fetching happens in `DatadogSource`, off the main thread;
@@ -61,6 +62,10 @@ final class ProdStore: ObservableObject {
     /// Alerts and incidents that started since the notch was last looked at, still open.
     @Published private(set) var unseen: Set<String> = []
     @Published private(set) var snoozedUntil: Double
+    /// A deploy that looks worse, or a Watchdog story, that appeared since the notch was last looked
+    /// at, still open: the collapsed strip shows a chip for it ("deploy:<service>:<version>",
+    /// "watchdog:<id>").
+    @Published private(set) var unseenNews: Set<String> = []
     /// Which Datadog news notifies and pops the notch open (Setup's checkboxes).
     @Published private(set) var alertPrefs = ProdAlertPrefs.load()
     /// The banner the notch drops for alert-level news, for `headsUpFor` seconds (longer while
@@ -86,6 +91,15 @@ final class ProdStore: ObservableObject {
     private var headsUpCount = 0
     private var headsUpHovered = false
     private var headsUpEnd: DispatchWorkItem?
+    // Deploy checks: the sessions that pushed, the repository each folder is on, and what the
+    // source was last told.
+    private let git = SessionGitSource()
+    private var pushed: [(folder: String, shippedAt: Double?)] = []
+    private var repos: [String: (repo: String?, at: Double)] = [:]
+    private var resolving = false
+    private var pushesSent: [String: Double] = [:]
+    private var announced: Set<String> = []
+    private var watchdogSeen = false
 
     init() {
         snoozedUntil = UserDefaults.standard.double(forKey: Self.snoozeKey)
@@ -104,6 +118,7 @@ final class ProdStore: ObservableObject {
                 let wasStale = self.now - self.snapshot.monitorsAt >= Self.staleAfter
                 let isStale = now - self.snapshot.monitorsAt >= Self.staleAfter
                 if wasSnoozed != isSnoozed || wasStale != isStale || now - self.now >= 30 { self.now = now }
+                self.updatePushes()
             }
         }
     }
@@ -144,9 +159,14 @@ final class ProdStore: ObservableObject {
     /// The wing's ⚠: one of those that started since the notch was last looked at.
     var hasUnseenAlert: Bool { isOn && !isSnoozed && !unseen.isEmpty }
 
+    /// The collapsed strip's chips: a deploy that looks worse, a Watchdog story; not while snoozed.
+    var hasDeployNews: Bool { isOn && !isSnoozed && unseenNews.contains { $0.hasPrefix("deploy:") } }
+    var hasWatchdogNews: Bool { isOn && !isSnoozed && unseenNews.contains { $0.hasPrefix("watchdog:") } }
+
     var alertingMonitors: [ProdMonitor] { snapshot.monitors.filter { $0.status == "Alert" } }
 
-    /// The chip's click: the one alerting monitor or incident, else the filtered monitor list.
+    /// The chip's click: the one alerting monitor or incident, else the one Watchdog story, else the
+    /// filtered monitor list.
     var clickURL: URL? {
         let site = snapshot.site
         let monitors = alertingMonitors
@@ -154,6 +174,9 @@ final class ProdStore: ObservableObject {
             if let monitor = monitors.first { return DatadogConfig.monitorURL(site: site, id: monitor.id) }
             if let incident = snapshot.incidents.first { return DatadogConfig.incidentURL(site: site, incident: incident) }
         }
+        // Nothing alerting and one Watchdog story: that story, on the org's own site.
+        if monitors.isEmpty, snapshot.incidents.isEmpty, snapshot.watchdog.count == 1, let story = snapshot.watchdog.first,
+           let url = Watchdog.storyURL(site: site, id: story.id) { return url }
         return DatadogConfig.monitorsListURL(site: site, query: snapshot.monitorQuery)
     }
 
@@ -219,6 +242,7 @@ final class ProdStore: ObservableObject {
     func setLooking(_ looking: Bool) {
         isLooking = looking
         if looking, !unseen.isEmpty { unseen = [] }
+        if looking, !unseenNews.isEmpty { unseenNews = [] }
     }
 
     // MARK: The banner
@@ -270,6 +294,67 @@ final class ProdStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
+    // MARK: Deploy checks
+
+    /// The sessions that pushed or deployed (every 0.5 s, from the session store).
+    func setSessions(_ sessions: [SessionState]) {
+        let next = sessions.filter { $0.shippedAt != nil }.map { (folder: $0.cwd, shippedAt: $0.shippedAt) }
+        if next.count != pushed.count || zip(next, pushed).contains(where: { $0.folder != $1.folder || $0.shippedAt != $1.shippedAt }) {
+            pushed = next
+            updatePushes()
+        }
+    }
+
+    /// Tells the source which linked services pushed in the last 20 minutes. A folder's repository
+    /// is asked of git (off the main thread) only for a session that pushed, and again after 5 minutes.
+    private func updatePushes() {
+        guard let source else { return }
+        let config = BuildsConfig.current?.datadog
+        let services = config?.services ?? [:]
+        let now = Date().timeIntervalSince1970
+        let live = pushed.filter { $0.shippedAt.map { DeployWindow.isOpen(pushedAt: $0, now: now) } == true }
+        if !services.isEmpty, !resolving {
+            let folders = Array(Set(live.map(\.folder).filter { !$0.isEmpty && now - (repos[$0]?.at ?? 0) > 300 })).sorted()
+            if !folders.isEmpty {
+                resolving = true
+                Task {
+                    let found = await git.resolve(folders)
+                    resolving = false
+                    let at = Date().timeIntervalSince1970
+                    for folder in folders { repos[folder] = (found[folder]?.repo, at) }
+                    updatePushes()
+                }
+            }
+        }
+        let pushes = DeployRepo.pushes(sessions: live, repos: repos.compactMapValues(\.repo), services: services,
+                                       hidden: Set(config?.hiddenServices ?? []), now: now)
+        guard pushes != pushesSent else { return }
+        pushesSent = pushes
+        Task { await source.setPushes(pushes) }
+    }
+
+    /// A deploy that looks worse, or a Watchdog story, that is new: unseen until the notch is looked
+    /// at. The first Watchdog answer after launch is history.
+    private func updateNews(_ next: ProdSnapshot) {
+        var keys: Set<String> = []
+        for report in next.deploys where report.isWorse && now - report.at < DeployReport.keepFor {
+            if let version = report.version { keys.insert("deploy:\(report.service):\(version)") }
+        }
+        for story in next.watchdog { keys.insert("watchdog:\(story.id)") }
+        if next.watchdogAt > 0, !watchdogSeen {
+            watchdogSeen = true
+            announced.formUnion(keys.filter { $0.hasPrefix("watchdog:") })
+        }
+        let fresh = keys.subtracting(announced)
+        announced.formUnion(fresh)
+        if !fresh.isEmpty, !isLooking {
+            unseenNews.formUnion(fresh)
+            for key in fresh { noteBuildLog("prod: \(key.hasPrefix("deploy:") ? "deploy looks worse" : "watchdog story")") }
+        }
+        let kept = unseenNews.intersection(keys)
+        if kept != unseenNews { unseenNews = kept }
+    }
+
     // MARK: Snapshots
 
     private func take(_ next: ProdSnapshot) {
@@ -280,8 +365,12 @@ final class ProdStore: ObservableObject {
             trackedFor = identity
             engine.reset()
             unseen = []
+            unseenNews = []
+            announced = []
+            watchdogSeen = false
         }
         if next != snapshot { snapshot = next }
+        updateNews(next)
         let events = engine.take(next, now: now, reminders: alertPrefs.reminder)
         // The log gets kinds and ids only, never a monitor's or an incident's name.
         for event in events {

@@ -192,12 +192,14 @@ struct PRsChip: View {
     @ObservedObject var controller: NotchController
     @ObservedObject var hover: HoverHub
     private static let zone = "prs-chip"
+    /// `--preview --prs-hover`: the card stays open, for a screenshot.
+    static let cardPinned = CommandLine.arguments.contains("--preview") && CommandLine.arguments.contains("--prs-hover")
     @State private var chipHeight: CGFloat = 18
 
     var body: some View {
         let isOpen = controller.openPanel == NotchController.pullRequestsPanel
         let quiet = reviews.isQuietSetup
-        let isHovered = hover.hovered == Self.zone
+        let isHovered = hover.hovered == Self.zone || PRsChip.cardPinned
         Button {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
                 controller.openPanel = isOpen ? nil : NotchController.pullRequestsPanel

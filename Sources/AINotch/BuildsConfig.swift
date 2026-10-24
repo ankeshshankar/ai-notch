@@ -76,6 +76,16 @@ struct BuildsConfig: Equatable, Sendable {
         /// An incident search query; nil leaves incidents out.
         var incidents: String?
         var health: [Health]
+        /// Repository (lowercased "workspace/repo", the repo name, or its folder name) → the Datadog
+        /// service it deploys as. A repo with no entry gets no deploy check.
+        var services: [String: DeployLink] = [:]
+        /// Services left out of Prod entirely: monitors, incidents, deploy checks, Watchdog (lowercased).
+        /// "leads*" is "leads" and every "leads-…"; a plain name is that service alone.
+        var hiddenServices: [String] = Datadog.defaultHidden
+        /// Read Datadog Watchdog stories; on unless `"watchdog": false`.
+        var watchdog = true
+
+        static let defaultHidden = ["leads*"]
     }
 
     var eas: EAS?
@@ -228,8 +238,25 @@ struct BuildsConfig: Equatable, Sendable {
                                                  unit: string(entry["unit"]) ?? "", scale: number(entry["scale"]) ?? 1,
                                                  amber: number(entry["amber"]), window: (number(entry["minutes"]) ?? 15) * 60))
                 }
-                config.datadog = Datadog(site: DatadogConfig.domain(string(datadog["site"]) ?? "datadoghq.com"),
-                                         monitors: monitors, incidents: incidents, health: health)
+                var parsed = Datadog(site: DatadogConfig.domain(string(datadog["site"]) ?? "datadoghq.com"),
+                                     monitors: monitors, incidents: incidents, health: health)
+                // services: { "<repo>": "<service>" } or { "<repo>": { "service": "...", "operation": "express.request" } }.
+                for (repo, value) in (datadog["services"] as? [String: Any] ?? [:]) {
+                    let entry = value as? [String: Any]
+                    let service = (entry?["service"] ?? value) as? String
+                    let operation = entry?["operation"] as? String
+                    guard let service = service.flatMap(DeployLink.clean), !repo.isEmpty,
+                          operation == nil || operation.flatMap(DeployLink.clean) != nil else {
+                        config.problems.append("datadog services \(repo) needs a service name")
+                        continue
+                    }
+                    parsed.services[repo.lowercased()] = DeployLink(service: service, operation: operation.flatMap(DeployLink.clean) ?? DeployLink.defaultOperation)
+                }
+                if let hidden = datadog["hiddenServices"] as? [Any] {
+                    parsed.hiddenServices = hidden.compactMap(string).map { $0.lowercased() }
+                }
+                parsed.watchdog = datadog["watchdog"] as? Bool ?? true
+                config.datadog = parsed
             } else {
                 config.problems.append("datadog needs monitors (a monitor search query)")
             }

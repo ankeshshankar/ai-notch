@@ -607,14 +607,14 @@ it up; without it the chip stays hidden.
      seconds into ms), `amber` (in the shown unit) and `minutes` (the window, 15 by default).
 
 2. Setup → Prod → **Sign in with Datadog**. Your browser opens Datadog's sign-in for the `site`
-   in `builds.json`; approve AI Notch there (it asks only for `monitors_read`, `incident_read` and
-   `timeseries_query`) and the tab says you can close it. Setup then shows "Signed in as <your
+   in `builds.json`; approve AI Notch there (it asks only for `monitors_read`, `incident_read`,
+   `timeseries_query`, `apm_read` and `events_read`) and the tab says you can close it. Setup then shows "Signed in as <your
    organization>", and the token renews by itself (see [Signing in](#signing-in-with-datadog)).
 
    Or, instead, service-account keys (Setup → Prod → **Or use service-account keys**): a Datadog
    admin creates a service account (Organization Settings → Service Accounts →
    New Service Account, role Datadog Read Only Role), opens it and adds an application key (New
-   Key) scoped to `monitors_read`, `incident_read` and `timeseries_query`, and an API key
+   Key) scoped to `monitors_read`, `incident_read`, `timeseries_query`, `apm_read` and `events_read`, and an API key
    (Organization Settings → API Keys → New Key). Copy each key, then run its command in Terminal;
    it reads the key from the clipboard and clears it (typing a secret at the `-w` prompt keeps
    only its first 128 characters):
@@ -633,8 +633,15 @@ token, else the headers `DD-API-KEY` and `DD-APPLICATION-KEY`; the sign-in wins 
   locked: its status facets colour the chip, its page names what alerts.
 - `GET /api/v2/incidents/search` every 3 minutes (a public beta API).
 - `POST /api/v2/query/scalar`, one request per number, every 5 minutes, not while locked.
+- `GET /api/v2/events` with `source:(watchdog OR change_tracking)` every 15 minutes, not while
+  locked: Watchdog's stories and APM deployment events in one request.
+- Only in the 20 minutes after a push from a linked repo ([Deploy check](#deploy-check)):
+  `POST /api/v2/query/timeseries` for the linked service every minute, and `POST
+  /api/v2/query/scalar` on its error spans every 3 minutes.
 
-That is about 104 requests an hour with two numbers (40 while locked), under a hard cap of 150.
+That is about 108 requests an hour with two numbers (40 while locked); the deploy check adds at
+most 36 more an hour (it gets what is left under the cap, less a reserve of 6), so the worst case
+is 144, under a hard cap of 150 (the first error read after a push costs two requests, one for the stretch before it). With nothing pushed it adds nothing but Watchdog's 4.
 Every answer's `X-RateLimit-*` headers are read: with a tenth or less of a window left, that kind
 of request waits for the reset; a 429 waits for it too and halves the pace for 15 minutes. With
 the sign-in, a 401 renews the token once and sends the request again; a 403 on the monitor search
@@ -644,6 +651,67 @@ again every minute, so re-saved keys are picked up by themselves. A 403 on incid
 numbers names the missing scope and is tried again an hour later. The keys are read through
 `/usr/bin/security` and go only into the request headers, never to a file or a log; the requests
 follow no redirects.
+
+#### Deploy check
+
+After you push, the Prod hover card says whether the new version of that service is worse than the
+one before it, for prod only (`env:prod` and `env:production` count as one environment):
+
+```
+orders · v1.4.2 vs v1.4.1 · 12m ago
+errors 0.4→2.1% ▲ · p95 180→210ms ▲ · 120→118/min
+New on v1.4.2:
+TypeError · GET /orders/{id} · 17×
+Deploys
+v1.4.2 · 12m ago
+```
+
+The numbers stay on one line, and only the worse parts are red (better ones green).
+
+- **The verdict** compares the last 15 minutes of the new version (at least 20 requests; until
+  then it says "collecting") with the same length of the version before it, from the APM trace
+  metrics by `version`. Worse is the error rate up by half a point and half as much again, p95 up
+  by 15% and 20 ms, or the request rate down to 40% of a service that had some.
+- **Since push**: many services report one constant version (`1.0.0`). When the version did not
+  change after the push, the card compares the time since the push with an equal stretch before it
+  ("since push · 14m vs 14m before"), with the same numbers; it needs two 5-minute buckets, until
+  then it says "collecting". A version tag is not needed for it.
+- **New on vX** (or "New since the push") lists up to 3 error types and resources (`@error.type`,
+  `resource_name`) the new version has and the previous one did not (since the push: seen after it
+  and not in the stretch before), from the error spans (`@version` is the span facet).
+- **Deploys** is the service's feed of versions going live in the last day, newest first (a
+  rollback counts; a version seen for one bucket does not).
+- **A collapsed chip** (a triangle in the wing) shows when a deploy looks worse; opening the Prod
+  card clears it. The card keeps the check for an hour.
+- **Which service**: a `services` map in `builds.json`, repo to Datadog service. A repo with no
+  entry gets no deploy check. The key is `workspace/repo`, the repo name or the folder name:
+
+  ```json
+  "services": { "acme/orders-api": "orders",
+                "web": { "service": "storefront", "operation": "express.request" } }
+  ```
+
+  `operation` is the trace metric's name (`http.request` by default: `trace.http.request.hits`);
+  frameworks differ (`express.request`, `fastapi.request`), so set it per service when the card
+  says "No prod data for trace.<operation>". A plain string works too. It costs no request.
+- **Only after a push**: nothing here is read until a session on a linked repo pushes or
+  deploys, and it stops 20 minutes later (each new push starts it again).
+- **Sign in again to see deploy checks**: a sign-in made before this version lacks `apm_read`;
+  sign in again from Setup. Keys need `apm_read` too.
+
+**Watchdog.** Datadog's ongoing Watchdog stories for prod (one per title and service) show in the
+hover card, and as a chip in the collapsed wing while one is new; a click on the Prod chip opens
+the story when it is the only thing to see (on your org's own Datadog site). It is read every
+15 minutes, with `events_read` ("Sign in again to see Watchdog" without it). `"watchdog": false`
+in the `datadog` part turns it off. The same request brings the APM deployment events ("New APM
+Deployment Version: x"), which join the Deploys list of their service at no extra cost.
+
+**Hidden services.** `"hiddenServices": ["leads*"]` (the default) hides a service everywhere in
+Prod: `leads*` is the family (`leads` and anything starting `leads-`), a plain name matches that
+service only. A monitor is hidden when a `service:` tag, its scope or a `service:` in its query
+names one (many have no service tag), so it leaves the counts, the list and the notifications;
+incidents naming one are hidden; a Watchdog story is hidden by its tag or by the name in its title;
+and the service gets no deploy check. `[]` hides nothing.
 
 #### Signing in with Datadog
 

@@ -7,7 +7,9 @@ import Foundation
 //
 // Endpoints (Datadog's OpenAPI spec): GET /api/v1/monitor/search (monitors_read),
 // GET /api/v2/incidents/search (incident_read, public beta), POST /api/v2/query/scalar
-// (timeseries_query). With "Sign in with Datadog" (DatadogAuth.swift) a bearer token, else the
+// (timeseries_query; with spans, apm_read), POST /api/v2/query/timeseries (timeseries_query),
+// GET /api/v2/events (events_read). The last three are the deploy checks and Watchdog
+// (DeployCheck.swift). With "Sign in with Datadog" (DatadogAuth.swift) a bearer token, else the
 // headers DD-API-KEY and DD-APPLICATION-KEY.
 
 enum DatadogConfig {
@@ -93,11 +95,11 @@ enum DatadogConfig {
     /// The Datadog side, for an admin: a service account and its keys.
     static let adminSteps = [
         "Organization Settings → Service Accounts → New Service Account, role Datadog Read Only Role.",
-        "Open it → New Key (an application key). In the key's panel, edit its scopes to monitors_read, incident_read and timeseries_query.",
+        "Open it → New Key (an application key). In the key's panel, edit its scopes to monitors_read, incident_read, timeseries_query, apm_read and events_read.",
         "Organization Settings → API Keys → New Key.",
     ]
 
-    static let setupHelp = "Not connected. Sign in with Datadog in Setup → Prod, or have a Datadog admin create a service account with a read-only application key (monitors_read, incident_read, timeseries_query) and an API key and store both in the Keychain as \(keyService) (accounts \(apiKeyAccount) and \(appKeyAccount)). Setup lists the steps."
+    static let setupHelp = "Not connected. Sign in with Datadog in Setup → Prod, or have a Datadog admin create a service account with a read-only application key (monitors_read, incident_read, timeseries_query, apm_read, events_read) and an API key and store both in the Keychain as \(keyService) (accounts \(apiKeyAccount) and \(appKeyAccount)). Setup lists the steps."
 }
 
 struct ProdMonitor: Equatable, Sendable {
@@ -105,6 +107,36 @@ struct ProdMonitor: Equatable, Sendable {
     var name: String
     /// Alert, Warn, No Data, OK, Ignored, Skipped, Unknown.
     var status: String
+    /// The monitor's tags and scopes ("service:api", "env:production"), as the search lists them.
+    var tags: [String] = []
+    /// The monitor's own query: most carry no service tag, the service is only inside it.
+    var query = ""
+}
+
+extension ProdMonitor {
+    /// The monitors in a search answer's list, split into those shown and those of a hidden service.
+    static func parse(_ list: [[String: Any]], hidden: Set<String>) -> (kept: [ProdMonitor], dropped: [ProdMonitor]) {
+        var kept: [ProdMonitor] = [], dropped: [ProdMonitor] = []
+        for item in list {
+            guard let id = (item["id"] as? NSNumber)?.int64Value else { continue }
+            let monitor = ProdMonitor(id: id, name: item["name"] as? String ?? "Monitor \(id)", status: item["status"] as? String ?? "Unknown",
+                                      tags: ((item["tags"] as? [String]) ?? []) + ((item["scopes"] as? [String]) ?? []),
+                                      query: item["query"] as? String ?? "")
+            if monitor.isHidden(hidden) { dropped.append(monitor) } else { kept.append(monitor) }
+        }
+        return (kept, dropped)
+    }
+
+    /// The monitor belongs to a service `hidden` names: a tag or scope `service:<name>`, or a
+    /// `service:<name>` inside its query.
+    func isHidden(_ hidden: Set<String>) -> Bool {
+        if hidden.isEmpty { return false }
+        let fromTags = tags.compactMap { tag -> String? in
+            let lower = tag.lowercased()
+            return lower.hasPrefix("service:") ? String(lower.dropFirst(8)) : nil
+        }
+        return (fromTags + DeployHidden.services(inQuery: query)).contains { DeployHidden.matches($0, hidden) }
+    }
 }
 
 struct ProdIncident: Equatable, Sendable {
@@ -177,6 +209,17 @@ struct ProdSnapshot: Equatable, Sendable {
     var numbersAt: Double = 0
     var numbers: [ProdNumber] = []
     var numbersNote: String?
+    /// builds.json has a `services` map: deploy checks are on.
+    var deployOn = false
+    /// The linked services' deploy checks, read in the 20 minutes after a push (kept an hour).
+    var deploys: [DeployReport] = []
+    /// Why deploy checks show nothing ("Sign in again to see deploy checks").
+    var deployNote: String?
+    var watchdogOn = false
+    var watchdogAt: Double = 0
+    /// Watchdog stories from the last hour.
+    var watchdog: [WatchdogStory] = []
+    var watchdogNote: String?
     var requestsLastHour = 0
 
     var alertCount: Int { statusCounts["Alert"] ?? monitors.filter { $0.status == "Alert" }.count }
@@ -206,11 +249,17 @@ private enum DatadogHTTP {
 ///
 /// - monitors every 60 s (every 3 minutes while the screen is locked),
 /// - incidents every 3 minutes,
-/// - the numbers every 5 minutes, one request each, not while locked.
+/// - the numbers every 5 minutes, one request each, not while locked,
+/// - Watchdog every 15 minutes, not while locked,
+/// - a linked service's deploy check only in the 20 minutes after a push from its repo: the version
+///   series every minute, the new errors every 3 minutes, within an hourly allowance (DeployBudget).
 ///
-/// About 104 requests an hour unlocked with two numbers, 40 locked; a hard cap of 150.
+/// About 108 requests an hour unlocked with two numbers, 144 at the very worst with deploy checks
+/// busy; a hard cap of 150.
 actor DatadogSource {
-    enum Kind: String, CaseIterable { case monitors, incidents, numbers }
+    enum Kind: String, CaseIterable { case monitors, incidents, numbers, watchdog, deploys, errors }
+    /// The kinds on a steady pace; the deploy kinds follow pushes (tickDeploys).
+    private static let steady: [Kind] = [.monitors, .incidents, .numbers, .watchdog]
 
     /// The credential in use: the Datadog sign-in (preferred), or the API and application keys.
     private enum Via: Equatable { case signIn, keys }
@@ -233,6 +282,19 @@ actor DatadogSource {
     private var noAccessUntil: [Kind: Double] = [:]
     private var slowUntil: Double = 0
     private var requests: [Double] = []
+    /// Deploy checks: when each linked service last pushed (set by the app), what was read of it,
+    /// and the requests they made in the last hour (kept inside DeployBudget).
+    private var pushes: [String: Double] = [:]
+    private var lastSeries: [String: Double] = [:]
+    private var lastErrors: [String: Double] = [:]
+    private var reports: [String: DeployReport] = [:]
+    private var deployRequests: [Double] = []
+    /// Why deploy checks show nothing, per kind of request.
+    private var notes = DeployNotes()
+    /// Datadog's deployment events (from the Watchdog request), and the error spans of the 20
+    /// minutes before each push (read once per push).
+    private var deployEvents: [DeployEvent] = []
+    private var errorsBefore: [String: (pushedAt: Double, rows: [DeployErrors.Row])] = [:]
     private var loop: Task<Void, Never>?
     private var countLoggedAt: Double = 0
 
@@ -273,6 +335,8 @@ actor DatadogSource {
         case .monitors: return (locked ? 180 : 60) * slow
         case .incidents: return 180 * slow
         case .numbers: return locked ? nil : 300 * slow
+        case .watchdog: return locked ? nil : DeployPlanner.watchdogEvery * slow
+        case .deploys, .errors: return nil
         }
     }
 
@@ -290,6 +354,8 @@ actor DatadogSource {
             }
             self.config = config
             fetchedAt = [:]
+            lastSeries = [:]
+            lastErrors = [:]
         }
         guard let config else {
             snapshot = ProdSnapshot()
@@ -300,6 +366,10 @@ actor DatadogSource {
         snapshot.incidentsOn = config.incidents != nil
         if config.incidents == nil { snapshot.incidents = []; snapshot.incidentsNote = nil }
         if config.health.isEmpty { snapshot.numbers = []; snapshot.numbersNote = nil }
+        snapshot.deployOn = !config.services.isEmpty
+        snapshot.watchdogOn = config.watchdog
+        if !config.watchdog { snapshot.watchdog = []; snapshot.watchdogNote = nil }
+        if config.services.isEmpty { snapshot.deploys = []; snapshot.deployNote = nil; notes = DeployNotes(); reports = [:] }
 
         // The sign-in first: an in-memory check, no request. Without one (or once it ended),
         // the keys as before.
@@ -350,10 +420,12 @@ actor DatadogSource {
 
         let locked = BuildPolling.isScreenLocked
         requests.removeAll { now - $0 > 3600 }
-        for kind in Kind.allCases {
+        let scopes = await checkScopes(config)
+        for kind in Self.steady {
             guard via != nil else { break }
             if kind == .incidents, config.incidents == nil { continue }
             if kind == .numbers, config.health.isEmpty { continue }
+            if kind == .watchdog, !config.watchdog || !scopes.watchdog { continue }
             guard let every = interval(kind, locked: locked) else { continue }
             if let until = noAccessUntil[kind], now < until { continue }
             if now < holdUntil[kind] ?? 0 { continue }
@@ -370,8 +442,11 @@ actor DatadogSource {
             case .monitors: await fetchMonitors(config)
             case .incidents: await fetchIncidents(config)
             case .numbers: await fetchNumbers(config)
+            case .watchdog: await fetchWatchdog(config)
+            case .deploys, .errors: break
             }
         }
+        if scopes.deploys { await tickDeploys(config, locked: locked) }
         publish()
         logCountIfDue()
     }
@@ -414,6 +489,8 @@ actor DatadogSource {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         requests.append(now)
+        // Every deploy-check request counts against its own allowance, a renewed-token retry too.
+        if kind == .deploys || kind == .errors { deployRequests.append(now) }
         let started = Date()
         guard let (data, response) = try? await DatadogHTTP.session.data(for: request),
               let http = response as? HTTPURLResponse else {
@@ -462,8 +539,13 @@ actor DatadogSource {
             return nil
         case 403:
             noAccessUntil[kind] = now + 3600
-            let scope = kind == .incidents ? "incident_read" : "timeseries_query"
-            if kind == .incidents { snapshot.incidentsNote = "needs \(scope)" } else { snapshot.numbersNote = "needs \(scope)" }
+            let scope = Self.scope(kind)
+            switch kind {
+            case .incidents: snapshot.incidentsNote = "needs \(scope)"
+            case .deploys, .errors: setNote(kind, bearer != nil && kind == .errors ? DeployScopes.errorsMissing : bearer != nil ? DeployScopes.deployMissing : "needs \(scope)")
+            case .watchdog: snapshot.watchdogNote = bearer != nil ? DeployScopes.watchdogMissing : "needs \(scope)"
+            default: snapshot.numbersNote = "needs \(scope)"
+            }
             noteBuildLog("datadog: 403 on \(url.path), \(bearer != nil ? "the sign-in" : "the application key") lacks \(scope); tried again in an hour")
             return nil
         case 429:
@@ -479,6 +561,10 @@ actor DatadogSource {
                 snapshot.numbersNote = "query refused: \(message ?? "400")"
             } else if http.statusCode == 400, kind == .incidents {
                 snapshot.incidentsNote = "query refused: \(message ?? "400")"
+            } else if http.statusCode == 400, kind == .deploys || kind == .errors {
+                setNote(kind, "query refused: \(message ?? "400")")
+            } else if http.statusCode == 400, kind == .watchdog {
+                snapshot.watchdogNote = "query refused: \(message ?? "400")"
             } else {
                 snapshot.problem = SourceStatus(text: http.statusCode == 400 ? "query refused" : "Datadog error \(http.statusCode)",
                                                 help: "\(url.path) answered \(http.statusCode)\(message.map { ": \($0)" } ?? ""). Tried again on the next poll.")
@@ -546,16 +632,17 @@ actor DatadogSource {
         for facet in ((object["counts"] as? [String: Any])?["status"] as? [[String: Any]]) ?? [] {
             if let name = facet["name"] as? String, let count = (facet["count"] as? NSNumber)?.intValue { counts[name] = count }
         }
-        let monitors = list.compactMap { item -> ProdMonitor? in
-            guard let id = (item["id"] as? NSNumber)?.int64Value else { return nil }
-            return ProdMonitor(id: id, name: item["name"] as? String ?? "Monitor \(id)", status: item["status"] as? String ?? "Unknown")
-        }
+        // A hidden service's monitors (builds.json `hiddenServices`, "leads" unless it says
+        // otherwise) are dropped here, and taken off the status counts the badge reads.
+        let hidden = Set(config.hiddenServices)
+        let (monitors, dropped) = ProdMonitor.parse(list, hidden: hidden)
         if counts.isEmpty { for monitor in monitors { counts[monitor.status, default: 0] += 1 } }
+        else { for monitor in dropped { counts[monitor.status] = max(0, (counts[monitor.status] ?? 0) - 1) } }
         let rank = ["Alert": 0, "Warn": 1, "No Data": 2]
         snapshot.monitors = monitors.filter { rank[$0.status] != nil }
             .sorted { (rank[$0.status] ?? 9, $0.name) < (rank[$1.status] ?? 9, $1.name) }
         snapshot.statusCounts = counts
-        snapshot.monitorTotal = ((object["metadata"] as? [String: Any])?["total_count"] as? NSNumber)?.intValue ?? monitors.count
+        snapshot.monitorTotal = max(0, (((object["metadata"] as? [String: Any])?["total_count"] as? NSNumber)?.intValue ?? list.count) - dropped.count)
         snapshot.monitorsAt = now
         snapshot.access = .ok
         snapshot.problem = nil
@@ -573,11 +660,15 @@ actor DatadogSource {
             snapshot.incidentsNote = "unexpected answer"
             return
         }
+        // A hidden service's incidents (builds.json `hiddenServices`) are dropped: by the service
+        // the incident's fields name, or, with none, a title that names it.
+        let hidden = Set(config.hiddenServices)
         snapshot.incidents = list.compactMap { wrapper -> ProdIncident? in
             guard let data = wrapper["data"] as? [String: Any], let id = data["id"] as? String else { return nil }
             let attributes = data["attributes"] as? [String: Any] ?? [:]
             let state = (attributes["state"] as? String ?? "active").lowercased()
             guard state != "resolved" else { return nil }
+            guard !DeployHidden.incident(attributes, hidden: hidden) else { return nil }
             return ProdIncident(id: id, publicId: (attributes["public_id"] as? NSNumber)?.intValue,
                                 title: (attributes["title"] as? String)?.nonEmpty ?? "Incident",
                                 severity: (attributes["severity"] as? String).flatMap { $0 == "UNKNOWN" ? nil : $0 },
@@ -625,6 +716,174 @@ actor DatadogSource {
             snapshot.numbersAt = now
             if numbers.allSatisfy({ $0.value != nil }) { snapshot.numbersNote = nil }
         }
+    }
+
+    // MARK: Watchdog
+
+    /// One events request for both: Watchdog's active stories and Datadog's deployment events (the
+    /// deploys list), without the hidden services and the other environments.
+    private func fetchWatchdog(_ config: BuildsConfig.Datadog) async {
+        guard let url = url("/api/v2/events", Watchdog.items(now: now)), let data = await send(.watchdog, url) else { return }
+        let hidden = Set(config.hiddenServices)
+        guard let stories = Watchdog.parse(data, hidden: hidden, now: now) else {
+            snapshot.watchdogNote = "unexpected answer"
+            return
+        }
+        deployEvents = Watchdog.parseDeploys(data, hidden: hidden) ?? []
+        snapshot.watchdog = stories
+        snapshot.watchdogAt = now
+        snapshot.watchdogNote = nil
+    }
+
+    // MARK: Deploy checks
+
+    private static func scope(_ kind: Kind) -> String {
+        switch kind {
+        case .monitors: return "monitors_read"
+        case .incidents: return "incident_read"
+        case .errors: return "apm_read"
+        case .watchdog: return "events_read"
+        case .numbers, .deploys: return "timeseries_query"
+        }
+    }
+
+    private func setNote(_ kind: Kind, _ text: String) {
+        notes.set(kind.rawValue, text)
+        snapshot.deployNote = notes.text
+    }
+
+    /// A kind's note goes only when that kind succeeds.
+    private func clearNote(_ kind: Kind) {
+        notes.clear(kind.rawValue)
+        snapshot.deployNote = notes.text
+    }
+
+    /// The app tells which linked services pushed, and when (the last push of any session on
+    /// that repo). A new push starts the service's 20 minutes again and is read at once.
+    func setPushes(_ next: [String: Double]) {
+        for (service, at) in next where at > (pushes[service] ?? 0) { lastSeries[service] = nil }
+        pushes = next
+    }
+
+    /// With the Datadog sign-in, whether it was granted apm_read (deploy checks) and events_read
+    /// (Watchdog). A sign-in made before they were asked for lacks them: a note says so, and
+    /// that kind is not asked. With keys, Datadog's own 403 tells.
+    private func checkScopes(_ config: BuildsConfig.Datadog) async -> (deploys: Bool, watchdog: Bool) {
+        var deploys = !config.services.isEmpty, watchdog = config.watchdog
+        guard via == .signIn, let granted = await DatadogAuth.shared.grantedScopes(site: config.site) else { return (deploys, watchdog) }
+        if deploys {
+            if DeployScopes.note(granted: granted, needs: "apm_read", message: DeployScopes.deployMissing) != nil {
+                deploys = false
+                setNote(.deploys, DeployScopes.deployMissing)
+            } else if notes.note(Kind.deploys.rawValue) == DeployScopes.deployMissing {
+                clearNote(.deploys)
+            }
+        }
+        if watchdog {
+            if DeployScopes.note(granted: granted, needs: "events_read", message: DeployScopes.watchdogMissing) != nil {
+                watchdog = false
+                snapshot.watchdogNote = DeployScopes.watchdogMissing
+            } else if snapshot.watchdogNote == DeployScopes.watchdogMissing {
+                snapshot.watchdogNote = nil
+            }
+        }
+        return (deploys, watchdog)
+    }
+
+    /// Reads what is due for the services pushed to in the last 20 minutes, inside the hour's
+    /// allowance, and not while the screen is locked.
+    private func tickDeploys(_ config: BuildsConfig.Datadog, locked: Bool) async {
+        let now = self.now
+        deployRequests.removeAll { now - $0 > 3600 }
+        let hidden = Set(config.hiddenServices)
+        let links = Dictionary(config.services.values.filter { !DeployHidden.matches($0.service, hidden) }.map { ($0.service, $0) },
+                               uniquingKeysWith: { a, _ in a })
+        reports = reports.filter { links[$0.key] != nil && now - $0.value.at < DeployReport.keepFor }
+        if !locked, via != nil {
+            let compared = reports.filter { $0.value.previous != nil || $0.value.sincePushAt != nil }
+            let beforeNeeded = Set(compared.filter { $0.value.sincePushAt != nil && errorsBefore[$0.key]?.pushedAt != $0.value.sincePushAt }.keys)
+            let due = DeployPlanner.due(pushes: pushes.filter { links[$0.key] != nil }, now: now, lastSeries: lastSeries, lastErrors: lastErrors,
+                                        wantsErrors: Set(compared.keys), beforeNeeded: beforeNeeded, slow: now < slowUntil ? 2 : 1,
+                                        used: deployRequests.count, allowance: DeployBudget.allowance(numbers: config.health.count, cap: Self.hourlyCap))
+            for item in due {
+                let kind: Kind = item.kind == .series ? .deploys : .errors
+                guard let link = links[item.service], via != nil, requests.count < Self.hourlyCap,
+                      now >= noAccessUntil[kind] ?? 0, now >= holdUntil[kind] ?? 0 else { continue }
+                if item.kind == .series { await fetchSeries(link) } else { await fetchErrors(link) }
+            }
+        }
+        // What shows: each service's report with Datadog's deployment events in its deploys list; a
+        // linked service with events and no read yet shows its deploys alone.
+        var shown: [DeployReport] = []
+        for (service, _) in links.sorted(by: { $0.key < $1.key }) {
+            var report = reports[service] ?? DeployReport(service: service, at: now)
+            report.deploys = DeployFeed.merge(report.deploys, events: deployEvents, service: service)
+            if report.verdict != nil || !report.deploys.isEmpty || report.note != nil { shown.append(report) }
+        }
+        snapshot.deploys = shown
+    }
+
+    /// One timeseries request: the deploys list, and the new version against the previous one, or,
+    /// when the version did not change after the push, the time since it against an equal stretch
+    /// before it.
+    private func fetchSeries(_ link: DeployLink) async {
+        lastSeries[link.service] = now
+        guard let url = url("/api/v2/query/timeseries", []), let body = DeployQueries.seriesBody(link, now: now),
+              let data = await send(.deploys, url, body: body) else { return }
+        guard let merged = DeployAnalysis.parse(data) else {
+            setNote(.deploys, "unexpected answer")
+            return
+        }
+        clearNote(.deploys)
+        var report = DeployReport(service: link.service, at: now)
+        if merged.isEmpty {
+            report.note = "No prod data for trace.\(link.operation); set the service's \"operation\" in builds.json"
+        } else {
+            let comparison = DeployAnalysis.compare(merged, pushedAt: pushes[link.service], now: now, interval: DeployQueries.interval)
+            let analysis = comparison.analysis
+            report.version = analysis.current
+            report.sincePushAt = comparison.sincePushAt
+            report.previous = comparison.sincePushAt == nil ? analysis.previous : nil
+            report.changedAt = comparison.sincePushAt == nil ? analysis.changedAt : nil
+            report.deploys = Array(analysis.deploys.prefix(5))
+            report.verdict = comparison.verdict
+            report.note = comparison.note
+            // The errors read before stay while the same comparison is read.
+            if let before = reports[link.service], before.version == report.version, before.previous == report.previous, before.sincePushAt == report.sincePushAt {
+                report.newErrors = before.newErrors
+            }
+        }
+        reports[link.service] = report
+    }
+
+    /// The error spans: the error types the new version has and the previous one has not (needs
+    /// apm_read); or, for a service whose version did not change, the ones since the push that the
+    /// 20 minutes before it did not have. That stretch is read once per push (a second request).
+    private func fetchErrors(_ link: DeployLink) async {
+        lastErrors[link.service] = now
+        guard var report = reports[link.service], via != nil, let url = url("/api/v2/query/scalar", []) else { return }
+        if let pushedAt = report.sincePushAt {
+            if errorsBefore[link.service]?.pushedAt != pushedAt {
+                guard let body = DeployQueries.errorsBody(link, from: pushedAt - DeployWindow.seconds, to: pushedAt, byVersion: false),
+                      let data = await send(.errors, url, body: body) else { return }
+                guard let rows = DeployErrors.parse(data) else { setNote(.errors, "unexpected answer"); return }
+                errorsBefore[link.service] = (pushedAt, rows)
+            }
+            guard let before = errorsBefore[link.service]?.rows,
+                  let body = DeployQueries.errorsBody(link, from: pushedAt, to: now, byVersion: false),
+                  let data = await send(.errors, url, body: body) else { return }
+            guard let rows = DeployErrors.parse(data) else { setNote(.errors, "unexpected answer"); return }
+            report.newErrors = DeployErrors.newSince(after: rows, before: before)
+        } else if let version = report.version, let previous = report.previous {
+            guard let body = DeployQueries.errorsBody(link, from: (report.changedAt ?? now) - 3600, to: now),
+                  let data = await send(.errors, url, body: body) else { return }
+            guard let rows = DeployErrors.parse(data) else { setNote(.errors, "unexpected answer"); return }
+            report.newErrors = DeployErrors.newOnes(rows, version: version, previous: previous)
+        } else {
+            return
+        }
+        clearNote(.errors)
+        reports[link.service] = report
     }
 
     // MARK: Publishing

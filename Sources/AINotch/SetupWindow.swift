@@ -301,7 +301,7 @@ struct ProdSetupInfo: Equatable {
     /// Not connected, the sign-in ended, or keys Datadog refused.
     var needsKeys = false
 
-    static let about = "The footer's Prod chip: Datadog monitors (a search query from \(BuildsConfig.displayPath), muted ones count as OK), active incidents, and a few numbers, read with your Datadog sign-in (monitors_read, incident_read, timeseries_query) or, without one, a read-only service-account key from the Keychain (\(DatadogConfig.keyService)). Monitors every minute (3 while the screen is locked), incidents every 3 minutes, the numbers every 5 (not while locked): about 100 requests an hour, backing off on Datadog's rate-limit headers. Never mutes or changes anything in Datadog."
+    static let about = "The footer's Prod chip: Datadog monitors (a search query from \(BuildsConfig.displayPath), muted ones count as OK), active incidents, and a few numbers, read with your Datadog sign-in (monitors_read, incident_read, timeseries_query, apm_read, events_read) or, without one, a read-only service-account key from the Keychain (\(DatadogConfig.keyService)). Monitors every minute (3 while the screen is locked), incidents every 3 minutes, the numbers every 5 and Watchdog every 15 (not while locked): about 110 requests an hour, up to 144 in the 20 minutes after a push from a linked repo (the deploy check), never more than 150, backing off on Datadog's rate-limit headers. Never mutes or changes anything in Datadog."
 
     @MainActor static func make(_ prod: ProdStore?) -> ProdSetupInfo {
         guard BuildsConfig.current?.datadog != nil else {
@@ -1161,7 +1161,7 @@ struct SetupView: View {
                     Button("Sign in with Datadog") { auth.signIn() }
                         .controlSize(.small).buttonStyle(.borderedProminent)
                     Text(site).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    InfoMark(text: "Opens Datadog's sign-in in your browser. Approve AI Notch there; it asks only to read monitors, incidents and metrics (monitors_read, incident_read, timeseries_query). The tokens stay in your login Keychain (\(DatadogConfig.keyService), not synced) and renew by themselves for about 30 days.")
+                    InfoMark(text: "Opens Datadog's sign-in in your browser. Approve AI Notch there; it asks only to read monitors, incidents, metrics, traces and Watchdog events (monitors_read, incident_read, timeseries_query, apm_read, events_read). The tokens stay in your login Keychain (\(DatadogConfig.keyService), not synced) and renew by themselves for about 30 days.")
                     Spacer(minLength: 0)
                 case .working(let text):
                     Image(systemName: "hourglass").foregroundStyle(.secondary)
@@ -1247,7 +1247,7 @@ struct SetupView: View {
             }
             HStack(spacing: 8) {
                 Button("Check Again") { SetupWindowController.shared.prod?.recheck() }.controlSize(.small)
-                InfoMark(text: "Both keys stay in your login Keychain (not synced) and are read with /usr/bin/security; they go only into the request headers, never to a file or a log. The application key needs only monitors_read, incident_read and timeseries_query. Typing a key at the interactive -w prompt keeps only its first 128 characters, so the commands read the clipboard. To disconnect: security delete-generic-password -s \(DatadogConfig.keyService) -a \(DatadogConfig.apiKeyAccount), and again with -a \(DatadogConfig.appKeyAccount).")
+                InfoMark(text: "Both keys stay in your login Keychain (not synced) and are read with /usr/bin/security; they go only into the request headers, never to a file or a log. The application key needs only monitors_read, incident_read, timeseries_query, apm_read and events_read. Typing a key at the interactive -w prompt keeps only its first 128 characters, so the commands read the clipboard. To disconnect: security delete-generic-password -s \(DatadogConfig.keyService) -a \(DatadogConfig.apiKeyAccount), and again with -a \(DatadogConfig.appKeyAccount).")
                 Spacer(minLength: 0)
             }
         }

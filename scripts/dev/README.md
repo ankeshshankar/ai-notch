@@ -104,7 +104,12 @@
 - `scripts/make-dmg.sh` lays out the disk image with Finder AppleScript; `scripts/dmg/background.swift`
   draws its 1x/2x background (the icon positions are shared with `make-dmg.sh`).
 - `python3 datadog-stub.py <state.json> [port] [requests.log]` — a stand-in for Datadog's monitor
-  search, incident search and scalar query, in their own JSON shapes; editing the state file plays
+  search, incident search, scalar and timeseries queries (the deploy check's `apm` per service, span
+  errors with an optional `at` (which time range of the spans query a row falls in), `watchdog`
+  stories with a `status`, `deploys` as `change_tracking` events, monitors with `tags` and a
+  `query` (a monitor can name its service only there), incidents with `services`, a `deny` list of
+  paths answered 403), in the shapes seen on a real org (env tags `prod`/`production`, span facets
+  `@version` and `@error.type`); editing the state file plays
   a state change (alert, warn, incident, recovery, `"auth": "401"`, `"rateLimit": true`, a low
   `"remaining"`). Run the app with `CLAUDE_NOTCH_DATADOG_API=http://127.0.0.1:<port>`,
   `CLAUDE_NOTCH_DATADOG_TEST_KEYS_FILE=<file>` (two lines: API key, application key; reread like
@@ -118,6 +123,18 @@
   100`, `"amber": 2`). Notifications need an app bundle outside a temporary folder (macOS refuses
   one under `/tmp` without asking): `.build/<dir>/<Name>.app` with a bundle id of its own, started
   with `open -n --env …`.
+- `AINotch --deploy-check-selfcheck` — the Prod deploy check on made-up Datadog answers: the verdict
+  (worse, better, same, no earlier version, still collecting), new errors against the previous
+  version, the since-push comparison for a constant version (worse, same, collecting, nothing before
+  the push) and its new errors, `prod` and `production` as one env, the deploys feed (a stray
+  bucket, a rollback, deploy events), the `services` map and `hiddenServices` (`leads*` leaves
+  monitors with no tag, incidents, Watchdog stories and pushes), notes kept per kind, polling only
+  inside the 20 minutes after a push, the hourly budget (a three-service simulation stays under the
+  allowance, 144 of 150 worst case with two numbers), the request bodies and the "Sign in again"
+  notes; exits 1 on any failure. `AINotch --preview --prod-hover` keeps the Prod card open for a
+  screenshot; with datadog-stub.py's `apm` and `watchdog` keys, a `services` entry for a session's
+  folder name and a `git push` fed through the hook (so `shippedAt` is set) it shows the card.
+  `--preview --prs-hover` keeps the PRs chip's card open the same way (with bitbucket-stub.py).
 - `AINotch --prod-alerts-selfcheck` — Prod's alerts on made-up snapshots: the first answer as
   history, each transition, No Data silent, partial pages, grouping per poll, flapping and its
   quiet, incidents, the numbers' 2-poll hysteresis, the reminder, snooze, full screen, the

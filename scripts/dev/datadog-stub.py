@@ -8,8 +8,13 @@ Then run the app with
     CLAUDE_NOTCH_DATADOG_TEST_KEYS_FILE=<file with two lines: the API key, the application key>
     CLAUDE_NOTCH_BUILDS_CONFIG=<a builds.json with a datadog part>
 
-It answers the three endpoints the app calls, in Datadog's own shapes (its OpenAPI spec):
-GET /api/v1/monitor/search, GET /api/v2/incidents/search, POST /api/v2/query/scalar. The state
+It answers the endpoints the app calls, in Datadog's own shapes (its OpenAPI spec):
+GET /api/v1/monitor/search, GET /api/v2/incidents/search, GET /api/v2/events (Watchdog stories
+and APM deployment events in one answer),
+POST /api/v2/query/scalar (numbers, and span counts for new errors) and
+POST /api/v2/query/timeseries (the deploy check's hits, errors and p95 by version). The shapes
+are the ones seen on a real org (us5): env tags prod/production, the span facets @version and
+@error.type, Watchdog stories tagged story_type/story_status, deploys as change_tracking events. The state
 file is read on every request, so editing it plays a state change:
 
     {
@@ -17,9 +22,26 @@ file is read on every request, so editing it plays a state change:
       "auth": "ok" | "401" | "403",              force an answer for every request
       "rateLimit": false,                         true: every request gets a 429
       "remaining": 100,                           X-RateLimit-Remaining on success (limit 100)
-      "monitors": [{"id": 1, "name": "API errors", "status": "OK", "muted": false}],
-      "incidents": [{"id": "abc", "public_id": 7, "title": "Checkout down", "severity": "SEV-2", "state": "active"}],
+      "monitors": [{"id": 1, "name": "API errors", "status": "OK", "muted": false,
+                    "tags": ["service:orders"], "query": "avg(last_5m):... {service:orders} > 5"}],
+                                                 a monitor may have no tags and name its service only in "query"
+      "incidents": [{"id": "abc", "public_id": 7, "title": "Checkout down", "severity": "SEV-2", "state": "active",
+                     "services": ["orders"]}],
       "scalar": {"5xx": 0.8, "p95": 0.093},      the value for a query containing that word
+      "apm": {"orders": {                        trace data of one Datadog service, for the deploy check
+          "versions": [{"version": "1.4.1", "env": "prod", "from": -86400, "to": -900,
+                        "hits": 600, "errorRate": 0.004, "p95": 0.18}, ...],   times in seconds from now,
+                                                 hits per 5-minute bucket, p95 in seconds; entries with the
+                                                 same version and env are one series (a constant version
+                                                 can change its numbers over time)
+          "errors": [{"version": "1.4.2", "type": "TypeError", "resource": "GET /cart", "count": 14,
+                      "at": -300}]}},            "at" (seconds from now, optional) decides which time
+                                                 range of the spans query the row falls in
+      "watchdog": [{"id": "w1", "title": "New error logs were detected on orders", "service": "orders",
+                    "env": "production", "minutesAgo": 12, "status": "ongoing"}],   status: story_status tag
+      "deploys": [{"id": "d1", "service": "orders", "version": "1.4.2", "previous": "1.4.1",
+                   "minutesAgo": 15}],           change_tracking events, "New APM Deployment Version: <v>"
+      "deny": ["/api/v2/events"],                paths answered 403 (a token without that scope)
       "timeline": [{"at": 0, "note": "green"}, {"at": 20, "monitors": [...]}, ...]
     }
 
@@ -34,6 +56,7 @@ timeline, each new step is a line too ("step <n> <note>").
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -106,6 +129,9 @@ class Handler(BaseHTTPRequestHandler):
         if auth in ("401", "403"):
             self.answer(int(auth), {"errors": ["Unauthorized" if auth == "401" else "Forbidden"]})
             return False
+        if any(urlparse(self.path).path.startswith(p) for p in s.get("deny", [])):
+            self.answer(403, {"errors": ["Forbidden"]})
+            return False
         keys = s.get("keys")
         if keys and [self.headers.get("DD-API-KEY"), self.headers.get("DD-APPLICATION-KEY")] != keys:
             self.answer(403, {"errors": ["Forbidden"]})
@@ -128,8 +154,9 @@ class Handler(BaseHTTPRequestHandler):
                 counts[m["status"]] = counts.get(m["status"], 0) + 1
             per_page = int(query.get("per_page", ["30"])[0])
             page = [{"id": m["id"], "name": m["name"], "status": m["status"], "type": "query alert",
-                     "org_id": 1, "tags": [], "classification": "metric", "last_triggered_ts": None,
-                     "metrics": [], "notifications": [], "quality_issues": [], "query": "", "scopes": []}
+                     "org_id": 1, "tags": m.get("tags", []), "classification": "metric", "last_triggered_ts": None,
+                     "metrics": [], "notifications": [], "quality_issues": [], "query": m.get("query", ""),
+                     "scopes": m.get("scopes", [])}
                     for m in monitors[:per_page]]
             self.answer(200, {
                 "counts": {"status": [{"count": c, "name": n} for n, c in counts.items()],
@@ -144,19 +171,96 @@ class Handler(BaseHTTPRequestHandler):
                 "incidents": [{"data": {"id": i["id"], "type": "incidents", "attributes": {
                     "title": i["title"], "severity": i.get("severity", "UNKNOWN"), "state": i.get("state", "active"),
                     "public_id": i.get("public_id"), "created": i.get("created", "2026-10-15T10:00:00.000000+00:00"),
-                    "customer_impacted": False}}} for i in incidents],
+                    "customer_impacted": False,
+                    "fields": ({"services": {"type": "multiselect", "value": i["services"]}} if i.get("services") else {})}}}
+                    for i in incidents],
                 "total": len(incidents)}}}, self.rate(s))
+        elif url.path == "/api/v2/events":
+            now = datetime.now(timezone.utc)
+            events = []
+            def stamp(minutes):
+                return (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            for w in s.get("watchdog", []):
+                tags = ["source:watchdog", "story_type:logs_pattern_anomaly", f"story_status:{w.get('status', 'ongoing')}"] \
+                    + ([f"service:{w['service']}"] if w.get("service") else []) \
+                    + ([f"env:{w['env']}"] if w.get("env") else [])
+                events.append({"id": w["id"], "type": "event", "attributes": {
+                    "timestamp": stamp(w.get("minutesAgo", 5)), "tags": tags, "attributes": {"title": w["title"]}}})
+            for d in s.get("deploys", []):
+                tags = ["source:change_tracking", f"service:{d['service']}", f"version:{d['version']}", "env:production"] \
+                    + ([f"previous_version:{d['previous']}"] if d.get("previous") else [])
+                events.append({"id": d["id"], "type": "event", "attributes": {
+                    "timestamp": stamp(d.get("minutesAgo", 5)), "tags": tags,
+                    "attributes": {"title": f"New APM Deployment Version: {d['version']}"}}})
+            events.sort(key=lambda e: e["attributes"]["timestamp"], reverse=True)
+            self.answer(200, {"data": events, "meta": {"page": {}}}, self.rate(s))
         else:
             self.answer(404, {"errors": ["Not found"]})
+
+    def timeseries(self, s, attributes):
+        """hits, errors and p95 per (version, env), 5-minute buckets, one series per formula."""
+        queries = attributes.get("queries", [])
+        text = " ".join(q.get("query", "") for q in queries)
+        service = text.split("service:")[1].replace("}", " ").replace(",", " ").split()[0] if "service:" in text else ""
+        versions = s.get("apm", {}).get(service, {}).get("versions", [])
+        now = time.time()
+        to = int(attributes.get("to", now * 1000) // 1000)
+        start = int(attributes.get("from", (now - 86400) * 1000) // 1000)
+        step = max(1, int(attributes.get("interval", 300000) // 1000))
+        first = start - start % step
+        times = list(range(first, to + 1, step))
+        # Entries with the same version and env are one series: each bucket takes the numbers of the
+        # entry that covers it, null where none does.
+        groups = {}
+        for v in versions:
+            groups.setdefault((v.get("env", "prod"), v["version"]), []).append(v)
+        series, values = [], []
+        for (env, version), entries in groups.items():
+            tags = [f"env:{env}", f"version:{version}"]
+            def at(t, key, fallback):
+                for v in entries:
+                    if now + v.get("from", -86400) <= t < now + v.get("to", 0):
+                        return key(v) if callable(key) else v.get(key, fallback)
+                return None
+            makers = (lambda v: v["hits"], lambda v: v["hits"] * v.get("errorRate", 0), lambda v: v.get("p95", 0.1))
+            for index, make in enumerate(makers):
+                series.append({"group_tags": tags, "query_index": index, "unit": None})
+                values.append([at(t, make, None) for t in times])
+        self.answer(200, {"data": {"type": "timeseries_response", "attributes": {
+            "series": series, "times": [t * 1000 for t in times], "values": values}}}, self.rate(s))
+
+    def span_errors(self, s, query, attributes):
+        """The error spans counted by the group-by facets asked for (@version only when asked),
+        for the spans whose "at" falls between the request's from and to (rows without "at" always)."""
+        text = query.get("search", {}).get("query", "")
+        service = text.split("service:")[1].split(" ")[0] if "service:" in text else ""
+        now = time.time()
+        lo = attributes.get("from", 0) / 1000
+        hi = attributes.get("to", (now + 60) * 1000) / 1000
+        rows = [r for r in s.get("apm", {}).get(service, {}).get("errors", [])
+                if "at" not in r or lo <= now + r["at"] < hi]
+        facets = [g.get("facet") for g in query.get("group_by", [])]
+        columns = []
+        for facet in facets:
+            key = {"@version": "version", "@error.type": "type", "resource_name": "resource"}.get(facet, facet)
+            columns.append({"name": facet, "type": "group", "values": [[r.get(key, "")] for r in rows]})
+        columns.append({"name": "errors", "type": "number", "values": [r["count"] for r in rows]})
+        self.answer(200, {"data": {"type": "scalar_response", "attributes": {"columns": columns}}}, self.rate(s))
 
     def do_POST(self):
         s = state()
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
         if not self.gate(s):
             return
-        if urlparse(self.path).path != "/api/v2/query/scalar":
-            return self.answer(404, {"errors": ["Not found"]})
+        path = urlparse(self.path).path
         attributes = body.get("data", {}).get("attributes", {})
+        if path == "/api/v2/query/timeseries":
+            return self.timeseries(s, attributes)
+        if path != "/api/v2/query/scalar":
+            return self.answer(404, {"errors": ["Not found"]})
+        for q in attributes.get("queries", []):
+            if q.get("data_source") == "spans":
+                return self.span_errors(s, q, attributes)
         text = " ".join(q.get("query", "") for q in attributes.get("queries", []))
         value = None
         for word, v in s.get("scalar", {}).items():

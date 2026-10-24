@@ -15,6 +15,10 @@ enum WingSlot: Equatable {
     case done
     /// A prod alert or incident not seen yet.
     case prodAlert
+    /// A linked service's new version looks worse than the one before, not seen yet.
+    case deployWorse
+    /// A Datadog Watchdog story, not seen yet.
+    case watchdog
     /// A build or run of mine failed, not seen yet.
     case buildFailure
     /// News on pull requests not seen yet (a review request, an approval, changes, comments, a
@@ -25,12 +29,14 @@ enum WingSlot: Equatable {
     case none
 
     static func pick(waiting: Int, vpnDropped: Bool = false, memoryCritical: Bool = false, justDone: Bool, prodAlert: Bool, buildFailure: Bool,
-                     pullRequestNews: Int = 0, subagents: Int, building: Int) -> WingSlot {
+                     pullRequestNews: Int = 0, deployWorse: Bool = false, watchdog: Bool = false, subagents: Int, building: Int) -> WingSlot {
         if waiting > 0 { return .waiting(waiting) }
         if vpnDropped { return .vpnDropped }
         if memoryCritical { return .memoryCritical }
         if justDone { return .done }
         if prodAlert { return .prodAlert }
+        if deployWorse { return .deployWorse }
+        if watchdog { return .watchdog }
         if buildFailure { return .buildFailure }
         if pullRequestNews > 0 { return .pullRequestNews(pullRequestNews) }
         if subagents > 0 { return .subagents(subagents) }
@@ -157,18 +163,31 @@ struct StatusStrip: View {
 
 /// Prod: a dot in the level's colour and the word; beside it the numbers while connected.
 /// Hover lists what is open, a click opens it, right-click snoozes for an hour.
+/// The footer sits below the header, whose hover cards (the PRs chip's) must stay over the footer's
+/// Setup and Quit. Only while the Prod card is open, which grows up over the header, the footer
+/// is lifted above it.
+struct RaisedWhileProdCardOpen: ViewModifier {
+    @ObservedObject var hover: HoverHub
+
+    func body(content: Content) -> some View {
+        content.zIndex(hover.hovered == ProdChip.zone || ProdChip.cardPinned ? 2 : 0)
+    }
+}
+
 struct ProdChip: View {
     @ObservedObject var prod: ProdStore
     var controller: NotchController
     @ObservedObject var hover: HoverHub
-    private static let zone = "prod"
+    static let zone = "prod"
+    static let cardPinned = CommandLine.arguments.contains("--preview") && CommandLine.arguments.contains("--prod-hover")
     /// The chip row's height: the hover card sits this far up, plus a gap.
     @State private var rowHeight: CGFloat = 17
 
     var body: some View {
         let snapshot = prod.snapshot
         let level = prod.level
-        let isHovered = hover.hovered == Self.zone
+        // `--preview --prod-hover`: the card stays open, for a screenshot.
+        let isHovered = hover.hovered == Self.zone || ProdChip.cardPinned
         HStack(spacing: 6) {
             Button {
                 if snapshot.access == .ok { controller.collapse() }
@@ -271,6 +290,7 @@ private struct ProdCard: View {
             }
             let more = incidents.count + monitors.count - Self.maxRows
             if more > 0 { Text("+\(more) more").font(.system(size: 10)).foregroundStyle(Palette.ink3) }
+            if snapshot.access == .ok, prod.greyReason == nil { DeployCardSections(prod: prod) }
             ForEach(notes, id: \.self) { note in
                 Text(note).font(.system(size: 10)).foregroundStyle(Palette.ink3)
             }
@@ -306,7 +326,11 @@ private struct ProdCard: View {
             if snapshot.warnCount > 0 { return "Prod · \(snapshot.warnCount) warning" }
             return "Prod · " + snapshot.numbers.filter(\.isOver).map { "\($0.label) high" }.joined(separator: " · ")
         default:
-            return "Prod · all \(snapshot.monitorTotal) monitors OK"
+            switch snapshot.monitorTotal {
+            case 0: return "Prod · no monitors"
+            case 1: return "Prod · 1 monitor OK"
+            default: return "Prod · all \(snapshot.monitorTotal) monitors OK"
+            }
         }
     }
 
