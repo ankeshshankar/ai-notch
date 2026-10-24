@@ -531,6 +531,30 @@ answered with a 403 once; from then on the lane sends nothing, shows a grey "nee
 read:pullrequest" in Setup and the PRs chip, and looks for a newer token in the Keychain every 10
 minutes (and on Check Again or opening the notch). Pipelines is not affected.
 
+### Board
+
+The **Board** button in the Agents header opens one view of where everything stands: every agent
+session and every pull request of yours, in four groups.
+
+- **Needs you:** a session waiting on a permission prompt or a question, and a pull request of
+  yours with a failed build, a merge conflict, new comments, changes requested, or a merge that
+  cannot happen.
+- **Working:** a session with a turn running.
+- **In review:** your open pull requests waiting on reviewers (build passing or running, no
+  conflict, not yet approved).
+- **Ready to merge:** your pull requests whose merge checks all pass.
+
+A session that is on a pull request is one card with both: its name and status, and the pull
+request's line ("PR #12 · build failed") with Send to agent where there is feedback to act on.
+It goes under the more urgent of the two, so a session waiting on you stays under Needs you even
+when its pull request is ready. A session still working stays under Working while its pull request
+is only in review or ready, since the agent may still change it. A pull request no session is on
+has a card of its own. Drafts with no session are left out. Idle sessions with no pull request sit
+in a collapsed "Idle" line at the bottom. Click a session card to jump to it, a pull request card
+to open it. The Board reads nothing of its own, so it adds no request to the Bitbucket budget, and
+with pull requests off it shows sessions only. On a narrow notch the groups stack; on a wide one they sit
+side by side.
+
 ### The collapsed notch
 
 The right wing shows one thing, the first that applies: a session waiting on you (amber dot and

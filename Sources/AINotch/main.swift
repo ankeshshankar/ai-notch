@@ -107,6 +107,9 @@ if let index = CommandLine.arguments.firstIndex(of: "--chat-title") {
 // Dev checks of the pull-request data layer, never the app: `--pr-selfcheck`, `--pr-watch <s>`.
 PullRequestDev.runIfAsked(CommandLine.arguments)
 
+// Dev check of the Board's sorting, never the app: `--board-selfcheck`.
+BoardDev.runIfAsked(CommandLine.arguments)
+
 // Dev checks of the Datadog sign-in, never the app: `--datadog-auth <command>` (stub or probe).
 DatadogAuthDev.runIfAsked(CommandLine.arguments)
 

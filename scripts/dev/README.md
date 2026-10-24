@@ -57,6 +57,13 @@
   inputs, then a real power assertion made, found in the system's list by name and released
   (also with the setting turned off mid-grace), and the zombie check the session grace uses;
   exits 1 on any failure.
+- `AINotch --board-selfcheck` — the Board's sorting on made-up sessions and pull requests: which
+  group each lands in (a waiting session whose PR is ready, a PR with no session, a session with
+  no PR, a draft, two sessions on one PR), and the status line; exits 1 on any failure.
+  `AINotch --preview --board` opens the preview with the Board open; add `--board-fixtures` to
+  show sample pull requests linked to sessions named `alpha` to `epsilon` (make them with the hook
+  as `scripts/dev/ci-screenshots.sh` does) instead of the real ones. Set
+  `CLAUDE_NOTCH_BUILDS_CONFIG` to a file holding `{}` to keep the preview off Datadog's Keychain item.
 - `AINotch --pr-selfcheck` — the pull-request data layer's pure parts (parsing, what needs you,
   events and the seen-state, merged, declined and ready-to-merge news and their dedup, the budget
   split, a session's pull request: Bitbucket remotes, the link by branch (including `git` in a

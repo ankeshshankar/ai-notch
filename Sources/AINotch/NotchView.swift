@@ -325,6 +325,8 @@ private struct SessionList: View {
     var maxHeight: CGFloat
     /// Each approval card's height, which its row keeps free so the card sits inside it.
     @State private var cardHeights: [String: CGFloat] = [:]
+    /// The height of the approval cards shown above an open panel, which the panel's cap leaves free.
+    @State private var pinnedApprovalsHeight: CGFloat = 0
     @ObservedObject var looks = EffectsPrefs.shared
     /// One column: six rows between agents and pipelines (eight compact). Two columns: as many each.
     private var maxRows: Int { looks.compactRows ? 8 : 6 }
@@ -360,13 +362,25 @@ private struct SessionList: View {
                     scrolling(cap) { pipelinesColumn }
                 }
             } else {
-                scrolling(cap) {
+                // Under an open panel the rows are far below, so a waiting prompt shows above the
+                // panel instead, outside its scrolling: the hook is blocked until it is answered.
+                let pinned = openPanel != nil && !approvals.pending.isEmpty
+                // Three or more prompts scroll inside half the room; the panel gets the rest.
+                if pinned {
+                    scrolling(cap / 2) { pinnedApprovals }
+                        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { if pinnedApprovalsHeight != $0 { pinnedApprovalsHeight = $0 } }
+                        .onDisappear { pinnedApprovalsHeight = 0 }
+                }
+                scrolling(pinned ? max(80, cap - pinnedApprovalsHeight - Self.spacing) : cap) {
                     VStack(alignment: .leading, spacing: Self.spacing) {
                         if openPanel == "Usage" { UsagePanel(usage: store.usage, now: store.now, claudeLimits: store.claudeLimits) }
                         if openPanel == "Code" { CodePanel(lines: store.usage.lines, git: store.gitLines, now: store.now) }
                         if openPanel == NotchController.machinePanel, machine.isOn { MachinePanel(machine: machine, feed: machine.feed) }
                         if openPanel == NotchController.vpnPanel, vpn.isOn { VPNPanel(vpn: vpn, now: store.now) }
                         if openPanel == NotchController.commandsPanel { CommandsPanel(commands: CommandsStore.shared, now: store.now) }
+                        if openPanel == NotchController.boardPanel {
+                            BoardPanel(board: board, links: prLinks, title: { store.title(of: $0) }, controller: controller, now: store.now, isWide: isWide)
+                        }
                         if openPanel == NotchController.pullRequestsPanel, reviews.isOn {
                             PullRequestsPanel(reviews: reviews, controller: controller, now: store.now, isWide: isWide)
                         }
@@ -432,8 +446,8 @@ private struct SessionList: View {
             if builds.showsSection {
                 PipelinesSection(builds: builds, now: store.now, limit: maxRows, controller: controller, part: .rows)
             }
-            // With the PRs panel open above, its rows are there already.
-            if reviews.showsBlock, openPanel != NotchController.pullRequestsPanel {
+            // With the PRs panel or the Board open above, its rows are there already.
+            if reviews.showsBlock, openPanel != NotchController.pullRequestsPanel, openPanel != NotchController.boardPanel {
                 PullRequestsBlock(reviews: reviews, controller: controller, limit: 4, header: builds.showsSection)
             }
         }
@@ -453,12 +467,20 @@ private struct SessionList: View {
         }
     }
 
+    /// What the Board shows: the sessions and my pull requests, sorted from what is already read.
+    /// `--board-fixtures` (with `--preview`) swaps in sample pull requests.
+    private var board: Board {
+        BoardModel.build(sessions: store.sessions, links: BoardFixtures.isOn ? BoardFixtures.links : prLinks.linked,
+                         mine: BoardFixtures.isOn ? BoardFixtures.mine : reviews.mine)
+    }
+
     private var agentsHeader: some View {
         HStack(spacing: 8) {
-            Text("Agents").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
-            Spacer()
-            Text(summary).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1)
+            Text("Agents").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink).fixedSize()
+            Spacer(minLength: 0)
+            Text(summary).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1).minimumScaleFactor(0.8).layoutPriority(1)
             LimitsChip(limits: store.claudeLimits, now: store.now)
+            panelButton(NotchController.boardPanel, icon: "square.grid.2x2.fill")
             panelButton("Usage", icon: "chart.bar.fill")
             panelButton("Code", icon: "chevron.left.forwardslash.chevron.right")
             pinButton
@@ -472,6 +494,20 @@ private struct SessionList: View {
                          alerting: prod.alertingMonitors.first?.name)
     }
 
+    /// Each session's waiting prompt, one card per session, for when a panel is open.
+    private var pinnedApprovals: some View {
+        let ids = approvals.pending.reduce(into: [String]()) { if !$0.contains($1.request.session) { $0.append($1.request.session) } }
+        return VStack(alignment: .leading, spacing: Self.spacing) {
+            ForEach(ids, id: \.self) { id in
+                let asks = approvals.pending(for: id)
+                if let first = asks.first {
+                    let title = store.sessions.first(where: { $0.id == id }).map { store.title(of: $0) } ?? "A session"
+                    ApprovalCard(center: approvals, item: first, chat: title, more: asks.count - 1).id(first.id)
+                }
+            }
+        }
+    }
+
     /// The sessions, at most `limit` of them, and how many more there are.
     @ViewBuilder private func sessionRows(limit: Int) -> some View {
         if store.sessions.isEmpty {
@@ -483,7 +519,8 @@ private struct SessionList: View {
         ForEach(rows, id: \.id) { session in
             let isOpen = detailId == session.id
             let title = store.title(of: session)
-            let asks = approvals.pending(for: session.id)
+            // Under an open panel the prompts show above it (pinnedApprovals), not here too.
+            let asks = openPanel == nil ? approvals.pending(for: session.id) : []
             let space = asks.isEmpty ? 0 : (cardHeights[session.id] ?? 0) + 8
             // Sibling buttons: the row jumps to the session, the card answers its prompt, the
             // corner toggles its details.
@@ -554,14 +591,18 @@ private struct SessionList: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 9, weight: .semibold))
-                Text(name).font(.system(size: 10, weight: .semibold))
+                // Only the open panel's button keeps its name: the header has to leave room for the summary.
+                if isOpen { Text(name).font(.system(size: 10, weight: .semibold)).lineLimit(1) }
             }
+            .fixedSize()
             .foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
             .padding(.horizontal, 8).padding(.vertical, 4)
             .background(Capsule().fill(isOpen ? Palette.done : Palette.chip))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .help(name)
+        .accessibilityLabel(name)
     }
 
     /// Keeps the notch open: the header's pin, filled while pinned.
@@ -582,6 +623,7 @@ private struct SessionList: View {
         .help(isPinned
               ? "Pinned open: it stays open when the pointer leaves or you click a row. Click to unpin. Over a full-screen app it opens only on hover."
               : "Pin open: keep the notch open when the pointer leaves or you click a row. Clicks outside it still reach the app below.")
+        .accessibilityLabel(isPinned ? "Unpin" : "Pin open")
     }
 
     private var summary: String {

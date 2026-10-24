@@ -152,7 +152,7 @@ final class NotchController: ObservableObject {
             CommandsStore.shared.setPanelOpen(isExpanded && openPanel == Self.commandsPanel)
         }
     }
-    /// Which full-width panel is open under the header: Usage, Code, Machine, VPN or PRs, one at a time.
+    /// Which full-width panel is open under the header: Usage, Code, Board, Machine, VPN or PRs, one at a time.
     @Published var openPanel: String? {
         didSet {
             machine.setPanelOpen(isExpanded && openPanel == Self.machinePanel)
@@ -164,6 +164,7 @@ final class NotchController: ObservableObject {
     static let commandsPanel = "Commands"
     static let vpnPanel = "VPN"
     static let pullRequestsPanel = "PRs"
+    static let boardPanel = "Board"
     @Published private(set) var geometry = NotchGeometry.current()
     /// Pinned open: the notch stays expanded until unpinned, and no click or pointer leaving
     /// collapses it. Remembered across restarts.
@@ -236,6 +237,8 @@ final class NotchController: ObservableObject {
             prod.setLooking(true)
             reviews.panelOpened()
             reviews.setLooking(true)
+            // `--preview --board`: the Board open, for a look.
+            if CommandLine.arguments.contains("--board") { openPanel = Self.boardPanel }
         }
         placeWindow()
         panel.orderFrontRegardless()
