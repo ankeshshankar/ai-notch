@@ -44,6 +44,13 @@ final class SessionStore: ObservableObject {
 
     /// A session without a known process counts as gone after this long untouched.
     private let orphanAfter: Double = 3 * 3600
+    /// A session whose process is gone stays until the check has failed this long on end, so one
+    /// bad read of the process list never removes a live session, and until it has been quiet
+    /// for `quietBeforeDrop`: a process still writing to its state file is not gone.
+    private let goneAfter: Double = 1.5
+    private let quietBeforeDrop: Double = 10
+    /// When each session's process first failed its check (session id → time); forgotten once it passes.
+    private var failingSince: [String: Double] = [:]
     /// A finished turn shorter than this plays no sound.
     private let soundAfterTurn: Double = 20
     private var phases: [String: Phase] = [:]
@@ -86,6 +93,7 @@ final class SessionStore: ObservableObject {
         let dir = NotchPaths.sessions
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         var live: [SessionState] = []
+        var seenIds = Set<String>()
         for file in files where file.pathExtension == "json" {
             guard let data = try? Data(contentsOf: file),
                   let state = try? JSONDecoder.notch.decode(SessionState.self, from: data) else { continue }
@@ -93,7 +101,8 @@ final class SessionStore: ObservableObject {
             // and its file goes once it is ten minutes old.
             let isEmpty = state.turnStartedAt == nil && state.toolCount == 0 && state.firstPrompt == nil && state.sessionTitle == nil && state.agents.isEmpty
             if isEmpty, now - state.startedAt < 600 { continue }
-            if isGone(state) || isEmpty {
+            seenIds.insert(state.id)
+            if isGone(state, at: time) || isEmpty {
                 try? FileManager.default.removeItem(at: file)
                 try? FileManager.default.removeItem(at: NotchPaths.lock(state.id))
                 try? FileManager.default.removeItem(at: NotchPaths.control(state.id))
@@ -105,6 +114,7 @@ final class SessionStore: ObservableObject {
             if let first = usage.firstAt[shown.id], first < shown.startedAt { shown.startedAt = first }
             live.append(shown)
         }
+        failingSince = failingSince.filter { seenIds.contains($0.key) }
         // Agents the hooks do not cover, seen as processes; one a hook reports is left to the hook.
         watcher.setHooked(Set(live.compactMap(\.pid)))
         live += watcher.sessions.filter { row in !live.contains { $0.pid != nil && $0.pid == row.pid } }
@@ -112,6 +122,7 @@ final class SessionStore: ObservableObject {
         approvals.reconcile(with: live)
         alert(for: live)
         if live != sessions { sessions = live }
+        KeepAwake.shared.update(working: live.contains { $0.phase == .working }, now: time)
         AgentControls.shared.refresh(sessions)
         CommandsStore.shared.setAgents(sessions.compactMap { session in
             session.pid.map { CommandScanner.Agent(pid: $0, sessionId: session.id, title: title(of: session)) }
@@ -351,12 +362,33 @@ final class SessionStore: ObservableObject {
         Notifier.shared.isScreenLocked
     }
 
-    private func isGone(_ state: SessionState) -> Bool {
-        if let pid = state.pid { return kill(pid, 0) != 0 && errno == ESRCH }
+    private func isGone(_ state: SessionState, at time: Double) -> Bool {
+        if let pid = state.pid {
+            guard processIsGone(pid, lastReport: state.updatedAt) else {
+                failingSince[state.id] = nil
+                return false
+            }
+            // Gone on two reads at least `goneAfter` apart, and quiet for a while: a hook that
+            // just wrote the file is proof enough that its agent is still around.
+            let first = failingSince[state.id] ?? time
+            failingSince[state.id] = first
+            return time - first >= goneAfter && time - state.updatedAt > quietBeforeDrop
+        }
         // Cursor's chats name no process to watch, nor does an agent that reports itself without
         // --pid: one quiet for half an hour has left the notch.
         if state.kind != .claude { return now - state.updatedAt > 1800 }
         return now - state.updatedAt > orphanAfter
+    }
+
+    /// No such process (or an exited one nobody has collected), or a different one now holding
+    /// its number: one that began after the
+    /// session's last report cannot be the agent that made that report.
+    private func processIsGone(_ pid: Int32, lastReport: Double) -> Bool {
+        if kill(pid, 0) != 0 { return errno == ESRCH }
+        // kill() still succeeds on a process that has exited but is not yet collected.
+        if ProcessList.isZombie(pid) { return true }
+        if let entry = ProcessList.entry(pid), entry.start > lastReport + 2 { return true }
+        return false
     }
 
     /// Waiting first, then working, then the most recently active.

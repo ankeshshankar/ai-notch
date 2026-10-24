@@ -44,6 +44,12 @@ final class AgentWatcher: @unchecked Sendable {
     private var samples: [String: (cpu: UInt64, at: Double)] = [:]
     private var lastBusy: [String: Double] = [:]
     private var since: [String: (phase: Phase, at: Double)] = [:]
+    /// Scans in a row a row (by id) has been missing from; it is dropped on the second.
+    private var misses: [String: Int] = [:]
+    private static let missesBeforeDrop = 2
+    /// Scans in a row that could not read the process list; the rows are cleared on the third.
+    private var failedReads = 0
+    private static let failedReadsBeforeClear = 3
     private var arguments: [String: [String]] = [:]
 
     static let enabledKey = "agents.watch"
@@ -73,10 +79,25 @@ final class AgentWatcher: @unchecked Sendable {
     }
 
     private func scan() {
-        guard Self.isEnabled, let table = ProcessList.table() else {
+        guard Self.isEnabled else {
+            misses = [:]
+            failedReads = 0
             publish([])
             return
         }
+        // A failed read of the process list says nothing about the agents: keep the rows as they
+        // were, but only for a few scans, so a list that stays unreadable cannot leave a stale
+        // "working" row behind.
+        guard let table = ProcessList.table() else {
+            failedReads += 1
+            if failedReads == Self.failedReadsBeforeClear {
+                misses = [:]
+                publish([])
+                noteBuildLog("agents: process list unreadable for \(failedReads) scans, rows cleared")
+            }
+            return
+        }
+        failedReads = 0
         let now = Date().timeIntervalSince1970
         let config = BuildsConfig.current
         var names = Self.known
@@ -159,6 +180,21 @@ final class AgentWatcher: @unchecked Sendable {
         samples = samples.filter { live.contains($0.key) }
         lastBusy = lastBusy.filter { live.contains($0.key) }
         since = since.filter { live.contains($0.key) }
+        // A row missing from one scan stays; missing from two in a row, it goes.
+        let found = Set(rows.map(\.id))
+        lock.lock()
+        let before = latest
+        lock.unlock()
+        misses = misses.filter { !found.contains($0.key) }
+        for row in before where !found.contains(row.id) {
+            let count = (misses[row.id] ?? 0) + 1
+            if count < Self.missesBeforeDrop {
+                misses[row.id] = count
+                rows.append(row)
+            } else {
+                misses[row.id] = nil
+            }
+        }
         publish(rows.sorted { $0.startedAt < $1.startedAt })
     }
 

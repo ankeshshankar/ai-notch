@@ -60,6 +60,16 @@ enum ProcessList {
                          comm: long.isEmpty ? short : long, path: "")
     }
 
+    /// Whether the process has exited but its parent has not collected it yet. True only when the
+    /// kernel says so: a process that cannot be read (another user's) is not a zombie.
+    static func isZombie(_ pid: pid_t) -> Bool {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.size
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return false }
+        return info.kp_proc.p_stat == 5 // SZOMB
+    }
+
     /// The executable's path, or "" when it cannot be read.
     static func path(of pid: pid_t) -> String {
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))

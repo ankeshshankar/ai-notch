@@ -1316,6 +1316,17 @@ struct SetupView: View {
                 info: "Denser session rows: the project and model line goes and the agent's name moves up beside the title, so eight rows fit before the list scrolls instead of six.") {
                 Toggle("", isOn: $effects.compactRows).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
+            divider
+            row("Keep the Mac awake while an agent works", icon: "moon.zzz.fill", tint: Color(red: 0.36, green: 0.40, blue: 0.80),
+                info: "Stops the Mac sleeping on its own while an agent works and for 2 minutes after the last one stops, so a turn goes on with the screen locked. The display may still sleep. Shown as \"AI Notch: an agent is working\" in pmset -g assertions. Closing the lid still sleeps the Mac unless a display is attached.") {
+                Toggle("", isOn: $effects.keepAwake).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
+            row("Also on battery", icon: "battery.50percent", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
+                info: "Keeps the Mac awake on battery too, but lets go below 20% charge.") {
+                Toggle("", isOn: $effects.keepAwakeOnBattery).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                    .disabled(!effects.keepAwake)
+            }
         }
     }
 

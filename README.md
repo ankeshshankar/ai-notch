@@ -122,7 +122,11 @@ Claude Code and Cursor run `ai-notch-hook` on each hook event. It folds the even
 `~/.claude/notch/sessions/<session-id>.json` under a file lock, so parallel tool calls are safe. It
 never prints and always exits 0, so it cannot block or change a session; if another event holds
 the lock for more than about 300 ms it skips its own. The app reads those files twice a second and
-drops a session when its process exits.
+drops a session when its process is gone. It is slow to do so: the process must be missing on two
+reads at least 1.5 s apart, and the session must have reported nothing for 10 s, so a single bad
+read never removes a live session. A pid now held by a newer process (started after the
+session's last report) counts as gone. Agents found only as processes go after two scans (6 s)
+without them, and a scan that cannot read the process list changes nothing.
 
 The spinners, the waiting dot and the waiting glow are Core Animation layers that loop in the
 render server at no more than 30 fps, so the app does no work per frame.
@@ -801,6 +805,20 @@ While a session works, a hairline along the bottom of its row fills against the 
 last turn (a minute for a first one), slowing as it nears the end. New rows slide in, and a row's
 state changes fade across. **Compact rows** (Setup → Effects) drops each row's project and model
 line, so eight fit before the list scrolls.
+
+### Keeping the Mac awake
+
+While any session works (hooked or found as a process), AI Notch holds a power assertion that
+stops the Mac sleeping on its own, so a long turn goes on with the screen locked. The display may
+still sleep and the screen may still lock. It is held for 2 minutes after the last session stops
+working, so a short gap between turns does not let the Mac sleep, then released; it is also
+released when the setting is turned off and when the app quits. `pmset -g assertions` lists it as
+"AI Notch: an agent is working". Set up in Setup → Effects:
+
+- **Keep the Mac awake while an agent works** (on by default).
+- **Also on battery** (on by default): on battery it lets go below 20% charge.
+
+A closed lid is out of reach: macOS sleeps the Mac then unless an external display is attached.
 
 ### Light and dark
 

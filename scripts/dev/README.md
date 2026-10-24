@@ -53,6 +53,10 @@
   `CLAUDE_NOTCH_BITBUCKET_TEST_TOKEN=<state.token>` and `CLAUDE_NOTCH_BUILDS_CONFIG=<a builds.json
   listing the stub's repositories>`. Against a stub the muted and seen lists use keys of their
   own (`prs.muted.stub`, `prs.seenNews.stub`).
+- `AINotch --awake-selfcheck` — when the Mac is kept awake (grace, battery, setting) on made-up
+  inputs, then a real power assertion made, found in the system's list by name and released
+  (also with the setting turned off mid-grace), and the zombie check the session grace uses;
+  exits 1 on any failure.
 - `AINotch --pr-selfcheck` — the pull-request data layer's pure parts (parsing, what needs you,
   events and the seen-state, the budget split, Setup's switch writing `builds.json`, the wing's
   order); exits 1 on any failure. `AINotch --pr-watch <seconds> [--prs-only]` — both Bitbucket

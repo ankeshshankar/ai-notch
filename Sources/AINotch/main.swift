@@ -75,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Hooks still waiting see the socket close and leave the prompt to the editor.
         store.approvals.stop()
+        KeepAwake.shared.stop()
     }
 
     /// A widget row's link.
@@ -212,6 +213,11 @@ if let index = CommandLine.arguments.firstIndex(of: "--machine-scan") {
     }
     done.wait()
     exit(0)
+}
+
+// `--awake-selfcheck`: when the Mac is kept awake, on made-up inputs, and a real assertion.
+if CommandLine.arguments.contains("--awake-selfcheck") {
+    exit(MainActor.assumeIsolated { KeepAwakeSelfCheck.run() })
 }
 
 // The setup logic without the window, for tests against a copy of a home folder
