@@ -56,7 +56,7 @@ final class VPNSignInController: NSObject, NSWindowDelegate {
     private func makePanel() -> NSPanel {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 220), styleMask: [.titled, .closable],
                             backing: .buffered, defer: false)
-        panel.level = .floating
+        panel.level = .aboveNotch
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]

@@ -308,7 +308,7 @@ final class VPNStore: ObservableObject {
         panel.canChooseDirectories = false
         panel.allowedContentTypes = ["ovpn", "conf"].compactMap { UTType(filenameExtension: $0) } + [.plainText]
         NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModalAboveNotch({ panel.runModal() }) == .OK, let url = panel.url else { return }
         importProfile(at: url)
     }
 
