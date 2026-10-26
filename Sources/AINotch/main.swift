@@ -109,6 +109,9 @@ if let index = CommandLine.arguments.firstIndex(of: "--chat-title") {
 // Dev checks of the pull-request data layer, never the app: `--pr-selfcheck`, `--pr-watch <s>`.
 PullRequestDev.runIfAsked(CommandLine.arguments)
 
+// Dev check of Cursor's usage parsing and totals, never the app: `--cursor-usage-selfcheck`.
+CursorUsageSelfCheck.runIfAsked(CommandLine.arguments)
+
 // Dev check of the Board's sorting, never the app: `--board-selfcheck`.
 BoardDev.runIfAsked(CommandLine.arguments)
 

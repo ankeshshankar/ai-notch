@@ -139,7 +139,7 @@ private struct FileUsage: Codable {
 
 private struct Ledger: Codable {
     /// Bumped when what a file records changes; an older ledger is rebuilt from the transcripts.
-    static let currentVersion = 7
+    static let currentVersion = 8
     var version = Ledger.currentVersion
     var files: [String: FileUsage] = [:]
     /// Daily totals of transcripts that are gone (Claude Code deletes them after 30 days by
@@ -149,6 +149,9 @@ private struct Ledger: Codable {
     /// OpenCode's usage, read whole from its database each scan: day → model → tally. A day the
     /// database no longer holds stays as it was.
     var openCode: [String: [String: TokenTally]] = [:]
+    /// Cursor's usage events folded into day → model totals. Not in any transcript, so a rebuild
+    /// keeps it (the dashboard could be read again, but only a page at a time).
+    var cursor: CursorLedger?
     /// Codex's plan limits from its newest `token_count` event (not a total: no version bump).
     var codexLimits: ToolLimits?
 }
@@ -192,6 +195,7 @@ struct UsageRow: Equatable, Sendable {
 private struct ArchiveOnly: Decodable {
     var archive: [String: TokenTally]?
     var archiveLines: [String: [String: LineTally]]?
+    var cursor: CursorLedger?
 }
 
 /// What the app shows: per session (its own transcript and its subagents'), and per day.
@@ -208,6 +212,8 @@ struct UsageSnapshot: Equatable, Sendable {
     /// Each session's last minutes: its replies' cost (subagents included) and its prompt cache.
     var live: [String: LiveSpend] = [:]
     var codexLimits: ToolLimits?
+    /// Whether Cursor's usage could be read (shown as a line in the Usage panel).
+    var cursor: CursorUsageStatus = .off
 
     func total(sinceDay day: String) -> TokenTally {
         var sum = TokenTally()
@@ -250,6 +256,12 @@ final class UsageScanner: @unchecked Sendable {
     private var live: [String: LiveSpend] = [:]
     /// OpenCode's database and its write-ahead log as last read (size and time of each).
     private var openCodeStamp: [Double]?
+    /// Cursor's dashboard, polled at most once a minute; nothing else waits on it.
+    private let cursorSource = CursorUsageSource()
+    private var cursorStatus: CursorUsageStatus = .off
+    private var isPollingCursor = false
+    /// After a poll that got nowhere, no new request until then (further apart each time).
+    private var cursorNotBefore = Date.distantPast
     /// A file untouched this long has written its last reply: its dedupe lists can go.
     /// (Repeats of one reply were at most 538 s apart in 1,169 transcripts.)
     private let settledAfter: Double = 3600
@@ -301,6 +313,7 @@ final class UsageScanner: @unchecked Sendable {
             for tally in usage.byDay.values { byKind[usage.kind ?? "claude", default: TokenTally()].add(tally) }
         }
         for models in scanner.ledger.openCode.values { for tally in models.values { byKind["opencode", default: TokenTally()].add(tally) } }
+        if let cursor = scanner.ledger.cursor { byKind["cursor", default: TokenTally()].add(cursor.total) }
         for (kind, tally) in byKind.sorted(by: { $0.key < $1.key }) {
             print("\(kind)\t\(tally.total)\t\(String(format: "%.4f", tally.cost))")
         }
@@ -320,9 +333,13 @@ final class UsageScanner: @unchecked Sendable {
         queue.async { [self] in
             load()
             scan()
+            pollCursor()
         }
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.queue.async { self?.scan() }
+        }
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.queue.async { self?.pollCursor() }
         }
     }
 
@@ -340,6 +357,7 @@ final class UsageScanner: @unchecked Sendable {
             // already deleted exist nowhere else: they carry over.
             ledger.archive = saved.archive ?? [:]
             ledger.archiveLines = saved.archiveLines ?? [:]
+            ledger.cursor = saved.cursor
         }
     }
 
@@ -378,12 +396,75 @@ final class UsageScanner: @unchecked Sendable {
             ledger.files[path] = nil
             isDirty = true
         }
+        publish()
+    }
+
+    /// Writes the ledger and sends a snapshot when something changed.
+    private func publish() {
         if isDirty, let data = try? JSONEncoder().encode(ledger) {
             try? data.write(to: ledgerURL, options: .atomic)
         }
         if isDirty || !hasSentSnapshot { onUpdate(snapshot(scanning: false)) }
         hasSentSnapshot = true
         isDirty = false
+    }
+
+    /// Reads Cursor's newest usage events (all of its history the first time, in chunks), then
+    /// folds them into the ledger. The request runs off this queue; only the merge comes back.
+    private func pollCursor() {
+        guard !isPollingCursor, Date() >= cursorNotBefore else { return }
+        guard CursorUsageSource.isInstalled else {
+            setCursorStatus(.off)
+            return
+        }
+        isPollingCursor = true
+        let state = ledger.cursor ?? CursorLedger()
+        let first = state.nextRequest()
+        let cutoff = first.cutoff
+        let pages = state.complete ? 40 : 20
+        Task.detached(priority: .utility) { [self, cursorSource] in
+            let poll = await cursorSource.poll(from: first.page, stopBefore: cutoff, maxPages: pages)
+            queue.async { self.mergeCursor(poll, cutoff: cutoff) }
+        }
+    }
+
+    private func mergeCursor(_ poll: CursorUsageSource.Poll, cutoff: Double?) {
+        isPollingCursor = false
+        var state = ledger.cursor ?? CursorLedger()
+        let outcome = state.take(poll.events, nextPage: poll.nextPage, ok: poll.status == .ok, cutoff: cutoff,
+                                 repeated: poll.repeated, pageFailed: poll.pageFailed)
+        if outcome.changed || ledger.cursor == nil {
+            ledger.cursor = state
+            isDirty = true
+        }
+        if outcome.stalled, !outcome.gaveUp {
+            // Two, four, eight minutes between tries.
+            cursorNotBefore = Date().addingTimeInterval(60 * Double(1 << min(state.failures, 4)) - 5)
+        } else {
+            cursorNotBefore = .distantPast
+        }
+        var status = poll.status
+        if outcome.gaveUp {
+            status = .ok
+        } else if poll.repeated || (outcome.stalled && status == .ok) {
+            status = .unavailable(CursorUsageSource.repeatedReason + (state.complete ? "" : "; retrying"))
+        }
+        let statusChanged = effectiveCursorStatus(status) != effectiveCursorStatus(cursorStatus)
+        cursorStatus = status
+        if isDirty { publish() } else if statusChanged { onUpdate(snapshot(scanning: false)) }
+        // More pages to read and Cursor is answering: go on now, not in a minute.
+        if outcome.goOn { pollCursor() }
+    }
+
+    /// Read fine, but with part of the history left out: the panel keeps saying so.
+    private func effectiveCursorStatus(_ status: CursorUsageStatus) -> CursorUsageStatus {
+        status == .ok && ledger.cursor?.partial == true ? .partial : status
+    }
+
+    private func setCursorStatus(_ status: CursorUsageStatus) {
+        guard cursorStatus != status else { return }
+        cursorStatus = status
+        onUpdate(snapshot(scanning: false))
     }
 
     /// Every main transcript (`<project>/<session>.jsonl`) and subagent transcript
@@ -831,6 +912,12 @@ final class UsageScanner: @unchecked Sendable {
                 rows["\(day)|opencode|\(model)"] = UsageRow(day: day, source: "opencode", model: model, tally: tally)
             }
         }
+        for (day, models) in ledger.cursor?.byDay ?? [:] {
+            for (model, tally) in models where !tally.isEmpty || tally.cost > 0 {
+                snap.byDay[day, default: TokenTally()].add(tally)
+                rows["\(day)|cursor|\(model)"] = UsageRow(day: day, source: "cursor", model: model, tally: tally)
+            }
+        }
         for usage in ledger.files.values {
             var fileTotal = TokenTally()
             for (day, tally) in usage.byDay {
@@ -861,6 +948,7 @@ final class UsageScanner: @unchecked Sendable {
         }
         snap.live = live
         snap.codexLimits = ledger.codexLimits
+        snap.cursor = effectiveCursorStatus(cursorStatus)
         snap.earliestDay = snap.byDay.filter { !$0.value.isEmpty }.keys.min()
         snap.rows = Array(rows.values)
         return snap

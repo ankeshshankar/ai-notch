@@ -698,6 +698,11 @@ private struct UsagePanel: View {
                 .font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3)
             breakdown("Tool", parts.bySource.map { (Self.sourceName($0.0), $0.1) }, total: total.cost)
             breakdown("Model", parts.byModel.map { (modelName($0.0), $0.1) }, total: total.cost)
+            if case .unavailable(let reason) = usage.cursor {
+                Text("Cursor usage unavailable: \(reason)").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+            } else if usage.cursor == .partial {
+                Text("Cursor history incomplete").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+            }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
@@ -705,7 +710,7 @@ private struct UsagePanel: View {
     }
 
     private var usageNote: String {
-        var note = "Claude Code's transcripts, Codex's session logs, Qwen Code's chats and OpenCode's database, each API request once (Claude's /stats counts a reply once per content block, about twice this). Claude at Anthropic's prices, others at LiteLLM's list (or the cost OpenCode recorded). Cursor's own agent reports no tokens. On a subscription this is the API-price value, not your bill."
+        var note = "Claude Code's transcripts, Codex's session logs, Qwen Code's chats, OpenCode's database and Cursor's dashboard usage events, each API request once (Claude's /stats counts a reply once per content block, about twice this). Claude at Anthropic's prices, others at LiteLLM's list (or the cost OpenCode recorded). Cursor's cost is the plan usage its dashboard counts, which on a Business plan is not money charged; Claude Code running inside Cursor stays under Claude Code. On a subscription this is the API-price value, not your bill."
         if range == 2 { note += " Lifetime starts at \(usage.earliestDay ?? "your oldest transcript")." }
         return note
     }
@@ -718,6 +723,7 @@ private struct UsagePanel: View {
         case "codex": return "Codex"
         case "opencode": return "OpenCode"
         case "qwen": return "Qwen Code"
+        case "cursor": return "Cursor · plan usage"
         case "archived": return "Deleted transcripts"
         default: return entrypoint.capitalized
         }

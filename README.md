@@ -12,8 +12,8 @@ single-choice questions from the notch.
 
 - The notch glows amber and plays a sound when a session needs your answer or permission.
 - A check mark flashes when a turn finishes; turns longer than 20 seconds also play a sound.
-- The Usage panel shows tokens and cost per day and model for Claude Code, Codex, Qwen Code and
-  OpenCode, and your Claude Code and Codex plan limits.
+- The Usage panel shows tokens and cost per day and model for Claude Code, Codex, Qwen Code,
+  OpenCode and Cursor, and your Claude Code and Codex plan limits.
 - The Code panel shows the lines Claude Code wrote: a grid of lines added per day, and each
   repository's lines beside what was committed to git there.
 - Optionally, a Pipelines section shows your EAS builds and Bitbucket Pipelines runs as they
@@ -248,6 +248,19 @@ only), Qwen Code (`~/.qwen/projects/*/chats`) and OpenCode (`opencode.db`, read 
 non-Anthropic models come from LiteLLM's public price list, cached daily in
 `~/.claude/notch/model-prices.json`. Checked against `ccusage` 20: Claude identical, Codex within
 1% on tokens and 2% on cost.
+
+Cursor's agent keeps no token counts on disk, so the app asks Cursor's dashboard for them: the
+usage events behind cursor.com/dashboard, one per model request, with its tokens and what the plan
+counted for it. It signs in with the session Cursor already holds (read from Cursor's settings
+database, read-only); that token is sent to cursor.com only, and never logged or saved. The first
+read takes in the whole history (a few minutes for thousands of requests), then it asks once a
+minute for what is new. Totals are kept per day and model in the usage ledger as the tool `cursor`,
+shown as "Cursor · plan usage": the cost is the plan usage Cursor counted (the charged cents; free
+credit at its token total; nothing for a request Cursor did not charge, though its tokens count).
+On a Business plan this is not money charged to you. Claude Code running inside Cursor is read
+from its own transcripts and stays under Claude Code, so nothing is counted twice. With no Cursor,
+a signed-out Cursor, an expired sign-in or no network, the Usage panel shows "Cursor usage
+unavailable" and the other tools are not affected. Cursor's plan limits are not shown.
 
 ### Limits, burn rate and the prompt cache
 

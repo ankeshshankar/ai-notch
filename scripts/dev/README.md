@@ -57,6 +57,12 @@
   inputs, then a real power assertion made, found in the system's list by name and released
   (also with the setting turned off mid-grace), and the zombie check the session grace uses;
   exits 1 on any failure.
+- `AINotch --cursor-usage-selfcheck` — Cursor's usage parsing and totals on canned dashboard
+  events (full and compact rows, not-charged and free-credit kinds, a repeated request, a page
+  that is not the documented shape), then the ledger: totals per day and model, no double count
+  on a re-read or a catch-up, a request that grew replacing its earlier reading, and the sign-in
+  cookie's shape; no network, exits 1 on any failure. The app polls the real dashboard only from
+  the running app (`UsageScanner`); `--scan-usage` reads the ledger's saved Cursor totals only.
 - `AINotch --board-selfcheck` — the Board's sorting on made-up sessions and pull requests: which
   group each lands in (a waiting session whose PR is ready, a PR with no session, a session with
   no PR, a draft, two sessions on one PR), and the status line; exits 1 on any failure.
