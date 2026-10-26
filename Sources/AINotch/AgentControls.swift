@@ -105,7 +105,7 @@ final class AgentControls: ObservableObject {
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.window.runModalAboveNotch({ alert.runModal() }) == .alertFirstButtonReturn else { return }
         let note = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         update(session) { $0.note = note.isEmpty ? nil : String(note.prefix(SessionControl.noteLimit)) }
         Self.log("control: note")

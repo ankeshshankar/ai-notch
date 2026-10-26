@@ -44,12 +44,35 @@ struct NotchGeometry {
     }
 }
 
+extension NSWindow.Level {
+    /// Where the notch sits: above the menu bar and everything else on screen.
+    static let notch = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 3)
+    /// Every window, alert and file picker AI Notch opens itself uses this, one step over the
+    /// notch, so the notch opening on hover never covers something you are typing into.
+    static let aboveNotch = NSWindow.Level(rawValue: NSWindow.Level.notch.rawValue + 1)
+}
+
+extension NSWindow {
+    /// Runs an alert or file picker modally with its window over the notch. AppKit drops a modal
+    /// window to its own lower level when the modal session starts, so the level is put back
+    /// on each update until the window is answered.
+    @MainActor
+    func runModalAboveNotch<T>(_ run: () -> T) -> T {
+        level = .aboveNotch
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.didUpdateNotification, object: self, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { if self?.level != .aboveNotch { self?.level = .aboveNotch } }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        return run()
+    }
+}
+
 /// A borderless panel above the menu bar that never takes focus from your editor.
 final class NotchPanel: NSPanel {
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isFloatingPanel = true
-        level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 3)
+        level = .notch
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         backgroundColor = .clear
         isOpaque = false

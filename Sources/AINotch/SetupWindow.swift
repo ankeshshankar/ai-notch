@@ -492,6 +492,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         window.title = "AI Notch Setup"
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
+        window.level = .aboveNotch
         window.contentMinSize = NSSize(width: Self.width, height: 280)
         window.delegate = self
         let screen = Self.notchScreen.visibleFrame

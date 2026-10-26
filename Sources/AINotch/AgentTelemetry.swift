@@ -38,7 +38,7 @@ enum AgentTelemetry {
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        guard alert.window.runModalAboveNotch({ alert.runModal() }) == .alertFirstButtonReturn else { return nil }
         let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.count >= 16, key.allSatisfy({ $0.isLetter || $0.isNumber }) else { return "That does not look like a Datadog API key." }
 
