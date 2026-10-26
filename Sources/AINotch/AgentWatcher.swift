@@ -207,7 +207,8 @@ final class AgentWatcher: @unchecked Sendable {
     /// The agent a process is, by its name, or by its script's under node, bun, python…: the
     /// script's file name, or the npm or pip package it sits in.
     private func match(_ entry: ProcEntry, key: String, names: [String: String]) -> String? {
-        let comm = entry.comm
+        // OpenCode's npm package installs its binary as bin/opencode.exe, on macOS too.
+        let comm = entry.comm.hasSuffix(".exe") ? String(entry.comm.dropLast(4)) : entry.comm
         let isInterpreter = Self.interpreters.contains(comm) || comm.hasPrefix("python")
         guard names[comm] != nil || isInterpreter else { return nil }
         // Claude Code reports itself through its hooks.
