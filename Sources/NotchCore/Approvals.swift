@@ -18,8 +18,9 @@ public struct ApprovalRequest: Codable, Sendable, Equatable, Identifiable {
     /// to the session; empty when it suggested nothing (an ask rule matched, for one).
     public var sessionRules: [String]
     public var since: Double
-    /// For AskUserQuestion: the one question and its options, answered by picking one.
+    /// For AskUserQuestion: the first question (kept for readers that know only one) and all of them.
     public var question: Question?
+    public var questions: [Question]?
     /// The ask rule of your settings that covers this call (`Bash(git push *)`): then there is no
     /// "Allow for session", whatever Claude Code suggested.
     public var askRule: String?
@@ -38,21 +39,73 @@ public struct ApprovalRequest: Codable, Sendable, Equatable, Identifiable {
         }
     }
 
+    /// Every question of this prompt, in the order Claude asked them.
+    public var allQuestions: [Question] { questions ?? question.map { [$0] } ?? [] }
+
+    /// The most questions one AskUserQuestion call carries, and the most options per question the
+    /// notch lays out. A call outside these limits is left to the editor.
+    public static let maxQuestions = 4
+    public static let maxOptions = 6
+
     public struct Question: Codable, Sendable, Equatable {
         public var text: String
         public var header: String?
         public var options: [String]
+        /// Several options may be picked; the answer is their labels joined with ", ".
+        public var multiSelect: Bool
 
-        public init(text: String, header: String?, options: [String]) {
+        public init(text: String, header: String?, options: [String], multiSelect: Bool = false) {
             self.text = text
             self.header = header
             self.options = options
+            self.multiSelect = multiSelect
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            text = try c.decode(String.self, forKey: .text)
+            header = try c.decodeIfPresent(String.self, forKey: .header)
+            options = try c.decode([String].self, forKey: .options)
+            multiSelect = try c.decodeIfPresent(Bool.self, forKey: .multiSelect) ?? false
+        }
+
+        /// The questions of an AskUserQuestion call that can be answered by picking options, or nil
+        /// when any part is outside that (no text, fewer than two options, a repeated question or
+        /// label, too many, or very long text): then the call is left to the editor, which also
+        /// takes typed answers. Texts are kept whole, since the answer is keyed by the question text.
+        public static func parse(toolInput input: [String: Any]) -> [Question]? {
+            guard let raw = input["questions"] as? [[String: Any]], (1...ApprovalRequest.maxQuestions).contains(raw.count) else { return nil }
+            var found: [Question] = []
+            for item in raw {
+                guard let text = item["question"] as? String, !text.isEmpty, text.count <= 1500 else { return nil }
+                let labels = (item["options"] as? [[String: Any]] ?? []).compactMap { $0["label"] as? String }
+                guard (2...ApprovalRequest.maxOptions).contains(labels.count), Set(labels).count == labels.count,
+                      labels.allSatisfy({ !$0.isEmpty && $0.count <= 200 }) else { return nil }
+                found.append(Question(text: text, header: item["header"] as? String, options: labels,
+                                      multiSelect: item["multiSelect"] as? Bool == true))
+            }
+            return Set(found.map(\.text)).count == found.count ? found : nil
+        }
+
+        /// The `answers` Claude Code takes back: each question's text and the labels picked for
+        /// it, joined with ", " in the order the options were listed. nil unless there is exactly
+        /// one set of picks per question, each from that question's options (one for a
+        /// single-select question, at least one for a multi-select one).
+        public static func answers(picks: [[String]], for questions: [Question]) -> [String: String]? {
+            guard !questions.isEmpty, picks.count == questions.count else { return nil }
+            var answers: [String: String] = [:]
+            for (question, picked) in zip(questions, picks) {
+                guard Set(picked).count == picked.count, picked.allSatisfy(question.options.contains),
+                      question.multiSelect ? !picked.isEmpty : picked.count == 1 else { return nil }
+                answers[question.text] = question.options.filter(picked.contains).joined(separator: ", ")
+            }
+            return answers
         }
     }
 
     public init(id: String, session: String, agent: String?, agentType: String?, tool: String, server: String?,
-                detail: String, sessionRules: [String], since: Double, question: Question? = nil, askRule: String? = nil,
-                preview: [PreviewLine]? = nil) {
+                detail: String, sessionRules: [String], since: Double, question: Question? = nil, questions: [Question]? = nil,
+                askRule: String? = nil, preview: [PreviewLine]? = nil) {
         self.askRule = askRule
         self.preview = preview
         self.id = id
@@ -64,7 +117,8 @@ public struct ApprovalRequest: Codable, Sendable, Equatable, Identifiable {
         self.detail = detail
         self.sessionRules = sessionRules
         self.since = since
-        self.question = question
+        self.questions = questions
+        self.question = question ?? questions?.first
     }
 }
 
@@ -79,13 +133,16 @@ public enum ApprovalDecision: String, Codable, Sendable {
 public struct ApprovalReply: Codable, Sendable {
     public var id: String
     public var decision: ApprovalDecision
-    /// The picked option's label, for `answer`.
+    /// The picked option's label, for `answer` to a single-select question.
     public var answer: String?
+    /// For `answer` to any question prompt: the labels picked for each question, in question order.
+    public var answers: [[String]]?
 
-    public init(id: String, decision: ApprovalDecision, answer: String? = nil) {
+    public init(id: String, decision: ApprovalDecision, answer: String? = nil, answers: [[String]]? = nil) {
         self.id = id
         self.decision = decision
         self.answer = answer
+        self.answers = answers
     }
 }
 

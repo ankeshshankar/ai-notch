@@ -98,7 +98,7 @@ final class Hotkeys {
                 Jump.to(target)
             }
         case .allow, .deny:
-            guard let first = store.approvals.pending.first(where: { $0.request.question == nil }) else { return }
+            guard let first = store.approvals.pending.first(where: { $0.request.allQuestions.isEmpty }) else { return }
             store.approvals.answer(first.id, key == .allow ? .allow : .deny)
         }
     }

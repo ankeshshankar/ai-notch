@@ -114,6 +114,22 @@ public struct PendingAgent: Codable, Sendable, Equatable {
     }
 }
 
+/// One thread (the main one, or a subagent) blocked on you. Threads wait independently: one
+/// answered leaves the others waiting.
+public struct WaitingOn: Codable, Sendable, Equatable {
+    public var agent: String?
+    public var tool: String?
+    public var reason: String
+    public var since: Double
+
+    public init(agent: String?, tool: String?, reason: String, since: Double) {
+        self.agent = agent
+        self.tool = tool
+        self.reason = reason
+        self.since = since
+    }
+}
+
 /// The state file of one session: `~/.claude/notch/sessions/<id>.json`.
 public struct SessionState: Codable, Sendable, Equatable {
     public var id: String
@@ -142,6 +158,8 @@ public struct SessionState: Codable, Sendable, Equatable {
     /// only that tool finishing ends the wait.
     public var waitingTool: String?
     public var waitingAgent: String?
+    /// Every thread waiting, oldest first. The four fields above describe the newest one.
+    public var waits: [WaitingOn]?
     public var startedAt: Double
     public var updatedAt: Double
     public var turnStartedAt: Double?
@@ -180,6 +198,58 @@ public struct SessionState: Codable, Sendable, Equatable {
         self.toolCount = 0
         self.mcp = [:]
         self.backgroundTasks = 0
+    }
+
+    /// A thread starts waiting on `tool` (a wait it already had on that tool is replaced).
+    public mutating func beginWait(_ reason: String, tool: String?, agent: String?, at now: Double) {
+        var all = waitsIncludingLegacy
+        all.removeAll { $0.agent == agent && $0.tool == tool }
+        all.append(WaitingOn(agent: agent, tool: tool, reason: reason, since: now))
+        waits = all
+        phase = .waiting
+        settleWaits()
+    }
+
+    /// Ends the waits `match` picks. The session works on once none is left; others keep it waiting.
+    public mutating func endWaits(where match: (WaitingOn) -> Bool) {
+        let before = waitsIncludingLegacy
+        guard !before.isEmpty else {
+            if waitingFor != nil { settleWaits() }
+            return
+        }
+        waits = before.filter { !match($0) }
+        settleWaits()
+        if waits == nil, phase == .waiting { phase = .working }
+    }
+
+    /// Ends every wait (a turn began or ended, or the session was interrupted).
+    public mutating func clearWaits() {
+        waits = nil
+        settleWaits()
+    }
+
+    /// The summary fields follow the newest wait; any wait left means the session is waiting.
+    public mutating func settleWaits() {
+        if waits?.isEmpty == true { waits = nil }
+        if let last = waits?.last {
+            phase = .waiting
+            waitingFor = last.reason
+            waitingSince = last.since
+            waitingTool = last.tool
+            waitingAgent = last.agent
+        } else {
+            waitingFor = nil
+            waitingSince = nil
+            waitingTool = nil
+            waitingAgent = nil
+        }
+    }
+
+    /// The waits, counting the one a state file written before `waits` existed describes.
+    private var waitsIncludingLegacy: [WaitingOn] {
+        if let waits { return waits }
+        guard phase == .waiting, let reason = waitingFor else { return [] }
+        return [WaitingOn(agent: waitingAgent, tool: waitingTool, reason: reason, since: waitingSince ?? updatedAt)]
     }
 
     public var project: String { URL(fileURLWithPath: cwd).lastPathComponent }

@@ -52,16 +52,36 @@ final class ApprovalCenter: ObservableObject {
     }
 
     /// A click on one of the buttons. Only these answers exist; there is no "always".
+    /// `option` answers a prompt of one single-select question; any other question prompt takes
+    /// `answerQuestions`.
     func answer(_ id: String, _ decision: ApprovalDecision, option: String? = nil) {
         guard decision != .withdraw, let item = pending.first(where: { $0.id == id }),
               Date().timeIntervalSince1970 - item.shownAt >= Self.armDelay,
               let fd = connections[id] else { return }
-        if decision == .answer {
-            guard let option, item.request.question?.options.contains(option) == true else { return }
+        let questions = item.request.allQuestions
+        if !questions.isEmpty {
+            // A question is answered by picking, never by Allow or Deny.
+            guard decision == .answer, let option, questions.count == 1, !questions[0].multiSelect,
+                  questions[0].options.contains(option) else { return }
         }
-        ApprovalSocket.send(ApprovalReply(id: id, decision: decision, answer: decision == .answer ? option : nil), to: fd)
-        log("\(item.request.tool) prompt answered from the notch: \(decision.rawValue)")
-        drop(id)
+        send(ApprovalReply(id: id, decision: decision, answer: decision == .answer ? option : nil), to: fd, item: item)
+    }
+
+    /// The Submit of a question prompt: the labels picked for each question, in question order.
+    /// It goes only when every question has what it needs (one pick, or at least one for a
+    /// multi-select question), all from its own options.
+    func answerQuestions(_ id: String, picks: [[String]]) {
+        guard let item = pending.first(where: { $0.id == id }),
+              Date().timeIntervalSince1970 - item.shownAt >= Self.armDelay,
+              let fd = connections[id],
+              ApprovalRequest.Question.answers(picks: picks, for: item.request.allQuestions) != nil else { return }
+        send(ApprovalReply(id: id, decision: .answer, answers: picks), to: fd, item: item)
+    }
+
+    private func send(_ reply: ApprovalReply, to fd: Int32, item: Pending) {
+        ApprovalSocket.send(reply, to: fd)
+        log("\(item.request.tool) prompt answered from the notch: \(reply.decision.rawValue)")
+        drop(item.id)
     }
 
     /// Takes away the prompts the sessions show were answered somewhere else: the hook marks them
@@ -76,6 +96,7 @@ final class ApprovalCenter: ObservableObject {
             }
             // The state file may be older than the request: only a newer one can say it was answered.
             guard session.updatedAt >= request.since else { continue }
+            // Each prompt is looked up by its own id, so one thread's answer never drops another's.
             let stillAsked = session.pendingPermissions?.contains { $0.id == request.id } ?? false
             if !stillAsked {
                 withdraw(request.id, because: "a later event in its thread")

@@ -338,26 +338,31 @@ func onLoop(_ change: (inout ToolNow?, inout Int, inout [String: Int]) -> Void) 
     }
 }
 
+/// This thread (the main one, or the subagent the event names) is blocked on you. Each thread
+/// keeps its own wait: another thread starting or answering one does not touch it.
 func wait(for reason: String) {
-    state.phase = .waiting
-    state.waitingFor = reason
-    state.waitingSince = now
-    state.waitingTool = tool
-    state.waitingAgent = agentId
+    state.beginWait(reason, tool: tool, agent: agentId, at: now)
 }
 
+/// Every wait is over: a new session, an interrupt, another agent's turn boundary.
 func clearWait() {
-    state.waitingFor = nil
-    state.waitingSince = nil
-    state.waitingTool = nil
-    state.waitingAgent = nil
+    state.clearWaits()
+}
+
+/// A turn began or ended: the main thread's waits are over; a background subagent's are not.
+func clearMainWait() {
+    state.endWaits { $0.agent == nil }
 }
 
 /// Ends the wait when the tool it was on finishes, in the same thread; other work does not.
+/// A wait that names no tool (a notification's) ends with any tool finishing.
 func resumeWork() {
-    guard state.phase == .waiting, state.waitingTool == nil || (state.waitingTool == tool && state.waitingAgent == agentId) else { return }
-    state.phase = .working
-    clearWait()
+    state.endWaits { $0.tool == nil || ($0.tool == tool && $0.agent == agentId) }
+}
+
+/// "your answer" for a question, with the subagent's type when one asks.
+func questionReason() -> String {
+    "your answer" + (agentIndex(agentId).map { " (\(state.agents[$0].type))" } ?? "")
 }
 
 /// Prompts handed to the app that an event shows were answered (in the editor, or by a tool that
@@ -565,8 +570,8 @@ case "PostModelSwitch":
 case "UserPromptSubmit":
     // A new turn: the main thread's prompts are over (a background subagent's may not be).
     resolvePending { $0.agent == nil }
+    clearMainWait()
     state.phase = .working
-    clearWait()
     state.turnStartedAt = now
     state.finishedAt = nil
     // A background agent that finished reports back as a task notification naming it.
@@ -622,8 +627,8 @@ case "PreToolUse":
             return TodoItem(content: oneLine(content, max: 120), status: status, activeForm: (item["activeForm"] as? String).map { oneLine($0, max: 120) })
         }
     }
-    if agentId == nil, tool == "AskUserQuestion" {
-        wait(for: "your answer")
+    if tool == "AskUserQuestion" {
+        wait(for: questionReason())
     } else if agentId == nil, tool == "ExitPlanMode" {
         wait(for: "plan approval")
     } else if state.phase != .waiting {
@@ -632,21 +637,20 @@ case "PreToolUse":
 
 case "PermissionRequest":
     // A question or a plan raises a permission request too, but it is not yes-or-no.
-    if agentId == nil, tool == "AskUserQuestion" {
-        wait(for: "your answer")
-        // One question with plain options can be answered from the notch too; anything more
-        // (several questions, several picks) only in the editor.
+    // The main thread's or a subagent's: each is its own wait and its own prompt.
+    if tool == "AskUserQuestion" {
+        wait(for: questionReason())
+        // Every question with 2 or more plain options can be answered from the notch, several
+        // questions and several picks included; a typed answer ("Other") only in the editor.
         let input = event["tool_input"] as? [String: Any] ?? [:]
-        let questions = input["questions"] as? [[String: Any]] ?? []
-        if questions.count == 1, let first = questions.first, first["multiSelect"] as? Bool != true,
-           let text = first["question"] as? String,
-           case let labels = (first["options"] as? [[String: Any]] ?? []).compactMap({ $0["label"] as? String }), labels.count >= 2 {
+        if let questions = ApprovalRequest.Question.parse(toolInput: input) {
             let id = UUID().uuidString
-            let request = ApprovalRequest(id: id, session: sessionId, agent: nil, agentType: nil, tool: "AskUserQuestion", server: nil,
-                                          detail: oneLine(text, max: 300), sessionRules: [], since: now,
-                                          question: .init(text: text, header: first["header"] as? String, options: labels))
+            let agentType = agentIndex(agentId).map { state.agents[$0].type }
+            let request = ApprovalRequest(id: id, session: sessionId, agent: agentId, agentType: agentType, tool: "AskUserQuestion", server: nil,
+                                          detail: oneLine(questions.map(\.text).joined(separator: " · "), max: 300), sessionRules: [], since: now,
+                                          questions: questions)
             approval = (request, [])
-            state.pendingPermissions = (state.pendingPermissions ?? []) + [PendingPermission(id: id, tool: "AskUserQuestion", agent: nil, since: now)]
+            state.pendingPermissions = (state.pendingPermissions ?? []) + [PendingPermission(id: id, tool: "AskUserQuestion", agent: agentId, since: now)]
         }
         break
     }
@@ -740,6 +744,7 @@ case "SubagentStart":
 
 case "SubagentStop":
     resolvePending { $0.agent == agentId }
+    state.endWaits { $0.agent == agentId }
     if let index = agentIndex(agentId) { state.agents[index].end(.done, at: now) }
 
 case "Interrupt":
@@ -753,8 +758,8 @@ case "Interrupt":
 
 case "Stop":
     resolvePending { $0.agent == nil }
+    clearMainWait()
     state.phase = .idle
-    clearWait()
     state.current = nil
     state.finishedAt = now
     if let started = state.turnStartedAt { state.lastTurnSeconds = now - started }
@@ -785,11 +790,15 @@ default:
 state.agents.removeAll { agent in agent.endedAt.map { now - $0 > agentLinger } ?? false }
 if state.agents.count > maxAgents { state.agents.removeFirst(state.agents.count - maxAgents) }
 
-// Subagents that left take their prompts with them.
+// Subagents that are not running take their prompts and waits with them, including one this file
+// never saw start (or pruned above): its wait would otherwise outlive the turn with no prompt to answer.
+let liveAgents = Set(state.runningAgents.map(\.id))
 if let pending = state.pendingPermissions {
-    let live = Set(state.runningAgents.map(\.id))
-    state.pendingPermissions = pending.filter { $0.agent == nil || live.contains($0.agent!) }
+    state.pendingPermissions = pending.filter { $0.agent == nil || liveAgents.contains($0.agent!) }
 }
+state.endWaits { wait in wait.agent.map { !liveAgents.contains($0) } ?? false }
+// Any thread still waiting keeps the session waiting, whatever else this event did to its phase.
+if state.waits?.isEmpty == false { state.settleWaits() }
 
 if let encoded = try? JSONEncoder.notch.encode(state) {
     try? encoded.write(to: file, options: .atomic)
@@ -889,6 +898,8 @@ while reply == nil {
 close(socket)
 
 var decision: [String: Any]
+// A question takes only an answer: a plain Allow or Deny must never reach it.
+if approval.request.tool == "AskUserQuestion", reply!.decision != .answer { exit(0) }
 switch reply!.decision {
 case .allow:
     decision = ["behavior": "allow"]
@@ -900,10 +911,13 @@ case .deny:
         ? "The user did not approve this plan from AI Notch. Stay in plan mode and ask what to change."
         : "The user denied this from AI Notch. Do not retry it; ask the user how to proceed if it matters."]
 case .answer:
-    // Only one of the options it offered, for the question it asked; anything else says nothing.
-    guard let question = approval.request.question, let picked = reply!.answer, question.options.contains(picked) else { exit(0) }
+    // Only options it offered, for the questions it asked, one set of picks per question;
+    // anything else says nothing. Several picks of a multi-select question are joined with ", ".
+    guard approval.request.tool == "AskUserQuestion" else { exit(0) }
+    guard let picks = reply!.answers ?? reply!.answer.map({ [[$0]] }),
+          let answers = ApprovalRequest.Question.answers(picks: picks, for: approval.request.allQuestions) else { exit(0) }
     var input = event["tool_input"] as? [String: Any] ?? [:]
-    input["answers"] = [question.text: picked]
+    input["answers"] = answers
     decision = ["behavior": "allow", "updatedInput": input]
 case .withdraw:
     exit(0)
@@ -922,13 +936,8 @@ for _ in 0..<60 {
     if flock(lockFd, LOCK_EX | LOCK_NB) == 0 {
         if let data = try? Data(contentsOf: file), var after = try? JSONDecoder.notch.decode(SessionState.self, from: data) {
             after.pendingPermissions = after.pendingPermissions?.filter { $0.id != approval.request.id }
-            if after.phase == .waiting, after.waitingSince == now {
-                after.phase = .working
-                after.waitingFor = nil
-                after.waitingSince = nil
-                after.waitingTool = nil
-                after.waitingAgent = nil
-            }
+            // Only this prompt's own wait ends; another thread's keeps the session waiting.
+            after.endWaits { $0.since == now && $0.agent == approval.request.agent && $0.tool == approval.request.tool }
             after.updatedAt = Date().timeIntervalSince1970
             if let encoded = try? JSONEncoder.notch.encode(after) { try? encoded.write(to: file, options: .atomic) }
         }

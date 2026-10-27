@@ -1297,6 +1297,8 @@ private struct ApprovalCard: View {
     var more: Int
     /// Off for a moment after the card appears: a click meant for the card before it is ignored.
     @State private var isArmed = false
+    /// For a question form: the labels picked so far, by question.
+    @State private var picked: [Int: Set<String>] = [:]
 
     var body: some View {
         let request = item.request
@@ -1319,9 +1321,11 @@ private struct ApprovalCard: View {
                 if more > 0 { Text("+\(more) more").font(.system(size: 10)).foregroundStyle(Palette.ink3) }
                 InfoMark(text: note)
             }
-            if let question = request.question {
+            if isOneClickQuestion, let question = questions.first {
                 Text(question.text).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.85))
                     .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+            } else if !questions.isEmpty {
+                EmptyView()
             } else if !request.detail.isEmpty, request.detail != request.tool {
                 Text(request.detail)
                     .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Palette.ink.opacity(0.8))
@@ -1330,11 +1334,13 @@ private struct ApprovalCard: View {
                     .padding(.horizontal, 7).padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.inset))
             }
-            if request.question == nil, let preview = request.preview, !preview.isEmpty {
+            if questions.isEmpty, let preview = request.preview, !preview.isEmpty {
                 PreviewLines(lines: preview)
             }
-            if let question = request.question {
-                // A question: each option is its answer.
+            if !questions.isEmpty, !isOneClickQuestion {
+                questionForm
+            } else if let question = questions.first {
+                // One single-select question: each option is its answer.
                 FlowOptions(options: question.options) { option in
                     Button { center.answer(item.id, .answer, option: option) } label: {
                         Text(option).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Palette.ink)
@@ -1368,11 +1374,90 @@ private struct ApprovalCard: View {
     }
 
     private var isPlan: Bool { item.request.tool == "ExitPlanMode" }
+    private var questions: [ApprovalRequest.Question] { item.request.allQuestions }
+    /// One question with one pick: its options are buttons that answer at once.
+    private var isOneClickQuestion: Bool { questions.count == 1 && !questions[0].multiSelect }
+
+    private var isComplete: Bool { questions.indices.allSatisfy { !(picked[$0] ?? []).isEmpty } }
+
+    /// Several questions, or one that takes several picks: choose for each, then Submit once
+    /// every question has an answer.
+    private var questionForm: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 5) {
+                        if questions.count > 1 {
+                            Text("\(index + 1)").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.ink2)
+                                .frame(width: 14, height: 14).background(Circle().fill(Palette.chip))
+                        }
+                        if let header = question.header, !header.isEmpty {
+                            Text(header).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
+                        }
+                        if question.multiSelect {
+                            Text("pick any").font(.system(size: 9.5)).foregroundStyle(Palette.ink3)
+                        }
+                        Spacer(minLength: 0)
+                        if !(picked[index] ?? []).isEmpty {
+                            Image(systemName: "checkmark.circle.fill").font(.system(size: 9)).foregroundStyle(Palette.done)
+                        }
+                    }
+                    Text(question.text).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.85))
+                        .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                    FlowOptions(options: question.options) { option in
+                        let isOn = picked[index]?.contains(option) == true
+                        Button { toggle(option, in: index, multi: question.multiSelect) } label: {
+                            HStack(spacing: 4) {
+                                if isOn { Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)) }
+                                Text(option).lineLimit(1)
+                            }
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(isOn ? Palette.onDone : Palette.ink)
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(Capsule().fill(isOn ? Palette.done : Palette.chip))
+                            .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            HStack(spacing: 6) {
+                let done = questions.indices.filter { !(picked[$0] ?? []).isEmpty }.count
+                Text("\(done) of \(questions.count) answered").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Spacer(minLength: 4)
+                let ready = isArmed && isComplete
+                Button {
+                    center.answerQuestions(item.id, picks: questions.enumerated().map { index, question in
+                        question.options.filter { picked[index]?.contains($0) == true }
+                    })
+                } label: {
+                    Text("Submit").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Palette.onDone)
+                        .padding(.horizontal, 12).padding(.vertical, 4)
+                        .background(Capsule().fill(Palette.done))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(!ready)
+                .opacity(ready ? 1 : 0.4)
+            }
+        }
+    }
+
+    private func toggle(_ option: String, in index: Int, multi: Bool) {
+        var now = picked[index] ?? []
+        if multi {
+            if now.contains(option) { now.remove(option) } else { now.insert(option) }
+        } else {
+            now = [option]
+        }
+        picked[index] = now
+    }
 
     private var title: String {
         let request = item.request
         if isPlan { return "Plan ready" }
-        if let question = request.question { return question.header ?? "Question" }
+        if questions.count > 1 { return "\(questions.count) questions" }
+        if let question = questions.first { return question.header ?? "Question" }
         if let server = request.server { return "\(server) · \(ToolNow(id: "", name: request.tool, server: server, since: 0).shortName)" }
         return request.tool
     }
@@ -1381,8 +1466,11 @@ private struct ApprovalCard: View {
         if isPlan {
             return "Claude finished planning. The editor shows this too; whichever you answer first counts. Keep planning sends it back to plan mode to revise."
         }
-        if item.request.question != nil {
+        if isOneClickQuestion {
             return "The editor shows this question too; whichever you answer first counts. Pick an option to answer; for anything else, answer in the editor."
+        }
+        if !questions.isEmpty {
+            return "The editor shows these questions too; whichever you answer first counts. Pick an answer for each question, then Submit. A typed answer (Other) can only be given in the editor."
         }
         let base = "The editor shows this prompt too; whichever you answer first counts. Allow once runs this call only."
         if let rule = item.request.askRule {

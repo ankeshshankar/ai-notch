@@ -159,9 +159,20 @@ the timeout: it exits with no output and Claude Code asks as usual.
 - Buttons take a click only 0.6 s after they appear. Each answer is a line in
   `~/.claude/notch/notch.log` (the tool's name only, never its input).
 
-A question (AskUserQuestion) with one single-choice question shows its options as buttons; a click
-answers with that option's label. Several questions, multiple choice or a typed answer: only in
-the editor.
+A question (AskUserQuestion) shows in the notch with its options. One single-choice question: a
+click on an option answers. Two to four questions, or any multiple-choice question: each question
+lists its options as toggles (pick one, or any number for multiple choice), and **Submit** takes a
+click only once every question has an answer. A multiple-choice answer is its picked labels joined
+with `, `, as the editor sends it. A typed answer (Other) can only be given in the editor, which
+keeps its own prompt up; whichever you answer first counts. A call the notch can't lay out (more
+than four questions, a question with fewer than two or more than six options, or two questions
+with the same text) is left to the editor. ⌃⌥Y and ⌃⌥N never answer a question.
+
+Each thread asks on its own. When the chat and a subagent (or two background subagents) wait at the
+same time, the row shows the oldest prompt with `+N more`; a subagent's card names its type. One
+answered, in the notch or in the editor, leaves the others up, and the row stays "Needs you" until
+every one is answered. A subagent's question shows the same way if Claude Code raises one (its
+docs say subagents cannot ask yet).
 
 When Claude finishes planning, its first lines show with **Approve plan** (and **Approve, accept
 edits** when Claude Code offers it) or **Keep planning**, which sends it back to plan mode.
@@ -174,7 +185,8 @@ item under way; Details lists them all.
 - **⌃⌥Space** opens the notch, or closes it.
 - **⌃⌥J** jumps to the session that needs you: one waiting first, else the one that finished last.
 - While a prompt waits: **⌃⌥Y** answers the oldest with Allow once (Approve plan for a plan),
-  **⌃⌥N** with Deny (Keep planning). These two are taken only while a prompt waits.
+  **⌃⌥N** with Deny (Keep planning). Questions are skipped: they take a pick, not a yes or no. These two
+  are taken only while a prompt waits.
 
 They are global hot keys (no Accessibility permission). One another app already holds stays
 with it. Setup → Effects → Keyboard shortcuts turns them off.

@@ -201,8 +201,7 @@ final class SessionStore: ObservableObject {
         guard state.phase != .idle, let path = state.transcriptPath, let at = tail(path).interruptAt,
               at >= (state.turnStartedAt ?? 0) - 1 else { return state }
         state.phase = .idle
-        state.waitingFor = nil
-        state.waitingTool = nil
+        state.clearWaits()
         state.current = nil
         state.finishedAt = at
         if let started = state.turnStartedAt { state.lastTurnSeconds = at - started }
@@ -219,13 +218,12 @@ final class SessionStore: ObservableObject {
     /// Not while a subagent runs: its own commands start shells too, and would read as approved.
     private func approved(_ state: SessionState) -> SessionState {
         guard state.phase == .waiting, state.waitingFor?.hasPrefix("permission") == true, state.waitingTool == "Bash",
-              state.runningAgents.isEmpty,
+              state.runningAgents.isEmpty, (state.waits?.count ?? 1) == 1,
               let pid = state.pid, let since = state.waitingSince,
               ProcessList.hasChild(of: pid, startedAfter: since + 0.3, named: ["zsh", "bash", "fish"]) else { return state }
         var state = state
         state.phase = .working
-        state.waitingFor = nil
-        state.waitingTool = nil
+        state.clearWaits()
         return state
     }
 
