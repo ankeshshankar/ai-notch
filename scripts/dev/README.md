@@ -19,6 +19,7 @@
   [`preview-builds.json`](preview-builds.json) here is a sample with neutral names: copy it into a
   `CLAUDE_NOTCH_SESSIONS` folder for a preview of every row state. Reread on change, so editing it plays a state
   change; `--notify-unlocked` lets a preview run from the app bundle notify without locking
+  (session banners too; clicks and reopens are logged to `notch.log`)
   (pull-request notifications included: run `AINotch.app/Contents/MacOS/AINotch --preview
   --notify-unlocked` with the stub's variables).
 - `AINotch --eas-failure <build id>` / `--bitbucket-failure <ws/repo#n>` — the text Copy failure

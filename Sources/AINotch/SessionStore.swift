@@ -355,9 +355,10 @@ final class SessionStore: ObservableObject {
         Jump.to(session)
     }
 
-    /// Notify only while the screen is locked: at the Mac, the notch's glow and sound say it.
+    /// Notify only while the screen is locked: at the Mac, the notch's glow and sound say it (a
+    /// preview started with `--notify-unlocked` may notify anyway).
     private func shouldNotify(_ session: SessionState) -> Bool {
-        Notifier.shared.isScreenLocked
+        Notifier.mayPostAlerts
     }
 
     private func isGone(_ state: SessionState, at time: Double) -> Bool {

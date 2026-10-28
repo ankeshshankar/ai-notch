@@ -222,7 +222,13 @@ final class Notifier: NSObject {
         shared.isScreenLocked || (CommandLine.arguments.contains("--preview") && CommandLine.arguments.contains("--notify-unlocked"))
     }
 
-    private func note(_ line: String) {
+    /// When the last click on a notification arrived. Read from the reopen handler on the main
+    /// thread, so it sits behind a lock instead of the main actor.
+    private nonisolated static let responseClock = ResponseClock()
+    nonisolated static var lastResponse: Date? { responseClock.value }
+    nonisolated static func markResponse() { responseClock.set(Date()) }
+
+    func note(_ line: String) {
         let stamp = ISO8601DateFormatter().string(from: Date())
         guard let data = "\(stamp) \(line)\n".data(using: .utf8) else { return }
         if let handle = try? FileHandle(forWritingTo: log) {
@@ -233,6 +239,14 @@ final class Notifier: NSObject {
             try? data.write(to: log)
         }
     }
+}
+
+/// A date behind a lock, set by the notification click and read by the reopen check.
+private final class ResponseClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date?
+    var value: Date? { lock.lock(); defer { lock.unlock() }; return date }
+    func set(_ new: Date) { lock.lock(); date = new; lock.unlock() }
 }
 
 extension Notifier: UNUserNotificationCenterDelegate {
@@ -251,7 +265,13 @@ extension Notifier: UNUserNotificationCenterDelegate {
         let vpn = info["vpn"] != nil
         let prod = info["prod"] != nil
         let action = response.actionIdentifier
+        // Marked before anything else: macOS may tell the app to "reopen" around the same moment,
+        // and that must not open Setup (see AppDelegate.applicationShouldHandleReopen).
+        Notifier.markResponse()
+        let kind = prod ? "prod" : machine ? "machine" : vpn ? "vpn" : session != nil ? "session"
+            : build != nil ? "build" : url != nil ? "pull request" : "other"
         Task { @MainActor in
+            Notifier.shared.note("notification click: \(kind), action \(action)")
             if prod {
                 // Snooze opens nothing; a dismissal neither.
                 if action == "snooze" {

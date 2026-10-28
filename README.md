@@ -237,7 +237,10 @@ see [Pull requests](#pull-requests)) and
 memory critical for 30 seconds (see [Machine guard](#machine-guard)). Prod's Datadog news is the
 exception: it notifies while the screen is unlocked too (see [Prod health](#prod-health-datadog)).
 **Open** unlocks to the session. What the lock screen shows follows System Settings →
-Notifications → Show previews.
+Notifications → Show previews. Clicking a notification does what it says (jumps to the session,
+opens the run, pull request or Datadog page, shows the Machine or VPN panel) and never opens Setup.
+Each click, and each time the app is opened again, is written to `~/.claude/notch/notch.log`
+(Setup opens only when you open the app yourself).
 
 ### Limit alerts
 

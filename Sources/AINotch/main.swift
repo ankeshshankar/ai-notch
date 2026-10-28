@@ -73,10 +73,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Opening the app again (Finder, Spotlight, `open`) shows the setup window: the app has no
-    /// other window or Dock icon.
+    /// other window or Dock icon. Clicking a notification also activates the app, and macOS may
+    /// send the same "reopen" for it, so a click on a notification never counts: the check waits
+    /// a moment for the click to arrive, then skips Setup if one came just before or just after.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !isPreviewRun { SetupWindowController.shared.show() }
+        let opened = Date()
+        let from = Self.reopenSender()
+        let early = Notifier.lastResponse.map { opened.timeIntervalSince($0) <= Self.clickWindow } ?? false
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.reopenDelay) {
+            MainActor.assumeIsolated {
+                let click = Notifier.lastResponse.map { abs($0.timeIntervalSince(opened)) <= Self.clickWindow } ?? false
+                let verdict: String
+                if click { verdict = "skipped, a notification click came \(early ? "just before" : "just after")" }
+                else if isPreviewRun { verdict = "skipped, preview run (would show Setup)" }
+                else { verdict = "showed Setup"; SetupWindowController.shared.show() }
+                Notifier.shared.note("reopen from \(from): \(verdict)")
+            }
+        }
         return false
+    }
+
+    /// How long a reopen waits for a notification click, and how close a click must be to it.
+    private static let reopenDelay = 0.4
+    private static let clickWindow = 1.0
+
+    /// Who sent the reopen, for the log: the process behind the current Apple Event.
+    private static func reopenSender() -> String {
+        guard let pid = NSAppleEventManager.shared().currentAppleEvent?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value,
+              pid > 0 else { return "unknown" }
+        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+        return "\(name) (\(pid))"
     }
 
     func applicationWillTerminate(_ notification: Notification) {
