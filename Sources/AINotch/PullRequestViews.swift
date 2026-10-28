@@ -272,8 +272,7 @@ private struct PRsCard: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
         .frame(width: 290, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.card))
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.surface))
+        .floatingCard(radius: 10)
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.track, lineWidth: 1))
         .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
     }
@@ -284,6 +283,7 @@ struct PullRequestsSummaryLine: View {
     @ObservedObject var reviews: ReviewStore
     var controller: NotchController
     var isOpen: Bool
+    @Environment(\.notchGlass) private var glass
 
     var body: some View {
         Button {
@@ -303,8 +303,8 @@ struct PullRequestsSummaryLine: View {
                 Image(systemName: isOpen ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Palette.ink3)
             }
             .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.card))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(glass.color(Palette.card)))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(glass.color(Palette.hairline), lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(RowButtonStyle())
@@ -349,8 +349,7 @@ struct PullRequestsPanel: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .panelCard()
     }
 
     private var about: String {
@@ -420,6 +419,7 @@ private struct PRPanelRowView: View {
     var now: Double
     var isMuted: Bool
     var isDetailed: Bool
+    @Environment(\.notchGlass) private var glass
     var merge: PullRequestsPanel.MergeState?
 
     var body: some View {
@@ -448,8 +448,8 @@ private struct PRPanelRowView: View {
             }
         }
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(pr.needsSomething && !isMuted ? Palette.card : Palette.card.opacity(0.6)))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(pr.needsSomething && !isMuted ? glass.color(Palette.card) : glass.color(Palette.card).opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(glass.color(Palette.hairline), lineWidth: 1))
     }
 
     private var details: some View {

@@ -132,8 +132,7 @@ private struct ProdHeadsUpCard: View {
             .buttonStyle(.plain)
         }
         .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Palette.failedTint))
-        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Palette.surface))
+        .floatingCard(radius: 11, wash: Palette.failedTint)
         .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Palette.failedEdge, lineWidth: 1))
         .contextMenu {
             Button("Snooze for 1 Hour") { prod.snooze() }
@@ -301,9 +300,7 @@ private struct ProdCard: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
         .frame(width: 300, alignment: .leading)
-        // The card's tint over the body's opaque surface, so the rows under it do not show through.
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.card))
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.surface))
+        .floatingCard(radius: 10)
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.track, lineWidth: 1))
         .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
     }

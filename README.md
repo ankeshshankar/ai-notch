@@ -952,6 +952,16 @@ last turn (a minute for a first one), slowing as it nears the end. New rows slid
 state changes fade across. **Compact rows** (Setup → Effects) drops each row's project and model
 line, so eight fit before the list scrolls.
 
+**Glass** (Setup → Effects, off unless turned on) makes the open notch frosted glass: the desktop
+behind it shows through, blurred, instead of a solid body. On macOS 26 it is Liquid Glass, tinted
+towards the theme with a steady shade under it so small text keeps its contrast over any wallpaper;
+on earlier versions it is the blur menus use, with the same tint. The strip on the notch stays black
+and fades into the glass below it. Only the body is glass: the session and build rows, the panels
+(Usage, Code, Board, Machine, VPN, Commands, PRs) and the waiting, failed and approval cards turn
+into thin see-through fills on it, and the hover cards and the Prod banner sit on a nearly opaque
+sheet so the rows under them do not show through. Collapsed, the notch looks as it always does.
+Reduce Transparency keeps the solid look; Increase Contrast strengthens the fills, edges and shade.
+
 ### Keeping the Mac awake
 
 While any session works (hooked or found as a process), AI Notch holds a power assertion that
@@ -969,7 +979,7 @@ A closed lid is out of reach: macOS sleeps the Mac then unless an external displ
 ### Light and dark
 
 The panel follows the system's appearance, live. The strip on the notch stays black in both to
-blend with the hardware.
+blend with the hardware, with Glass on too.
 
 ## Desktop widget
 
@@ -1052,7 +1062,8 @@ NOTCH_SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" NOTCH_TEAM_ID=YO
 The app and the widget then share the app group `<NOTCH_TEAM_ID>.info.ankeshshiv.notch`.
 
 For development: `AINotch --preview [--theme light|dark]` opens an always-expanded copy in the
-middle of the screen (`--hover`: opening on hover and pinning as the real one does),
+middle of the screen (`--hover`: opening on hover and pinning as the real one does; `--glass`: with
+Glass on),
 `AINotch --setup-preview` opens the setup window alone, and
 `python3 scripts/dev/test-setup.py` tests the setup logic in temporary home folders. See
 [`scripts/dev/README.md`](scripts/dev/README.md) for these and the other helpers.

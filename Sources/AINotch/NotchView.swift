@@ -3,19 +3,19 @@ import NotchCore
 import SwiftUI
 
 /// One colour that resolves per appearance: the system's, live (or `--theme` in a preview).
-private func adaptive(light: NSColor, dark: NSColor) -> Color {
+func adaptive(light: NSColor, dark: NSColor) -> Color {
     Color(nsColor: adaptiveNS(light: light, dark: dark))
 }
 
-private func adaptiveNS(light: NSColor, dark: NSColor) -> NSColor {
+func adaptiveNS(light: NSColor, dark: NSColor) -> NSColor {
     NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light }
 }
 
-private func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor {
+func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor {
     NSColor(srgbRed: r, green: g, blue: b, alpha: a)
 }
 
-private func gray(_ w: CGFloat, _ a: CGFloat = 1) -> NSColor { NSColor(white: w, alpha: a) }
+func gray(_ w: CGFloat, _ a: CGFloat = 1) -> NSColor { NSColor(white: w, alpha: a) }
 
 /// The dropped-down body's colours by role, each with a light and a dark value.
 enum Palette {
@@ -45,6 +45,8 @@ enum Palette {
 
     // Surfaces: the body, the cards on it, and what sits on the cards.
     static let surface = adaptive(light: gray(0.94), dark: gray(0.0))
+    /// The light tint in the glass body (Glass on); the dimming for small text sits under the glass.
+    static let glassTint = adaptive(light: gray(1.0, 0.12), dark: gray(0.0, 0.20))
     static let card = adaptive(light: gray(1.0), dark: gray(1.0, 0.07))
     static let panel = adaptive(light: gray(1.0), dark: gray(1.0, 0.05))
     static let cardHover = adaptive(light: gray(0.0, 0.035), dark: gray(1.0, 0.05))
@@ -117,6 +119,8 @@ struct RootView: View {
     @ObservedObject var reviews: ReviewStore
     @ObservedObject var controller: NotchController
     @ObservedObject var effects = EffectsPrefs.shared
+    /// Glass on, open, and Reduce Transparency off: the rows and panels become see-through fills.
+    @Environment(\.notchGlass) private var glass
     /// The black edge left around the body's card.
     static let bezel: CGFloat = 5
 
@@ -144,13 +148,14 @@ struct RootView: View {
 
             if expanded {
                 // The body is a card set into the black shape: on light it hangs under the strip
-                // inside a thin black bezel, on dark it is the black itself.
+                // inside a thin black bezel, on dark it is the black itself. With Glass on it has
+                // no fill of its own and sits straight on the glass.
                 SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews, prLinks: reviews.sessionLinks, controller: controller,
                             isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, maxHeight: g.maxHeight - Self.bezel)
                     .background(
                         UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
                                                bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
-                            .fill(Palette.surface)
+                            .fill(glass.isOn ? Color.clear : Palette.surface)
                     )
                     .padding(.horizontal, Self.bezel)
                     .padding(.bottom, Self.bezel)
@@ -163,8 +168,8 @@ struct RootView: View {
             }
         }
         .frame(width: expanded ? width : g.collapsedWidth(showsWings: wings))
-        // Black in every theme: it is the hardware notch, grown.
-        .background(NotchShape(radius: expanded ? 22 : 11).fill(Color.black))
+        // Black in every theme: it is the hardware notch, grown. Open with Glass on, the body is glass.
+        .background(NotchFill(glass: expanded && glass.isOn, stripHeight: g.notchHeight, radius: 22))
         .overlay(WaitingGlow(isOn: !store.waiting.isEmpty && !expanded, radius: 11))
         .clipShape(NotchShape(radius: expanded ? 22 : 11))
         // The light effects around the closed notch, outside its clip (the notch itself is the
@@ -705,8 +710,7 @@ private struct UsagePanel: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .panelCard()
     }
 
     private var usageNote: String {
@@ -831,8 +835,7 @@ private struct CodePanel: View {
             repos(since: monthStart)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .panelCard()
     }
 
     /// "Lifetime · since 8 Sep": the first day any edit is on record.
@@ -1131,6 +1134,7 @@ struct InfoMark: View {
 private struct AgentIcon: View {
     var session: SessionState
     var host: NSImage?
+    @Environment(\.notchGlass) private var glass
 
     var body: some View {
         let kind = session.kind
@@ -1160,7 +1164,7 @@ private struct AgentIcon: View {
                     }
                 }
                 .frame(width: 12, height: 12)
-                .background(Circle().fill(session.phase == .waiting ? Palette.badgeRingWaiting : Palette.badgeRing).frame(width: 15, height: 15))
+                .background(Circle().fill(glass.color(session.phase == .waiting ? Palette.badgeRingWaiting : Palette.badgeRing)).frame(width: 15, height: 15))
                 .offset(x: 4, y: 4)
             }
         }
@@ -1224,12 +1228,13 @@ struct RowCard: ViewModifier {
     var tint: Color = Palette.card
     var edge: Color = Palette.hairline
     var padding: CGFloat = 10
+    @Environment(\.notchGlass) private var glass
 
     func body(content: Content) -> some View {
         content
             .padding(padding)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(tint))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(edge, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(glass.color(tint)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(glass.color(edge), lineWidth: 1))
     }
 }
 
@@ -1299,6 +1304,7 @@ private struct ApprovalCard: View {
     @State private var isArmed = false
     /// For a question form: the labels picked so far, by question.
     @State private var picked: [Int: Set<String>] = [:]
+    @Environment(\.notchGlass) private var glass
 
     var body: some View {
         let request = item.request
@@ -1366,7 +1372,7 @@ private struct ApprovalCard: View {
             }
         }
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Palette.approvalCard))
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(glass.color(Palette.approvalCard)))
         .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Palette.waitingEdge, lineWidth: 1))
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + ApprovalCenter.armDelay) { isArmed = true }

@@ -1,7 +1,7 @@
 #!/bin/bash
 # CI: screenshots of the open notch for a design check. Sample sessions are made by feeding hook
 # events through the real hook (a working session with a to-do list, an idle one, one waiting),
-# then `AINotch --preview` is shown in light and dark and the screen captured. Writes PNGs to
+# then `AINotch --preview` is shown in light and dark, solid and glass, and the screen captured. Writes PNGs to
 # $1 (default: screenshots/).
 set -u
 OUT="${1:-screenshots}"
@@ -26,11 +26,14 @@ event gamma "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"gamma\",
 event gamma "{\"hook_event_name\":\"Notification\",\"session_id\":\"gamma\",\"cwd\":\"$cwd\",\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs your permission to use Bash\"}"
 ls "$CLAUDE_NOTCH_SESSIONS"
 
-for theme in dark light; do
-  "$BIN/AINotch" --preview --theme "$theme" >/dev/null 2>&1 &
+for look in dark light dark-glass light-glass; do
+  theme="${look%-glass}"
+  glass=""
+  [ "$look" != "$theme" ] && glass="--glass"
+  "$BIN/AINotch" --preview --theme "$theme" $glass >/dev/null 2>&1 &
   pid=$!
   sleep 6
-  screencapture -x "$OUT/notch-$theme.png" || echo "screencapture failed ($theme)"
+  screencapture -x "$OUT/notch-$look.png" || echo "screencapture failed ($look)"
   kill "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
 done

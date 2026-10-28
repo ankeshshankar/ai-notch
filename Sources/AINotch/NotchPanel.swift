@@ -247,6 +247,7 @@ final class NotchController: ObservableObject {
         panel.contentView = ClickThroughHostingView(rootView: ProdHeadsUpHost(prod: prod, controller: self,
                                                                               content: RootView(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn,
                                                                                                reviews: reviews, controller: self))
+            .modifier(GlassScope(controller: self))
             .environment(\.hoverHub, hover))
         // Prod's banner gives way to a full-screen app (notification only).
         prod.popBlocker = { [weak self] in self?.fullScreenWindowAhead() == true ? "full screen" : nil }

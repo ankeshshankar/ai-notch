@@ -85,8 +85,7 @@ struct MachinePanel: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .panelCard()
     }
 
     @ViewBuilder private var memoryLine: some View {

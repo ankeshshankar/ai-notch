@@ -7,6 +7,7 @@
   (`screencapture -x -R x,y,w,h out.png`); kill it afterwards. With the panel 470 wide, its window
   top is at `screen.midY + 300` (AppKit), i.e. y ≈ 284 on a 1169-tall screen.
 - `AINotch --preview --collapsed` — the collapsed strip in the same place, for wing screenshots.
+- `AINotch --preview --glass` — the body as glass (Setup → Effects → Glass) whatever is saved.
 - `AINotch --preview --hover` — the strip in the same place that opens on hover, closes when the
   pointer leaves and stays open when pinned, like the real notch: for testing the pin and
   click-through without touching the real one. Its pin is the bare binary's own default

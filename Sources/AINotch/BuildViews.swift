@@ -523,6 +523,7 @@ private struct StepLine: View {
 struct SourceMark: View {
     var source: BuildRow.Source
     var platform: String?
+    @Environment(\.notchGlass) private var glass
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -549,7 +550,7 @@ struct SourceMark: View {
                     }
                 }
                 .frame(width: 12, height: 12)
-                .background(Circle().fill(Palette.badgeRing).frame(width: 15, height: 15))
+                .background(Circle().fill(glass.color(Palette.badgeRing)).frame(width: 15, height: 15))
                 .offset(x: 4, y: 4)
                 .help(platform == "ios" ? "iOS" : "Android")
             }

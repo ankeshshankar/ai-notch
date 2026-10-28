@@ -29,8 +29,7 @@ struct BoardPanel: View {
             if !board.idle.isEmpty { idleFooter }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .panelCard()
     }
 
     private func tint(_ column: BoardColumn) -> Color {

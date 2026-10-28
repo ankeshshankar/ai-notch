@@ -89,8 +89,7 @@ struct VPNPanel: View {
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .panelCard()
     }
 
     @ViewBuilder private var content: some View {

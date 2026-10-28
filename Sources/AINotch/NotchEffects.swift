@@ -46,6 +46,8 @@ final class EffectsPrefs: ObservableObject {
     @Published var sparkles: Bool { didSet { save(sparkles, "effects.sparkles") } }
     /// Denser session rows: one line less each, so more fit before the list scrolls.
     @Published var compactRows: Bool { didSet { save(compactRows, "effects.compactRows") } }
+    /// The open notch's body as frosted glass instead of solid (the strip on the notch stays black).
+    @Published var glass: Bool { didSet { save(glass, "effects.glass") } }
     /// Hold the Mac awake while an agent works (KeepAwake).
     @Published var keepAwake: Bool { didSet { save(keepAwake, "effects.keepAwake") } }
     /// Keep holding on battery too (it still lets go below 20%).
@@ -58,6 +60,8 @@ final class EffectsPrefs: ObservableObject {
         pointerGlow = defaults.object(forKey: "effects.pointerGlow") as? Bool ?? true
         sparkles = defaults.object(forKey: "effects.sparkles") as? Bool ?? false
         compactRows = defaults.object(forKey: "effects.compactRows") as? Bool ?? false
+        // `--preview --glass` shows it on whatever is saved, for screenshots.
+        glass = CommandLine.arguments.contains("--glass") || defaults.object(forKey: "effects.glass") as? Bool ?? false
         keepAwake = defaults.object(forKey: "effects.keepAwake") as? Bool ?? true
         keepAwakeOnBattery = defaults.object(forKey: "effects.keepAwakeOnBattery") as? Bool ?? true
     }

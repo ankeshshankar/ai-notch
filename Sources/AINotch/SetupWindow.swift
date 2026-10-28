@@ -1322,6 +1322,11 @@ struct SetupView: View {
                 Toggle("", isOn: $effects.compactRows).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
+            row("Glass", icon: "drop.halffull", tint: Color(red: 0.25, green: 0.62, blue: 0.90),
+                info: "The open notch as frosted glass: the desktop behind it shows through, blurred, instead of a solid body. Liquid Glass on macOS 26, the menus' blur on earlier versions. The strip on the notch stays black, to blend with the hardware.") {
+                Toggle("", isOn: $effects.glass).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
             row("Keep the Mac awake while an agent works", icon: "moon.zzz.fill", tint: Color(red: 0.36, green: 0.40, blue: 0.80),
                 info: "Stops the Mac sleeping on its own while an agent works and for 2 minutes after the last one stops, so a turn goes on with the screen locked. The display may still sleep. Shown as \"AI Notch: an agent is working\" in pmset -g assertions. Closing the lid still sleeps the Mac unless a display is attached.") {
                 Toggle("", isOn: $effects.keepAwake).toggleStyle(.switch).controlSize(.small).labelsHidden()
