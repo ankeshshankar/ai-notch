@@ -112,6 +112,8 @@ struct ProdMonitor: Equatable, Sendable {
     var tags: [String] = []
     /// The monitor's own query: most carry no service tag, the service is only inside it.
     var query = ""
+    /// When it last triggered (the search's `last_triggered_ts`), seconds.
+    var triggeredAt: Double?
 }
 
 extension ProdMonitor {
@@ -122,7 +124,8 @@ extension ProdMonitor {
             guard let id = (item["id"] as? NSNumber)?.int64Value else { continue }
             let monitor = ProdMonitor(id: id, name: item["name"] as? String ?? "Monitor \(id)", status: item["status"] as? String ?? "Unknown",
                                       tags: ((item["tags"] as? [String]) ?? []) + ((item["scopes"] as? [String]) ?? []),
-                                      query: item["query"] as? String ?? "")
+                                      query: item["query"] as? String ?? "",
+                                      triggeredAt: (item["last_triggered_ts"] as? NSNumber).map(\.doubleValue))
             if monitor.isHidden(hidden) { dropped.append(monitor) } else { kept.append(monitor) }
         }
         return (kept, dropped)
@@ -258,31 +261,41 @@ private enum DatadogHTTP {
 /// About 108 requests an hour unlocked with two numbers, 144 at the very worst with deploy checks
 /// busy; a hard cap of 150.
 actor DatadogSource {
-    enum Kind: String, CaseIterable { case monitors, incidents, numbers, watchdog, deploys, errors }
+    enum Kind: String, CaseIterable { case monitors, incidents, numbers, watchdog, deploys, errors
+        /// The Prod page, read only while it is open (ProdPageSource.swift): the health numbers' series, and the events.
+        case series, history }
     /// The kinds on a steady pace; the deploy kinds follow pushes (tickDeploys).
     private static let steady: [Kind] = [.monitors, .incidents, .numbers, .watchdog]
 
     /// The credential in use: the Datadog sign-in (preferred), or the API and application keys.
-    private enum Via: Equatable { case signIn, keys }
+    enum Via: Equatable { case signIn, keys }
 
     private let onChange: @Sendable (ProdSnapshot) -> Void
-    private var config: BuildsConfig.Datadog?
-    private var via: Via?
+    var config: BuildsConfig.Datadog?
+    var via: Via?
     private var keys: (api: KeychainItem.Found, app: KeychainItem.Found)?
     private var keysCheckedAt: Double = -.infinity
     /// The fingerprint of keys Datadog refused: the same ones read again are not retried.
     private var rejected: String?
     private var wantsKeys = false
-    private var snapshot = ProdSnapshot()
+    var snapshot = ProdSnapshot()
     private var last = ProdSnapshot()
     private var lastSentAt: Double = 0
     private var fetchedAt: [Kind: Double] = [:]
     /// A kind held back by a rate limit (429, or few requests left) until then.
-    private var holdUntil: [Kind: Double] = [:]
+    var holdUntil: [Kind: Double] = [:]
     /// A 403 on incidents or the numbers (a missing scope): tried again after an hour.
-    private var noAccessUntil: [Kind: Double] = [:]
-    private var slowUntil: Double = 0
+    var noAccessUntil: [Kind: Double] = [:]
+    var slowUntil: Double = 0
     private var requests: [Double] = []
+    /// The Prod page's own requests in the last hour (kept apart from `requests`, so reading the
+    /// page never pauses the steady polls), and what the page needs to remember.
+    var pageRequests: [Double] = []
+    var page = PageState()
+    /// Why the last request failed, in plain words; nil after a good one. Never a header or a key.
+    var failure: String?
+    let onPage: (@Sendable (ProdPageData) -> Void)?
+    var pageSentAt: Double = 0
     /// Deploy checks: when each linked service last pushed (set by the app), what was read of it,
     /// and the requests they made in the last hour (kept inside DeployBudget).
     private var pushes: [String: Double] = [:]
@@ -303,8 +316,9 @@ actor DatadogSource {
     /// Dev: every kind at this pace instead (CLAUDE_NOTCH_DATADOG_EVERY=<seconds>).
     static let testEvery = Double(ProcessInfo.processInfo.environment["CLAUDE_NOTCH_DATADOG_EVERY"] ?? "")
 
-    init(onChange: @escaping @Sendable (ProdSnapshot) -> Void) {
+    init(onChange: @escaping @Sendable (ProdSnapshot) -> Void, onPage: (@Sendable (ProdPageData) -> Void)? = nil) {
         self.onChange = onChange
+        self.onPage = onPage
     }
 
     func start() {
@@ -327,7 +341,7 @@ actor DatadogSource {
         fetchedAt = [:]
     }
 
-    private var now: Double { Date().timeIntervalSince1970 }
+    var now: Double { Date().timeIntervalSince1970 }
 
     private func interval(_ kind: Kind, locked: Bool) -> Double? {
         let slow: Double = now < slowUntil ? 2 : 1
@@ -337,7 +351,7 @@ actor DatadogSource {
         case .incidents: return 180 * slow
         case .numbers: return locked ? nil : 300 * slow
         case .watchdog: return locked ? nil : DeployPlanner.watchdogEvery * slow
-        case .deploys, .errors: return nil
+        case .deploys, .errors, .series, .history: return nil
         }
     }
 
@@ -444,10 +458,11 @@ actor DatadogSource {
             case .incidents: await fetchIncidents(config)
             case .numbers: await fetchNumbers(config)
             case .watchdog: await fetchWatchdog(config)
-            case .deploys, .errors: break
+            case .deploys, .errors, .series, .history: break
             }
         }
         if scopes.deploys { await tickDeploys(config, locked: locked) }
+        await tickPage(config, locked: locked)
         publish()
         logCountIfDue()
     }
@@ -458,8 +473,9 @@ actor DatadogSource {
     /// Handles what changes the schedule: 401 (with the sign-in: renewed once and retried; with
     /// the keys, and 403 on the monitor search: rejected), 403 on incidents or the numbers (a
     /// missing scope), 429 and few requests left (that kind waits for the reset).
-    private func send(_ kind: Kind, _ url: URL, body: Data? = nil, retried: Bool = false) async -> Data? {
-        guard let via else { return nil }
+    func send(_ kind: Kind, _ url: URL, body: Data? = nil, retried: Bool = false) async -> Data? {
+        failure = nil
+        guard let via else { failure = "not connected"; return nil }
         var request = URLRequest(url: url, timeoutInterval: 20)
         var bearer: String?
         switch via {
@@ -474,9 +490,11 @@ actor DatadogSource {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             case .ended(let why):
                 signInEnded(why)
+                failure = "the Datadog sign-in ended"
                 return nil
             case .unavailable(let why):
                 snapshot.problem = SourceStatus(text: "offline", help: why)
+                failure = "offline"
                 return nil
             case .none:
                 self.via = nil
@@ -489,13 +507,14 @@ actor DatadogSource {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        requests.append(now)
+        if kind == .series || kind == .history { pageRequests.append(now) } else { requests.append(now) }
         // Every deploy-check request counts against its own allowance, a renewed-token retry too.
         if kind == .deploys || kind == .errors { deployRequests.append(now) }
         let started = Date()
         guard let (data, response) = try? await DatadogHTTP.session.data(for: request),
               let http = response as? HTTPURLResponse else {
             snapshot.problem = SourceStatus(text: "offline", help: "Datadog did not answer; it is tried again on the next poll.")
+            failure = "Datadog did not answer"
             return nil
         }
         if ProcessInfo.processInfo.environment["CLAUDE_NOTCH_BUILD_TIMING"] != nil {
@@ -525,9 +544,11 @@ actor DatadogSource {
             } else {
                 snapshot.problem = SourceStatus(text: "sign-in refused", help: "Datadog answered 401 to a renewed sign-in; tried again on the next poll.")
             }
+            failure = "Datadog refused the sign-in (401)"
             return nil
         case 401:
             reject("Datadog refused the API key (401): wrong, revoked, or for another site than \(snapshot.site).")
+            failure = "Datadog refused the API key (401)"
             return nil
         case 403 where kind == .monitors && bearer != nil:
             // The user's role (or the granted scopes) cannot read monitors: held for 10 minutes.
@@ -545,20 +566,26 @@ actor DatadogSource {
             case .incidents: snapshot.incidentsNote = "needs \(scope)"
             case .deploys, .errors: setNote(kind, bearer != nil && kind == .errors ? DeployScopes.errorsMissing : bearer != nil ? DeployScopes.deployMissing : "needs \(scope)")
             case .watchdog: snapshot.watchdogNote = bearer != nil ? DeployScopes.watchdogMissing : "needs \(scope)"
+            case .series, .history: break
             default: snapshot.numbersNote = "needs \(scope)"
             }
+            failure = bearer != nil ? "sign in again: \(scope) was not granted" : "the application key lacks \(scope)"
             noteBuildLog("datadog: 403 on \(url.path), \(bearer != nil ? "the sign-in" : "the application key") lacks \(scope); tried again in an hour")
             return nil
         case 429:
             let wait = max(10, reset ?? 60)
             holdUntil[kind] = now + wait
             slowUntil = now + 900
+            failure = "rate limited, waiting \(Int(wait)) s"
             snapshot.problem = SourceStatus(text: "rate limited", help: "Datadog asked to slow down (\(bucket)); \(kind.rawValue) waits \(Int(wait)) s, then everything runs at half pace for 15 minutes.")
             noteBuildLog("datadog: 429 on \(bucket), \(kind.rawValue) waits \(Int(wait)) s, half pace for 15 minutes")
             return nil
         default:
             let message = Self.errorText(data)
-            if http.statusCode == 400, kind == .numbers {
+            failure = http.statusCode == 400 ? "query refused: \(message ?? "400")" : "Datadog error \(http.statusCode)"
+            if kind == .series || kind == .history {
+                // The page says it itself; the chip's problem stays about the polls.
+            } else if http.statusCode == 400, kind == .numbers {
                 snapshot.numbersNote = "query refused: \(message ?? "400")"
             } else if http.statusCode == 400, kind == .incidents {
                 snapshot.incidentsNote = "query refused: \(message ?? "400")"
@@ -607,7 +634,7 @@ actor DatadogSource {
         return line.isEmpty ? nil : String(line.prefix(200))
     }
 
-    private func url(_ path: String, _ items: [URLQueryItem]) -> URL? {
+    func url(_ path: String, _ items: [URLQueryItem]) -> URL? {
         guard let config, var components = URLComponents(string: DatadogConfig.apiBase(config.site) + path) else { return nil }
         components.queryItems = items
         // `+` would read as a space.
@@ -643,6 +670,10 @@ actor DatadogSource {
         snapshot.monitors = monitors.filter { rank[$0.status] != nil }
             .sorted { (rank[$0.status] ?? 9, $0.name) < (rank[$1.status] ?? 9, $1.name) }
         snapshot.statusCounts = counts
+        // For the Prod page: which monitors the configured query covers (so an event of another
+        // monitor is left out), and when each current non-OK one last triggered.
+        page.monitorIds = Set(monitors.map(\.id))
+        page.monitorIdsComplete = list.count >= (((object["metadata"] as? [String: Any])?["total_count"] as? NSNumber)?.intValue ?? list.count)
         snapshot.monitorTotal = max(0, (((object["metadata"] as? [String: Any])?["total_count"] as? NSNumber)?.intValue ?? list.count) - dropped.count)
         snapshot.monitorsAt = now
         snapshot.access = .ok
@@ -664,6 +695,8 @@ actor DatadogSource {
         // A hidden service's incidents (builds.json `hiddenServices`) are dropped: by the service
         // the incident's fields name, or, with none, a title that names it.
         let hidden = Set(config.hiddenServices)
+        // For the Prod page: every incident the search returned, opened and resolved.
+        page.incidentEntries = ProdTimelineEntry.incidents(list, hidden: hidden)
         snapshot.incidents = list.compactMap { wrapper -> ProdIncident? in
             guard let data = wrapper["data"] as? [String: Any], let id = data["id"] as? String else { return nil }
             let attributes = data["attributes"] as? [String: Any] ?? [:]
@@ -731,6 +764,7 @@ actor DatadogSource {
             return
         }
         deployEvents = Watchdog.parseDeploys(data, hidden: hidden) ?? []
+        page.eventsData = (data, now)
         snapshot.watchdog = stories
         snapshot.watchdogAt = now
         snapshot.watchdogNote = nil
@@ -743,8 +777,8 @@ actor DatadogSource {
         case .monitors: return "monitors_read"
         case .incidents: return "incident_read"
         case .errors: return "apm_read"
-        case .watchdog: return "events_read"
-        case .numbers, .deploys: return "timeseries_query"
+        case .watchdog, .history: return "events_read"
+        case .numbers, .deploys, .series: return "timeseries_query"
         }
     }
 

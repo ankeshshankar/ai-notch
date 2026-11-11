@@ -320,7 +320,6 @@ struct CommandsChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .fixedSize()
         .help("Commands running in the background: what agents started, and what has run a minute in your terminals")
         .ax("Commands", value: "\(commands.count) running", selected: isOpen)
     }

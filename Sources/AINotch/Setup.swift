@@ -313,6 +313,10 @@ enum HookPlan {
         Event(name: "StopFailure", timeout: 5),
         Event(name: "PreCompact", timeout: 5),
         Event(name: "PostCompact", timeout: 5),
+        // The session's working folder changed (a `cd`): where the agent works, for the row's
+        // branch. Non-blocking, no decision. WorktreeCreate is never hooked: a command hook there
+        // replaces git's own worktree creation and must print the path.
+        Event(name: "CwdChanged", timeout: 5),
     ]
 
     /// Cursor's events that act on nothing the hook answers. Its permission hooks (preToolUse,

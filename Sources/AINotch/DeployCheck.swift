@@ -671,7 +671,7 @@ enum Watchdog {
     static let lookback: Double = 86400
 
     /// One request for both: Watchdog's stories and the deploy events, newest first.
-    static func items(now: Double) -> [URLQueryItem] {
+    static func items(now: Double, lookback: Double = Watchdog.lookback) -> [URLQueryItem] {
         [URLQueryItem(name: "filter[query]", value: "source:(watchdog OR change_tracking)"),
          URLQueryItem(name: "filter[from]", value: String(Int64((now - lookback) * 1000))),
          URLQueryItem(name: "filter[to]", value: String(Int64(now * 1000))),
@@ -679,7 +679,7 @@ enum Watchdog {
          URLQueryItem(name: "sort", value: "-timestamp")]
     }
 
-    private struct Event {
+    struct Event {
         var id: String
         var title: String
         var tags: [String]
@@ -696,7 +696,7 @@ enum Watchdog {
         var isDeploy: Bool { title.hasPrefix("New APM Deployment Version") || tags.contains("source:change_tracking") }
     }
 
-    private static func events(_ data: Data) -> [Event]? {
+    static func events(_ data: Data) -> [Event]? {
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let list = object["data"] as? [[String: Any]] else { return nil }
         return list.map { event in

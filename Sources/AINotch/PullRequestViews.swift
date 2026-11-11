@@ -109,15 +109,9 @@ struct PRsChip: View {
                 controller.openPanel = isOpen ? nil : NotchController.pullRequestsPanel
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.triangle.pull").font(Typo.caption(.semibold))
-                Text("PRs").font(Typo.label(.semibold))
-                if !quiet, !reviews.attention.isEmpty {
-                    Text("\(reviews.attention.count)").font(Typo.caption(.bold).monospacedDigit())
-                        .foregroundStyle(isOpen ? Palette.done : Palette.onDone)
-                        .padding(.horizontal, 4).padding(.vertical, 0.5)
-                        .background(Capsule().fill(isOpen ? Palette.onDone : Palette.bitbucket))
-                }
+            ViewThatFits(in: .horizontal) {
+                label(full: true, isOpen: isOpen, quiet: quiet)
+                label(full: false, isOpen: isOpen, quiet: quiet)
             }
             .foregroundStyle(isOpen ? Palette.onDone : quiet ? Palette.ink3 : Palette.ink2)
             .padding(.horizontal, 8).padding(.vertical, 4)
@@ -125,7 +119,6 @@ struct PRsChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .fixedSize()
         .ax("Pull requests", value: quiet || reviews.attention.isEmpty ? "none need you" : "\(reviews.attention.count) need you", selected: isOpen)
         .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { frame in
             hover.zones[Self.zone] = frame
@@ -145,6 +138,23 @@ struct PRsChip: View {
             }
         }
         .animation(Motion.ease(0.12), value: isHovered)
+    }
+}
+
+extension PRsChip {
+    /// Compact: the mark and how many need you. Full: and "PRs".
+    fileprivate func label(full: Bool, isOpen: Bool, quiet: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "arrow.triangle.pull").font(Typo.caption(.semibold)).decorative()
+            if full { Text("PRs").font(Typo.label(.semibold)) }
+            if !quiet, !reviews.attention.isEmpty {
+                Text("\(reviews.attention.count)").font(Typo.caption(.bold).monospacedDigit())
+                    .foregroundStyle(isOpen ? Palette.done : Palette.onDone)
+                    .padding(.horizontal, 4).padding(.vertical, 0.5)
+                    .background(Capsule().fill(isOpen ? Palette.onDone : Palette.bitbucket))
+            }
+        }
+        .lineLimit(1).fixedSize()
     }
 }
 

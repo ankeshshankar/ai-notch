@@ -331,6 +331,18 @@ Beside the phase (working, waiting, idle) a row can be **failed** or **compactin
 - **Git**: branch, uncommitted files (`●3`), unpushed commits (`↑2`) and "no upstream", from one
   `git status --porcelain=v2 --branch` per folder every 30 s (off the main thread, 3 s limit);
   asked for every session folder, whether or not pull-request linking is on.
+- **Work folder**: a session's folder is where it started; the agent often works in another linked
+  worktree of the same repository. The hook (Claude Code and Codex; Cursor and Gemini unchanged)
+  records `workDir` from acting signals only: a write (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`),
+  a Bash command naming a tree (`git -C <path>`, `cd <path>`, `git worktree add <path>`), and a change of
+  the event's `cwd` (or `CwdChanged`'s `new_cwd`); one in the start checkout clears it. Reads and searches
+  never switch it, and nothing outside the start folder's repository counts. The row then shows
+  that branch with a worktree mark and the folder's name; uncommitted/unpushed counts, the CI mark and
+  the PR link follow it; Details adds "checked out: X · working in: Y (name)". A subagent keeps its own
+  `workDir` and shows its branch on its card; the row adds "+2 worktrees" for those other than its own.
+  Only start folders and active work folders are asked, never every worktree. A removed worktree
+  falls back to the start folder. `WorktreeCreate` is deliberately not hooked: a command hook there
+  replaces git's own creation. Compact rows show no branch line (as before).
 - **CI**: the newest run on the session's branch (Pipelines: its repo and branch or commit; EAS:
   its HEAD commit), matched from what Pipelines and EAS already fetched, as one mark (running,
   passed, failed). A click opens it (`SafeLink`); Details names it and its age.
@@ -702,6 +714,27 @@ it up; without it the chip stays hidden.
    - `health` (optional, up to 3): each a `label`, one `query` or named `queries` with a
      `formula`, an `aggregator` (`avg` by default), a `unit` (`%` or `ms`), a `scale` (`1000` turns
      seconds into ms), `amber` (in the shown unit) and `minutes` (the window, 15 by default).
+
+### Prod page
+
+The Prod chip opens a page (a second click closes it): **Now** (state, open incidents and alerting
+monitors), **Performance** (each `health` number with its current value, a sparkline over the range,
+min–max and the change; amber over its line, red at twice it) and **Timeline** (newest first: monitor
+alerts, warnings and recoveries, incidents opened and resolved, deploys, Watchdog stories; a click opens
+it in Datadog through the link check). The range, 1 h / 24 h / 7 d (24 h by default), is remembered.
+
+- Built from: the monitor search's `last_triggered_ts`, monitor alert events (`source:alert`), the incident
+  search, the Watchdog/deploy events, and what the app itself saw (kept 7 days, 300 entries, in
+  `~/.claude/notch/prod-history.json`, 0600; `CLAUDE_NOTCH_PROD_HISTORY` moves it, a preview keeps none).
+  Datadog's own history is limited to its answers (100 events a request); anything older than what it
+  returns, and anything before this app first ran, is missing.
+- Requests: nothing extra while the page is closed or the screen is locked. Open: one timeseries request
+  per health number a minute, the alert events every 2 minutes, and on 7 d the events every 5 minutes (on
+  1 h / 24 h the Watchdog poll's answer is reused): 150 an hour with two numbers on 24 h, 162 on 7 d, inside
+  a page cap of 240 an hour kept apart from the polls' 150. 429s, holds and 403s are handled as for the polls.
+- A missing scope (`timeseries_query` for the numbers, `events_read` for alerts, Watchdog and deploys) is
+  named in its own section; the other sections keep working.
+- `AINotch --prodpage-selfcheck` checks the timeline, series, history, plan, links and range switch.
 
 2. Setup → Prod → **Sign in with Datadog**. Your browser opens Datadog's sign-in for the `site`
    in `builds.json`; approve AI Notch there (it asks only for `monitors_read`, `incident_read`,

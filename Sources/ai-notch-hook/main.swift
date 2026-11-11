@@ -827,6 +827,45 @@ default:
 }
 }
 
+// Where the agent really works (Claude Code and Codex): a linked worktree of the start folder's
+// repository, from acting signals only. A write (Edit, Write, MultiEdit, NotebookEdit), a Bash
+// command naming a tree (`git -C`, `cd`, `git worktree add`) and a change of the working folder
+// (`cwd` differing from the last event's, or CwdChanged) set it; one in the start checkout clears it.
+// A read, a search or an unchanged `cwd` never does, so one look at another tree cannot flip the
+// row. A subagent's signals go to the subagent only. A folder that is gone is dropped (a removed
+// worktree: the row falls back to the start folder).
+if isClaude || isCodex {
+    func noteActing(_ path: String) {
+        let dir: String?
+        switch WorkTree.verdict(for: path, start: state.cwd) {
+        case .ignored: return
+        case .start: dir = nil
+        case .other(let root): dir = root
+        }
+        if let index = agentIndex(agentId) { state.agents[index].workDir = dir } else if agentId == nil { state.workDir = dir }
+    }
+    let eventCwd = name == "CwdChanged" ? string("new_cwd") : string("cwd")
+    if let eventCwd {
+        let last = agentIndex(agentId).map { state.agents[$0].lastCwd } ?? (agentId == nil ? state.lastCwd : nil)
+        if eventCwd != (last ?? state.cwd) { noteActing(eventCwd) }
+        if let index = agentIndex(agentId) { state.agents[index].lastCwd = eventCwd } else if agentId == nil { state.lastCwd = eventCwd }
+    }
+    let input = event["tool_input"] as? [String: Any] ?? [:]
+    let base = string("cwd") ?? state.lastCwd ?? state.cwd
+    if name == "PreToolUse", ["Edit", "MultiEdit", "Write"].contains(tool ?? ""), let path = input["file_path"] as? String {
+        noteActing(path)
+    } else if name == "PreToolUse", tool == "NotebookEdit", let path = input["notebook_path"] as? String {
+        noteActing(path)
+    } else if name == "PreToolUse" || name == "PostToolUse", tool == "Bash", let command = input["command"] as? String,
+              let last = WorkTree.folders(inCommand: command, cwd: base).last(where: { WorkTree.verdict(for: $0, start: state.cwd) != .ignored }) {
+        noteActing(last)
+    }
+    if let dir = state.workDir, !FileManager.default.fileExists(atPath: dir) { state.workDir = nil }
+    for index in state.agents.indices {
+        if let dir = state.agents[index].workDir, !FileManager.default.fileExists(atPath: dir) { state.agents[index].workDir = nil }
+    }
+}
+
 // Old subagents leave; the newest stay.
 state.agents.removeAll { agent in agent.endedAt.map { now - $0 > agentLinger } ?? false }
 if state.agents.count > maxAgents { state.agents.removeFirst(state.agents.count - maxAgents) }

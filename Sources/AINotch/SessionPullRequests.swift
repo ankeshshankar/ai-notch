@@ -221,6 +221,8 @@ struct SessionGit: Equatable, Sendable {
     var isDetached = false
     /// Whether git answered at all: a folder that is no repository has nothing to show.
     var isRepo = false
+    /// The folder is a linked git worktree, not the repository's main checkout.
+    var isLinkedWorktree = false
 
     /// The upstream is unknown only for a named branch that tracks nothing.
     var hasNoUpstream: Bool { isRepo && branch != nil && upstream == nil }
@@ -338,6 +340,7 @@ actor SessionGitSource {
             let remotes = await Self.git(folder, ["config", "--get-regexp", #"^remote\..*\.url$"#])
             var git = status.map(GitStatusParse.parse) ?? SessionGit()
             git.repo = remotes.flatMap(GitRemote.repo(fromConfig:))
+            git.isLinkedWorktree = WorkTree.info(of: folder)?.isLinked ?? false
             cache[folder] = (git, now)
             result[folder] = git
         }
@@ -362,6 +365,23 @@ actor SessionGitSource {
                 continuation.resume(returning: process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil)
             }
         }
+    }
+}
+
+/// Where a session works when that is not the folder it started in.
+struct SessionWork: Equatable {
+    var dir: String
+    var git: SessionGit
+    /// The start folder's git state (its branch is "checked out").
+    var start: SessionGit?
+
+    /// The worktree folder's short name.
+    var name: String { (dir as NSString).lastPathComponent }
+    /// "checked out: X · working in: Y (name)", for the details.
+    var line: String {
+        let there = GitMarks.branchText(git) ?? "?"
+        let here = start.flatMap(GitMarks.branchText) ?? "?"
+        return "checked out: \(here) · working in: \(there) (\(name))"
     }
 }
 
@@ -409,10 +429,42 @@ final class SessionPRStore: ObservableObject {
     private var watchedSent: Set<String> = []
 
     func setSessions(_ list: [SessionState]) {
-        let before = Set(sessions.values.map(\.cwd))
+        let before = Set(folders)
         sessions = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         takeBackUndelivered()
-        if !Set(sessions.values.map(\.cwd)).isSubset(of: before) { refreshGit() } else { relink() }
+        if !Set(folders).isSubset(of: before) { refreshGit() } else { relink() }
+    }
+
+    /// The folders asked: each session's start folder, the work folder it is in now and the ones
+    /// its running subagents are in. Never the repository's other worktrees.
+    private var folders: [String] {
+        Array(Set(sessions.values.flatMap { session in
+            [session.cwd] + [session.workDir] + session.runningAgents.map(\.workDir)
+        }.compactMap { $0 }.filter { !$0.isEmpty })).sorted()
+    }
+
+    /// Where the session works, when that is another checkout than the one it started in and git
+    /// still answers there (a removed worktree falls back to the start folder).
+    func work(of session: SessionState) -> SessionWork? {
+        guard let dir = session.workDir, dir != session.cwd, let git = gits[dir], git.isRepo else { return nil }
+        return SessionWork(dir: dir, git: git, start: gits[session.cwd])
+    }
+
+    /// The git state the row follows: the work folder's, else the start folder's.
+    func git(of session: SessionState) -> SessionGit? {
+        work(of: session)?.git ?? gits[session.cwd]
+    }
+
+    /// The branch a running subagent works on in its own worktree (a different one from the
+    /// session's own work folder), by agent id.
+    func agentBranches(of session: SessionState) -> [String: SessionWork] {
+        let own = work(of: session)?.dir ?? session.cwd
+        var out: [String: SessionWork] = [:]
+        for agent in session.agents {
+            guard let dir = agent.workDir, dir != own, dir != session.cwd, let git = gits[dir], git.isRepo else { continue }
+            out[agent.id] = SessionWork(dir: dir, git: git, start: gits[session.cwd])
+        }
+        return out
     }
 
     func setMine(_ prs: [PullRequest]) {
@@ -429,7 +481,7 @@ final class SessionPRStore: ObservableObject {
 
     private func refreshGit() {
         guard !refreshing else { return }
-        let folders = Array(Set(sessions.values.map(\.cwd).filter { !$0.isEmpty })).sorted()
+        let folders = self.folders
         guard !folders.isEmpty else { return relink() }
         refreshing = true
         Task {
@@ -450,7 +502,7 @@ final class SessionPRStore: ObservableObject {
         var next: [String: PullRequest] = [:]
         if enabled {
             for (id, session) in sessions {
-                if let git = gits[session.cwd], let pr = PRLink.match(git, in: mine) { next[id] = pr }
+                if let git = git(of: session), let pr = PRLink.match(git, in: mine) { next[id] = pr }
             }
         }
         if next != linked { linked = next }

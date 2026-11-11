@@ -15,11 +15,9 @@ struct VPNChip: View {
                 controller.openPanel = isOpen ? nil : NotchController.vpnPanel
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: vpn.level == .connected ? "lock.shield.fill" : "lock.shield")
-                    .font(Typo.caption(.semibold))
-                    .foregroundStyle(isOpen ? Palette.onDone : Self.color(vpn.level)).decorative()
-                Text(vpn.chipText).font(Typo.label(.semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
+            ViewThatFits(in: .horizontal) {
+                label(full: true, isOpen: isOpen)
+                label(full: false, isOpen: isOpen)
             }
             .lineLimit(1)
             .padding(.horizontal, 7).padding(.vertical, 2)
@@ -27,8 +25,19 @@ struct VPNChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .fixedSize()
+        .help("VPN: \(vpn.chipText). Opens the VPN panel.")
         .ax("VPN", value: vpn.chipText, selected: isOpen)
+    }
+
+    /// Compact: the shield in the connection's colour (filled while connected), kept when it needs a look. Full: and the words.
+    private func label(full: Bool, isOpen: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: vpn.level == .connected ? "lock.shield.fill" : "lock.shield")
+                .font(Typo.caption(.semibold))
+                .foregroundStyle(isOpen ? Palette.onDone : Self.color(vpn.level)).decorative()
+            if full { Text(vpn.chipText).font(Typo.label(.semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2) }
+        }
+        .lineLimit(1).fixedSize()
     }
 
     static func color(_ level: VPNStore.Level) -> Color {

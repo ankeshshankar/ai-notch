@@ -171,6 +171,45 @@ enum SessionFeaturesSelfCheck {
         expect(SessionCI.match(SessionGit(), runs: runs, builds: []) == nil, "not a repo")
         expect(!SessionCI.sameCommit("abc", "abc"), "too-short commit never matches")
 
+        // Work folder: real repository with linked worktrees in a temp folder.
+        do {
+            let root = (NSTemporaryDirectory() as NSString).appendingPathComponent("notch-wt-\(getpid())")
+            try? FileManager.default.removeItem(atPath: root)
+            func sh(_ dir: String, _ args: [String]) {
+                let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/git"); p.arguments = ["-C", dir] + args
+                p.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"]
+                p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+                try? p.run(); p.waitUntilExit()
+            }
+            try? FileManager.default.createDirectory(atPath: root + "/main/sub", withIntermediateDirectories: true)
+            let main = root + "/main"
+            sh(main, ["init", "-q", "-b", "main"]); sh(main, ["commit", "-q", "--allow-empty", "-m", "i"])
+            sh(main, ["worktree", "add", "-q", "-b", "feat-a", root + "/wt-a"])
+            sh(main, ["worktree", "add", "-q", "-b", "feat-b", root + "/wt-b"])
+            try? FileManager.default.createDirectory(atPath: root + "/other", withIntermediateDirectories: true)
+            sh(root + "/other", ["init", "-q"])
+            let real = { (p: String) in WorkTree.real(p) }
+            expect(WorkTree.info(of: main + "/sub/x.txt")?.root == real(main), "file in a subfolder: main checkout")
+            expect(WorkTree.info(of: root + "/wt-a/new/dir/f.swift")?.isLinked == true, "file in a worktree: linked")
+            expect(WorkTree.verdict(for: root + "/wt-a/f", start: main + "/sub") == .other(real(root + "/wt-a")), "worktree is another tree")
+            expect(WorkTree.verdict(for: main + "/f", start: main + "/sub") == .start, "same checkout is the start")
+            expect(WorkTree.verdict(for: root + "/other/f", start: main) == .ignored, "another repository is ignored")
+            expect(WorkTree.verdict(for: "/etc/hosts", start: main) == .ignored, "outside any repository is ignored")
+            expect(WorkTree.verdict(for: main + "/f", start: root + "/wt-a") == .other(real(main)), "started in a worktree, main is another tree")
+            // Shell commands
+            expect(WorkTree.folders(inCommand: "git -C \(root)/wt-b status", cwd: main) == [root + "/wt-b"], "git -C")
+            expect(WorkTree.folders(inCommand: "cd ../wt-a && npm test", cwd: main) == [root + "/wt-a"], "cd relative")
+            expect(WorkTree.folders(inCommand: "git worktree add -b x \(root)/wt-c origin/main", cwd: main) == [root + "/wt-c"], "worktree add skips -b value")
+            expect(WorkTree.folders(inCommand: "git -C \"\(root)/wt a\" log", cwd: main) == [root + "/wt a"], "quoted path")
+            expect(WorkTree.folders(inCommand: "cd $SOMEWHERE && ls", cwd: main).isEmpty, "unknown variable skipped")
+            expect(WorkTree.folders(inCommand: "git -C \(root)/wt-a add . && cd \(root)/wt-b", cwd: main).last == root + "/wt-b", "last named wins")
+            expect(WorkTree.folders(inCommand: "ls -C foo; echo cd x", cwd: main).isEmpty, "not a git -C or cd command")
+            var a = SessionGit(branch: "feat-a"); a.isRepo = true
+            var m = SessionGit(branch: "main"); m.isRepo = true
+            expect(SessionWork(dir: root + "/wt-a", git: a, start: m).line == "checked out: main · working in: feat-a (wt-a)", "details line")
+            try? FileManager.default.removeItem(atPath: root)
+        }
+
         print("session-selfcheck: \(checks - failures)/\(checks) passed")
         return failures == 0 ? 0 : 1
     }

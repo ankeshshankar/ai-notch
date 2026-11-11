@@ -14,18 +14,10 @@ struct RamChip: View {
                 controller.openPanel = isOpen ? nil : NotchController.machinePanel
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "memorychip").font(Typo.caption(.semibold))
-                    .foregroundStyle(isOpen ? Palette.onDone : Self.color(machine.level, known: machine.memory != nil)).decorative()
-                if let memory = machine.memory {
-                    Text("\(MachineStore.gigabytes(tenths: memory.availableTenths)) free")
-                        .font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
-                } else {
-                    Text("RAM —").font(Typo.label(.semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
-                }
-                if let note = machine.chipNote {
-                    Text("· \(note)").font(Typo.label()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink3)
-                }
+            ViewThatFits(in: .horizontal) {
+                label(.full, isOpen: isOpen)
+                label(.free, isOpen: isOpen)
+                label(.compact, isOpen: isOpen)
             }
             .lineLimit(1)
             .padding(.horizontal, 7).padding(.vertical, 2)
@@ -33,7 +25,35 @@ struct RamChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .fixedSize()
+        .help(machine.memory.map { "Memory: \(MachineStore.gigabytes(tenths: $0.availableTenths)) free of \(MachineStore.gigabytes(tenths: $0.totalTenths)). Opens the Machine panel." } ?? "Memory: no reading yet")
+        .ax("Memory", value: machine.memory.map { "\(MachineStore.gigabytes(tenths: $0.availableTenths)) free, \(RamChip.usedPercent($0))% used" } ?? "no reading", selected: isOpen)
+    }
+
+    /// The memory in use, in percent of the total.
+    static func usedPercent(_ memory: MachineMemory) -> Int {
+        memory.totalTenths > 0 ? Int((Double(memory.usedTenths) / Double(memory.totalTenths) * 100).rounded()) : 0
+    }
+
+    /// Full: what is free, and the biggest idle process. Free: what is free. Compact: the memory in
+    /// use in percent; the icon keeps the pressure's colour in every form.
+    private enum Form { case full, free, compact }
+
+    private func label(_ form: Form, isOpen: Bool) -> some View {
+        let full = form != .compact
+        return HStack(spacing: 4) {
+            Image(systemName: "memorychip").font(Typo.caption(.semibold))
+                .foregroundStyle(isOpen ? Palette.onDone : Self.color(machine.level, known: machine.memory != nil)).decorative()
+            if let memory = machine.memory {
+                Text(full ? "\(MachineStore.gigabytes(tenths: memory.availableTenths)) free" : "\(Self.usedPercent(memory))%")
+                    .font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
+            } else {
+                Text(full ? "RAM —" : "—").font(Typo.label(.semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
+            }
+            if form == .full, let note = machine.chipNote {
+                Text("· \(note)").font(Typo.label()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink3)
+            }
+        }
+        .lineLimit(1).fixedSize()
     }
 
     static func color(_ level: MachineStore.Level, known: Bool) -> Color {

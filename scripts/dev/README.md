@@ -198,3 +198,8 @@
 - `AINotch --setup-preview --focus sounds` — opens Setup at the Sounds block (previews never play audio).
 - `AINotch --setup-preview --cycle` — closes Setup after 15 s and reopens it after 30 s, to check that closing releases its memory.
 - `scripts/dev/fetch-sounds.sh` — downloads, converts and levels the nine sounds into `Resources/Sounds`.
+
+- `datadog-stub.py` also answers the Prod page: `alerts` (monitor alert events, `source:alert`), `series`
+  (a health number's timeseries, by a word in its query), and `triggeredMinutesAgo` / `createdMinutesAgo` /
+  `resolvedMinutesAgo` on monitors and incidents. `AINotch --preview --panel Prod` with it shows the page.
+- `AINotch --preview --chips-fixture calm|one|three|six` draws the footer from made-up chips.

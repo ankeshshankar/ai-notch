@@ -84,6 +84,8 @@ final class ProdStore: ObservableObject {
     var popBlocker: (() -> String?)?
 
     private var source: DatadogSource?
+    /// The Prod page's data, range and local history (ProdPage.swift).
+    let page = ProdPageModel()
     private var engine = ProdAlertEngine()
     private var trackedFor = ""
     private var isLooking = false
@@ -129,10 +131,14 @@ final class ProdStore: ObservableObject {
         let on = BuildsConfig.current?.datadog != nil
         if on != isOn { isOn = on }
         guard on, source == nil else { return }
-        let source = DatadogSource { [weak self] snapshot in
+        let source = DatadogSource(onChange: { [weak self] snapshot in
             Task { @MainActor in self?.take(snapshot) }
-        }
+        }, onPage: { [weak self] data in
+            Task { @MainActor in self?.page.take(data) }
+        })
         self.source = source
+        page.onVisibility = { open, range in Task { await source.setPage(open: open, range: range) } }
+        if page.isOpen { let range = page.range; Task { await source.setPage(open: true, range: range) } }
         Task { await source.start() }
     }
 
@@ -379,9 +385,36 @@ final class ProdStore: ObservableObject {
             if event.popsOpen, !isLooking { unseen.insert(event.key) }
         }
         deliver(events, site: next.site, query: next.monitorQuery)
+        recordHistory(events, next)
         // Only what is still open stays unseen.
         let kept = unseen.intersection(engine.openKeys)
         if kept != unseen { unseen = kept }
+    }
+
+    /// What this app saw goes into the Prod page's local history (a week, 300 entries): the alert
+    /// engine's changes, and the deploys the checks read. Names stay in that file only, never the log.
+    private func recordHistory(_ events: [ProdAlertEvent], _ next: ProdSnapshot) {
+        for event in events {
+            let kind: ProdTimelineEntry.Kind
+            switch event.kind {
+            case .monitorAlert: kind = .alert
+            case .monitorWarn: kind = .warn
+            case .monitorRecovered: kind = .recovered
+            case .incidentDeclared: kind = .incidentOpened
+            case .incidentResolved: kind = .incidentResolved
+            case .watchdogStory: kind = .watchdog
+            default: continue
+            }
+            page.record(ProdTimelineEntry(kind: kind, at: now, title: String(event.name.prefix(120)), detail: nil, key: event.key,
+                                          publicId: nil, hasStoryKey: false, observed: true), now: now)
+        }
+        for report in next.deploys {
+            for deploy in report.deploys where now - deploy.at < ProdTimeline.keepFor {
+                page.record(ProdTimelineEntry(kind: .deploy, at: deploy.at, title: "\(report.service) \(deploy.version)",
+                                              detail: deploy.previous.isEmpty ? nil : "from \(deploy.previous)",
+                                              key: "d:\(report.service):\(deploy.version)", observed: true), now: now)
+            }
+        }
     }
 
     /// One poll's news: one notification (even while the screen is unlocked, unless turned off)

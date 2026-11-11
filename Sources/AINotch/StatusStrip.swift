@@ -148,9 +148,90 @@ private struct ProdHeadsUpCard: View {
     }
 }
 
-/// The footer's left side: at most two chips, the ones that most need a look (see ChipPicker), then
-/// a menu with the others: "+n" when some of them need a look, a quiet "…" otherwise. Each
-/// hidden chip's information and click live in its own section, which the menu opens.
+/// One chip's slot in the row: which chip it is (nil: the menu) and how much it needs a look.
+struct ChipSlotInfo {
+    var chip: FooterChip?
+    var tone: ChipTone = .calm
+}
+
+struct ChipSlot: LayoutValueKey {
+    static let defaultValue = ChipSlotInfo(chip: nil)
+}
+
+/// The chips' row. Each chip is a `ViewThatFits` of its forms, widest first, so the widths come from
+/// the views themselves: no proposal gives the full one, a hair less than a width the next one down. `ChipPicker.fit` decides from those measured widths and the room, and the row places
+/// each chip with exactly the width of the form chosen; a chip that does not fit is put out of
+/// sight (the menu lists it) and reported through `onFit`.
+struct ChipRowLayout: Layout {
+    var wide: Bool
+    var spacing: CGFloat = 8
+    var onFit: ([FooterChip]) -> Void
+
+    struct Cache { var reported: [FooterChip]? }
+    func makeCache(subviews: Subviews) -> Cache { Cache(reported: nil) }
+
+    private func measure(_ subviews: Subviews) -> (chips: [ChipWidth], menu: Double, height: CGFloat) {
+        var chips: [ChipWidth] = [], menu = 0.0, height: CGFloat = 0
+        for subview in subviews {
+            let info = subview[ChipSlot.self]
+            let full = subview.sizeThatFits(.unspecified)
+            height = max(height, full.height)
+            guard let chip = info.chip else { menu = full.width; continue }
+            // The forms narrow step by step: ask for a hair less than the last width until it stops shrinking.
+            var steps = [Double(full.width)]
+            for _ in 0..<5 {
+                let next = Double(subview.sizeThatFits(ProposedViewSize(width: CGFloat(steps[steps.count - 1]) - 0.5, height: nil)).width)
+                if next >= steps[steps.count - 1] - 0.5 { break }
+                steps.append(next)
+            }
+            chips.append(ChipWidth(chip: chip, tone: info.tone, steps: steps))
+        }
+        return (chips, menu, height)
+    }
+
+    private func choice(_ proposal: ProposedViewSize, _ measured: (chips: [ChipWidth], menu: Double, height: CGFloat)) -> ChipChoice {
+        ChipPicker.fit(measured.chips, available: Double(proposal.width ?? .infinity), spacing: Double(spacing), menu: measured.menu, wide: wide)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let measured = measure(subviews)
+        let picked = choice(proposal, measured)
+        return CGSize(width: CGFloat(ChipPicker.width(picked, measured.chips, spacing: Double(spacing), menu: measured.menu)), height: measured.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let measured = measure(subviews)
+        let picked = choice(ProposedViewSize(width: bounds.width, height: nil), measured)
+        var x = bounds.minX
+        for subview in subviews {
+            let info = subview[ChipSlot.self]
+            let away = CGPoint(x: -20_000, y: bounds.midY)
+            if let chip = info.chip {
+                guard let step = picked.shown[chip], let item = measured.chips.first(where: { $0.chip == chip }) else {
+                    subview.place(at: away, anchor: .leading, proposal: .zero)
+                    continue
+                }
+                let width = CGFloat(item.width(at: step))
+                subview.place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: width + 0.5, height: nil))
+                x += width + spacing
+            } else if picked.hidden.isEmpty {
+                subview.place(at: away, anchor: .leading, proposal: .zero)
+            } else {
+                subview.place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: CGFloat(measured.menu), height: nil))
+            }
+        }
+        if cache.reported != picked.hidden {
+            cache.reported = picked.hidden
+            let hidden = picked.hidden
+            DispatchQueue.main.async { onFit(hidden) }
+        }
+    }
+}
+
+/// The footer's left side: every chip that is present, in one fixed order. A calm one is compact;
+/// one that needs a look writes out its wording (see ChipPicker). Each opens its panel with one
+/// click. When the row is short, the ones needing a look drop their secondary text first; only
+/// with every chip compact do the last calm chips wait in a menu.
 struct StatusStrip: View {
     @ObservedObject var prod: ProdStore
     @ObservedObject var machine: MachineStore
@@ -159,31 +240,49 @@ struct StatusStrip: View {
     var limits: ToolLimits?
     var now: Double
     var controller: NotchController
+    /// The two-column layout: more room, so chips write their words where they fit.
+    var wide = false
     @ObservedObject private var commands = CommandsStore.shared
+    @State private var hidden: [FooterChip] = []
 
     var body: some View {
         let limits = LimitsChip.displayed(limits)
         let five = current(limits?.fiveHour, now: now), week = current(limits?.weekly, now: now)
-        let choice = ChipPicker.pick(inputs(five: five, week: week))
-        HStack(spacing: 8) {
-            ForEach(choice.shown, id: \.self) { chip in
-                switch chip {
-                case .prod: ProdChip(prod: prod, controller: controller, hover: controller.hover)
-                case .ram: RamChip(machine: machine, feed: machine.feed, controller: controller)
-                case .vpn: VPNChip(vpn: vpn, controller: controller)
-                case .commands: CommandsChip(commands: commands, controller: controller)
-                case .prs: PRsChip(reviews: reviews, controller: controller, hover: controller.hover)
-                case .limit: LimitsChip(limits: limits, now: now, controller: controller)
+        let present = inputs(five: five, week: week).filter(\.present)
+        let fixture = ChipFixture.facts
+        ChipRowLayout(wide: wide, onFit: { next in if next != hidden { hidden = next } }) {
+            ForEach(present, id: \.chip) { input in
+                Group {
+                    if let fixture {
+                        FixtureChip(chip: input.chip, facts: fixture[input.chip] ?? ChipFacts(symbol: "circle", calmFull: "", calmCompact: "", ladder: [""]), tone: input.effectiveTone,
+                                    isOpen: controller.openPanel == input.chip.panel)
+                    } else {
+                        chipView(input.chip, five: five, week: week)
+                    }
                 }
+                .layoutValue(key: ChipSlot.self, value: ChipSlotInfo(chip: input.chip, tone: input.effectiveTone))
+                .accessibilityHidden(hidden.contains(input.chip))
             }
-            if !choice.hidden.isEmpty {
-                MoreChipsMenu(choice: choice, summaries: Dictionary(uniqueKeysWithValues: choice.hidden.map { ($0, summary($0, five: five, week: week)) }),
-                              controller: controller)
-            }
+            MoreChipsMenu(hidden: hidden, needing: hidden.filter { chip in present.first { $0.chip == chip }.map { $0.effectiveTone > .calm } ?? false },
+                          summaries: Dictionary(uniqueKeysWithValues: hidden.map { ($0, summary($0, five: five, week: week)) }), controller: controller)
+                .layoutValue(key: ChipSlot.self, value: ChipSlotInfo(chip: nil))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private func chipView(_ chip: FooterChip, five: LimitWindow?, week: LimitWindow?) -> some View {
+        switch chip {
+        case .prod: ProdChip(prod: prod, controller: controller, hover: controller.hover)
+        case .ram: RamChip(machine: machine, feed: machine.feed, controller: controller)
+        case .vpn: VPNChip(vpn: vpn, controller: controller)
+        case .commands: CommandsChip(commands: commands, controller: controller)
+        case .prs: PRsChip(reviews: reviews, controller: controller, hover: controller.hover)
+        case .limit: LimitsChip(limits: LimitsChip.displayed(limits), now: now, controller: controller)
         }
     }
 
     private func inputs(five: LimitWindow?, week: LimitWindow?) -> [ChipInput] {
+        if let fixture = ChipFixture.inputs { return fixture }
         let prodTone: ChipTone = prod.level == .alert ? .alert : prod.level == .warn ? .warning : .calm
         let machineTone: ChipTone = machine.level == .critical ? .alert : machine.level == .warning ? .warning : .calm
         let vpnTone: ChipTone = vpn.level == .problem ? (vpn.helper == .notRunning ? .warning : .alert) : vpn.level == .busy ? .news : .calm
@@ -217,18 +316,91 @@ struct StatusStrip: View {
     }
 }
 
-/// The menu after the chips: the hidden ones, each opening its section. "+n" counts those that need a look.
+/// A chip's wordings for the dev fixtures: calm (wide, then compact) and, when it needs a look, the
+/// ladder widest first. One capsule in the common look.
+struct ChipFacts: Equatable {
+    var symbol: String
+    var calmFull: String
+    var calmCompact: String
+    var ladder: [String]
+}
+
+struct FixtureChip: View {
+    var chip: FooterChip
+    var facts: ChipFacts
+    var tone: ChipTone
+    var isOpen: Bool
+
+    var body: some View {
+        let color: Color = tone == .alert ? Palette.failed : tone == .warning ? Palette.waiting : tone == .news ? Palette.bitbucket : Palette.ink2
+        let forms = tone == .calm ? [facts.calmFull, facts.calmCompact] : facts.ladder
+        Button {} label: {
+            ViewThatFits(in: .horizontal) {
+                ForEach(forms.indices, id: \.self) { label(forms[$0], color) }
+            }
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(isOpen ? Palette.done : Palette.chip))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func label(_ text: String, _ color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: facts.symbol).font(Typo.caption(.semibold)).foregroundStyle(color)
+            if !text.isEmpty { Text(text).font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(Palette.ink2) }
+        }
+        .lineLimit(1).fixedSize()
+    }
+}
+
+/// Dev previews: `--preview --chips-fixture calm|one|three|six` draws the footer from made-up chips,
+/// to look at the row for each case (six: every chip that can need a look does). Never in the app.
+enum ChipFixture {
+    static var mode: String? {
+        let arguments = CommandLine.arguments
+        guard arguments.contains("--preview"), let index = arguments.firstIndex(of: "--chips-fixture"), index + 1 < arguments.count else { return nil }
+        return arguments[index + 1]
+    }
+
+    static var inputs: [ChipInput]? {
+        guard let mode else { return nil }
+        let tones: [FooterChip: ChipTone]
+        switch mode {
+        case "one": tones = [.ram: .alert]
+        case "three": tones = [.prod: .alert, .vpn: .warning, .prs: .news]
+        case "six": tones = [.prod: .alert, .vpn: .alert, .ram: .alert, .limit: .warning, .prs: .news]
+        default: tones = [:]
+        }
+        return FooterChip.order.map { ChipInput(chip: $0, present: true, tone: tones[$0] ?? .calm) }
+    }
+
+    static var facts: [FooterChip: ChipFacts]? {
+        guard mode != nil else { return nil }
+        return [
+            .prod: ChipFacts(symbol: "circle.fill", calmFull: "Prod", calmCompact: "Prod", ladder: ["Prod 2 alerting · p95 210ms", "Prod 2 alerting", "Prod 2"]),
+            .vpn: ChipFacts(symbol: "lock.shield", calmFull: "VPN off", calmCompact: "", ladder: ["Connecting", ""]),
+            .ram: ChipFacts(symbol: "memorychip", calmFull: "9.8 GB free", calmCompact: "62%", ladder: ["1.2 GB free · Metro idle 22m", "1.2 GB free", "91%"]),
+            .limit: ChipFacts(symbol: "gauge", calmFull: "5h 42% wk 18%", calmCompact: "42%", ladder: ["5h 72% wk 18%", "72%"]),
+            .prs: ChipFacts(symbol: "arrow.triangle.pull", calmFull: "PRs", calmCompact: "", ladder: ["PRs 3", "3"]),
+            .commands: ChipFacts(symbol: "terminal", calmFull: "2", calmCompact: "2", ladder: ["2"]),
+        ]
+    }
+}
+
+/// The menu after the chips, only when the row cannot hold them all: the hidden ones, each opening
+/// its section. "+n" counts those that need a look.
 struct MoreChipsMenu: View {
-    var choice: ChipChoice
+    var hidden: [FooterChip]
+    var needing: [FooterChip]
     var summaries: [FooterChip: String]
     var controller: NotchController
 
     var body: some View {
-        let text = ChipPicker.moreText(choice)
-        let names = choice.hiddenNeedingLook.map { summaries[$0] ?? $0.rawValue }
-        let label = text.map { "\($0) more need a look: " + names.joined(separator: "; ") } ?? "More status: " + choice.hidden.compactMap { summaries[$0] }.joined(separator: "; ")
+        let text = needing.isEmpty ? nil : "+\(needing.count)"
+        let names = needing.map { summaries[$0] ?? $0.rawValue }
+        let label = text.map { "\($0) more need a look: " + names.joined(separator: "; ") } ?? "More status: " + hidden.compactMap { summaries[$0] }.joined(separator: "; ")
         Menu {
-            ForEach(choice.hidden, id: \.self) { chip in
+            ForEach(hidden, id: \.self) { chip in
                 Button {
                     withAnimation(Motion.slide) {
                         controller.openPanel = controller.openPanel == chip.panel ? nil : chip.panel
@@ -252,39 +424,10 @@ struct MoreChipsMenu: View {
         .fixedSize()
         .help(label)
         .accessibilityLabel(text == nil ? "More status" : "More status, \(text ?? "")")
-        .accessibilityValue(names.isEmpty ? choice.hidden.compactMap { summaries[$0] }.joined(separator: "; ") : names.joined(separator: "; "))
-    }
-}
-
-/// The Prod section: what the chip's hover shows, kept open, with Datadog, Snooze and Setup.
-struct ProdPanel: View {
-    @ObservedObject var prod: ProdStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("Prod").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
-                    .padding(.horizontal, 6).padding(.vertical, 1)
-                    .background(Capsule().fill(Palette.chip))
-                Spacer(minLength: 6)
-                small("Open in Datadog") { prod.open() }
-                small(prod.isSnoozed ? "Unsnooze" : "Snooze 1 h") { prod.isSnoozed ? prod.unsnooze() : prod.snooze() }
-                small("Setup…") { SetupWindowController.shared.show(focus: .prod) }
-            }
-            ProdCard(prod: prod, inPanel: true)
-        }
-        .padding(.horizontal, 10).padding(.vertical, 8)
-        .panelCard()
-    }
-
-    private func small(_ title: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title).font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(Capsule().fill(Palette.chip))
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
+        .accessibilityValue(names.isEmpty ? hidden.compactMap { summaries[$0] }.joined(separator: "; ") : names.joined(separator: "; "))
+        .opacity(hidden.isEmpty ? 0 : 1)
+        .allowsHitTesting(!hidden.isEmpty)
+        .accessibilityHidden(hidden.isEmpty)
     }
 }
 
@@ -315,24 +458,25 @@ struct ProdChip: View {
         let level = prod.level
         // `--preview --prod-hover`: the card stays open, for a screenshot.
         let isHovered = hover.hovered == Self.zone || ProdChip.cardPinned
+        let isOpen = controller.openPanel == NotchController.prodPanel
         HStack(spacing: 6) {
             Button {
-                if snapshot.access == .ok { controller.collapse() }
-                prod.open()
+                withAnimation(Motion.slide) {
+                    controller.openPanel = isOpen ? nil : NotchController.prodPanel
+                }
             } label: {
-                HStack(spacing: 4) {
-                    Circle().fill(Self.color(level)).frame(width: 6, height: 6)
-                    Text("Prod").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
-                    if prod.isSnoozed {
-                        Image(systemName: "moon.zzz.fill").font(Typo.micro()).foregroundStyle(Palette.ink3)
-                    }
+                ViewThatFits(in: .horizontal) {
+                    label(.full, level: level, snapshot: snapshot, isOpen: isOpen)
+                    label(.words, level: level, snapshot: snapshot, isOpen: isOpen)
+                    label(.count, level: level, snapshot: snapshot, isOpen: isOpen)
+                    label(.calm, level: level, snapshot: snapshot, isOpen: isOpen)
                 }
                 .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(Capsule().fill(Palette.chip))
+                .background(Capsule().fill(isOpen ? Palette.done : Palette.chip))
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .ax("Prod", value: snapshot.access == .ok ? "\(level)" + (prod.isSnoozed ? ", snoozed" : "") : "not connected")
+            .ax("Prod", value: snapshot.access == .ok ? "\(level)" + (prod.isSnoozed ? ", snoozed" : "") : "not connected", selected: isOpen)
             .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { hover.zones[Self.zone] = $0 }
             .onDisappear { hover.zones[Self.zone] = nil }
             .contextMenu {
@@ -345,17 +489,6 @@ struct ProdChip: View {
                     Button("Open Monitors") { SafeLink.open(url, for: .datadog) }
                 }
                 Button("Setup…") { SetupWindowController.shared.show(focus: .prod) }
-            }
-
-            if level != .unknown, !snapshot.numbers.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(snapshot.numbers, id: \.label) { number in
-                        Text("\(number.label) \(number.valueText)")
-                            .font(Typo.label().monospacedDigit())
-                            .foregroundStyle(number.isOver ? Palette.waiting : Palette.ink3)
-                    }
-                }
-                .lineLimit(1)
             }
         }
         .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { if rowHeight != $0 { rowHeight = $0 } }
@@ -372,6 +505,60 @@ struct ProdChip: View {
             }
         }
         .animation(Motion.ease(0.12), value: isHovered)
+    }
+
+    /// The chip's forms, widest first: the words and the numbers over their line, the words, the
+    /// count alone ("Prod 2"), the dot and "Prod" (what a calm chip is). A form that says no more
+    /// than the next one is the same width, so the row skips it.
+    private enum Form { case full, words, count, calm }
+
+    /// The number a "Prod 2" says: the alerting monitors (else the incidents), or the warnings.
+    static func count(level: ProdStore.Level, snapshot: ProdSnapshot) -> Int? {
+        switch level {
+        case .alert: return snapshot.alertCount > 0 ? snapshot.alertCount : snapshot.incidents.isEmpty ? nil : snapshot.incidents.count
+        case .warn: return snapshot.warnCount > 0 ? snapshot.warnCount : nil
+        default: return nil
+        }
+    }
+
+    /// The tone is carried by the dot and the words; an open chip is the standard selected look
+    /// (green fill, its own ink), the tone only in the dot, so nothing coloured sits on the fill.
+    private func label(_ form: Form, level: ProdStore.Level, snapshot: ProdSnapshot, isOpen: Bool) -> some View {
+        let tone: Color = level == .alert ? Palette.failed : Palette.waiting
+        let ink: Color = isOpen ? Palette.onDone : Palette.ink2
+        return HStack(spacing: 4) {
+            Circle().fill(Self.color(level)).frame(width: 6, height: 6).decorative()
+            Text("Prod").font(Typo.label(.semibold)).foregroundStyle(ink)
+            if prod.isSnoozed {
+                Image(systemName: "moon.zzz.fill").font(Typo.micro()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink3).decorative()
+            } else if form == .count, let count = Self.count(level: level, snapshot: snapshot) {
+                Text("\(count)").font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(isOpen ? Palette.onDone : tone)
+            } else if form == .full || form == .words, let words = Self.words(level: level, snapshot: snapshot) {
+                Text(words).font(Typo.label(.semibold)).foregroundStyle(isOpen ? Palette.onDone : tone)
+            }
+            // Only a number over its line: the others are in the panel's Performance.
+            if form == .full, !prod.isSnoozed, level != .unknown {
+                ForEach(snapshot.numbers.filter(\.isOver), id: \.label) { number in
+                    Text("\(number.label) \(number.valueText)")
+                        .font(Typo.label().monospacedDigit())
+                        .foregroundStyle(isOpen ? Palette.onDone : Palette.waiting)
+                }
+            }
+        }
+        .lineLimit(1).fixedSize()
+    }
+
+    /// "2 alerting · 1 incident", "1 warning": nil when nothing needs a look.
+    static func words(level: ProdStore.Level, snapshot: ProdSnapshot) -> String? {
+        switch level {
+        case .alert:
+            let parts = [snapshot.alertCount > 0 ? "\(snapshot.alertCount) alerting" : nil,
+                         snapshot.incidents.isEmpty ? nil : snapshot.incidents.count == 1 ? "1 incident" : "\(snapshot.incidents.count) incidents"]
+            return parts.compactMap { $0 }.joined(separator: " · ")
+        case .warn:
+            return snapshot.warnCount > 0 ? "\(snapshot.warnCount) warning" : nil
+        default: return nil
+        }
     }
 
     static func color(_ level: ProdStore.Level) -> Color {

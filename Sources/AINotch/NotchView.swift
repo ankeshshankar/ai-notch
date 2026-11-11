@@ -403,9 +403,8 @@ private struct SessionList: View {
             }
 
             HStack(spacing: 12) {
-                // The status chips on the left (Prod, RAM, VPN), Setup and Quit on the right.
-                StatusStrip(prod: prod, machine: machine, vpn: vpn, reviews: reviews, limits: store.claudeLimits, now: store.now, controller: controller)
-                Spacer()
+                // The status chips on the left (every one, one click each), Setup and Quit on the right.
+                StatusStrip(prod: prod, machine: machine, vpn: vpn, reviews: reviews, limits: store.claudeLimits, now: store.now, controller: controller, wide: isWide)
                 Button("Setup") {
                     controller.collapse()
                     SetupWindowController.shared.show()
@@ -493,7 +492,7 @@ private struct SessionList: View {
 
     /// The latest CI run on the session's branch, from what Pipelines and EAS already fetched.
     private func ciMark(for session: SessionState) -> CIMark? {
-        guard let git = prLinks.gits[session.cwd] else { return nil }
+        guard let git = prLinks.git(of: session) else { return nil }
         return SessionCI.match(git, runs: builds.bitbucket.runs, builds: builds.eas.builds)
     }
 
@@ -536,7 +535,8 @@ private struct SessionList: View {
                                usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
                                reserved: space, live: store.usage.live[session.id], compact: looks.compactRows,
                                prodWatch: prodWatch(session), hasPRLine: prLinks.linked[session.id] != nil,
-                               git: prLinks.gits[session.cwd], ci: ciMark(for: session),
+                               git: prLinks.git(of: session), ci: ciMark(for: session),
+                               work: prLinks.work(of: session), agentWork: prLinks.agentBranches(of: session),
                                paused: controls.isPaused(session), stopping: controls.isStopping(session))
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
@@ -1020,16 +1020,27 @@ struct LimitsChip: View {
             Button {
                 withAnimation(Motion.slide) { controller.openPanel = isOpen ? nil : "Usage" }
             } label: {
-                HStack(spacing: 6) {
-                    if let five { part("5h", five) }
-                    if let week { part("wk", week) }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) {
+                        if let five { part("5h", five, isOpen: isOpen) }
+                        if let week { part("wk", week, isOpen: isOpen) }
+                    }
+                    .lineLimit(1).fixedSize()
+                    // Compact: the busier window's percent; the gauge keeps the tone colour.
+                    HStack(spacing: 4) {
+                        let top = max(five?.usedPercent ?? 0, week?.usedPercent ?? 0)
+                        Image(systemName: "gauge.medium").font(Typo.caption(.semibold))
+                            .foregroundStyle(isOpen ? Palette.onDone : top >= 70 ? limitColor(top) : Palette.ink3).decorative()
+                        Text("\(Int(top.rounded()))%").font(Typo.label(.semibold).monospacedDigit())
+                            .foregroundStyle(isOpen ? Palette.onDone : top >= 70 ? limitColor(top) : Palette.ink2)
+                    }
+                    .lineLimit(1).fixedSize()
                 }
                 .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(Capsule().fill(isOpen ? Palette.done.opacity(0.35) : Palette.chip))
+                .background(Capsule().fill(isOpen ? Palette.done : Palette.chip))
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .fixedSize()
             .help(tooltip(five: five, week: week) + " · opens Usage")
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Usage limits")
@@ -1038,11 +1049,11 @@ struct LimitsChip: View {
         }
     }
 
-    private func part(_ label: String, _ window: LimitWindow) -> some View {
+    private func part(_ label: String, _ window: LimitWindow, isOpen: Bool) -> some View {
         HStack(spacing: 3) {
-            Text(label).font(Typo.label(.medium)).foregroundStyle(Palette.ink3)
+            Text(label).font(Typo.label(.medium)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink3)
             Text("\(Int(window.usedPercent.rounded()))%").font(Typo.label(.semibold).monospacedDigit())
-                .foregroundStyle(window.usedPercent >= 70 ? limitColor(window.usedPercent) : Palette.ink2)
+                .foregroundStyle(isOpen ? Palette.onDone : window.usedPercent >= 70 ? limitColor(window.usedPercent) : Palette.ink2)
         }
     }
 
@@ -1703,6 +1714,10 @@ private struct SessionRow: View {
     /// The session folder's git state, and the latest CI run on its branch.
     var git: SessionGit?
     var ci: CIMark?
+    /// Where the session works when that is another checkout (a linked worktree) than its start
+    /// folder; `git` is then that folder's. And the subagents working in other worktrees, by id.
+    var work: SessionWork?
+    var agentWork: [String: SessionWork] = [:]
     /// Paused or being stopped from the notch.
     var paused = false
     var stopping = false
@@ -1755,7 +1770,7 @@ private struct SessionRow: View {
                 let metaLine = !compact && hasMeta
                 activity.padding(.trailing, inline && !mcpLine && !metaLine ? Self.cornerRoom : 0)
                 if metaLine {
-                    SessionMetaLine(session: session, git: git, ci: ci, now: now)
+                    SessionMetaLine(session: session, git: git, ci: ci, work: work, otherTrees: otherTrees, now: now)
                         .padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
                 }
                 if let todos = openTodos { todoLine(todos) }
@@ -1789,6 +1804,9 @@ private struct SessionRow: View {
         }
         .animation(Motion.easeInOut(0.3), value: session.phase)
     }
+
+    /// Worktrees running subagents work in, besides the one the row shows.
+    private var otherTrees: Int { Set(agentWork.values.filter { $0.dir != work?.dir }.map(\.dir)).count }
 
     /// Something to show on the line under the activity: the branch, a CI mark, the context.
     private var hasMeta: Bool {
@@ -1893,7 +1911,8 @@ private struct SessionRow: View {
         let shown = ordered.prefix(isDetailed ? 12 : 4)
         return VStack(alignment: .leading, spacing: 5) {
             ForEach(Array(shown), id: \.id) { agent in
-                AgentLine(agent: agent, now: now, lastActivity: agentActivity[agent.id], model: agentModels[agent.id] ?? agent.model)
+                AgentLine(agent: agent, now: now, lastActivity: agentActivity[agent.id], model: agentModels[agent.id] ?? agent.model,
+                          work: agentWork[agent.id])
             }
             if ordered.count > shown.count {
                 Text("+\(ordered.count - shown.count) more agents").font(Typo.label()).foregroundStyle(Palette.ink3)
@@ -1937,6 +1956,8 @@ private struct SessionRow: View {
         if let line = ContextText.detail(session) { rows.append(("Context", line)) }
         if session.isCompacting(at: now), let since = session.compactingSince { rows.append(("Compacting", "for \(elapsed(now - since))")) }
         if let git, let line = GitMarks.fullLine(git) { rows.append(("Git", line)) }
+        if let work { rows.append(("Worktree", work.line)) }
+        if otherTrees > 0 { rows.append(("Subagent trees", agentWork.values.filter { $0.dir != work?.dir }.map { "\(GitMarks.branchText($0.git) ?? "?") (\($0.name))" }.sorted().joined(separator: " · "))) }
         if let ci { rows.append(("CI", "\(ci.name) · \(ci.word) · \(elapsed(now - ci.at)) ago")) }
         if let took = session.lastTurnSeconds { rows.append(("Last turn", "took \(elapsed(took))")) }
         if let last = session.lastTool { rows.append(("Last tool", "\(label(last)) · \(elapsed(now - last.since)) ago")) }
@@ -2013,6 +2034,9 @@ private struct SessionMetaLine: View {
     var session: SessionState
     var git: SessionGit?
     var ci: CIMark?
+    var work: SessionWork?
+    /// Other worktrees running subagents work in.
+    var otherTrees = 0
     var now: Double
 
     var body: some View {
@@ -2029,9 +2053,20 @@ private struct SessionMetaLine: View {
                             .foregroundStyle(git.changed > 0 || git.ahead > 0 ? Palette.waiting : Palette.ink3)
                             .lineLimit(1).fixedSize()
                     }
+                    if let work {
+                        HStack(spacing: 3) {
+                            Image(systemName: "square.stack.3d.up").font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3).decorative()
+                            Text(work.name).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1).truncationMode(.middle)
+                        }
+                        .layoutPriority(-2)
+                    }
+                    if otherTrees > 0 {
+                        Text("+\(otherTrees) worktree\(otherTrees == 1 ? "" : "s")").font(Typo.label()).foregroundStyle(Palette.ink3)
+                            .lineLimit(1).fixedSize()
+                    }
                 }
-                .help(GitMarks.fullLine(git) ?? branch)
-                .ax("Git", value: GitMarks.fullLine(git) ?? branch)
+                .help([work?.line, GitMarks.fullLine(git) ?? branch].compactMap { $0 }.joined(separator: "\n"))
+                .ax("Git", value: (work.map { "working in worktree \($0.name). " } ?? "") + (GitMarks.fullLine(git) ?? branch))
             }
             if let ci { CIButton(ci: ci, now: now) }
             Spacer(minLength: 0)
@@ -2074,6 +2109,8 @@ private struct AgentLine: View {
     var now: Double
     var lastActivity: Double?
     var model: String?
+    /// Its own worktree, when it works in another one than the session's.
+    var work: SessionWork?
     /// A running agent that has not written for this long is flagged as quiet.
     private let quietAfter: Double = 90
 
@@ -2128,6 +2165,7 @@ private struct AgentLine: View {
             parts.append(agent.mcp.sorted { $0.value > $1.value }.prefix(2).map { "\($0.key) \($0.value)" }.joined(separator: " "))
         }
         if agent.current == nil, let last = agent.lastTool { parts.append("last \(label(last))") }
+        if let work, let branch = GitMarks.branchText(work.git) { parts.append("⎇ \(branch) (\(work.name))") }
         if let model { parts.append(modelName(model)) }
         if agent.isBackground == true { parts.append("background") }
         return parts.joined(separator: " · ")

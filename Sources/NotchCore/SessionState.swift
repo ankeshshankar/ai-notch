@@ -57,6 +57,11 @@ public struct AgentNow: Codable, Sendable, Equatable {
     public var lastTool: ToolNow?
     public var toolCount: Int
     public var mcp: [String: Int]
+    /// The other checkout (linked worktree) of the session's repository this subagent works in,
+    /// from its own acting signals; nil while it works in the session's start folder.
+    public var workDir: String?
+    /// The folder its last event named, so only a change of it counts as moving.
+    public var lastCwd: String?
 
     public init(id: String, type: String, startedAt: Double) {
         self.id = id
@@ -133,7 +138,15 @@ public struct WaitingOn: Codable, Sendable, Equatable {
 /// The state file of one session: `~/.claude/notch/sessions/<id>.json`.
 public struct SessionState: Codable, Sendable, Equatable {
     public var id: String
+    /// The folder the session started in (never changes).
     public var cwd: String
+    /// Where the agent really works: the top-level folder of another checkout (a linked worktree)
+    /// of the start folder's repository, set by its last acting signal there (a write, a Bash
+    /// command naming that tree, a change of its working folder) and cleared by one in the start
+    /// checkout. A read never sets it. Nil: it works in `cwd`.
+    public var workDir: String?
+    /// The folder the last main-thread event named: only a change of it is a signal.
+    public var lastCwd: String?
     /// The first prompt you typed: the chat's name when nothing better names it.
     public var firstPrompt: String?
     /// The name you gave the chat, as Claude Code's hooks last sent it (`session_title`). The

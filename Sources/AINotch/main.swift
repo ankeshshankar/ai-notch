@@ -166,6 +166,9 @@ ProdAlertsCheck.runIfAsked(CommandLine.arguments)
 // Dev check of the collapsed strip's dots, words, widths, pet and calm gating, never the app: `--strip-selfcheck`.
 CollapsedStripSelfCheck.runIfAsked(CommandLine.arguments)
 
+// Dev check of the Prod page (timeline, series, history, plan, links), never the app: `--prodpage-selfcheck`.
+ProdPageSelfCheck.runIfAsked(CommandLine.arguments)
+
 // Dev check of the per-session row features (context, failure, git, CI), never the app: `--session-selfcheck`.
 SessionFeaturesSelfCheck.runIfAsked(CommandLine.arguments)
 

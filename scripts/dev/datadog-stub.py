@@ -41,6 +41,10 @@ file is read on every request, so editing it plays a state change:
                     "env": "production", "minutesAgo": 12, "status": "ongoing"}],   status: story_status tag
       "deploys": [{"id": "d1", "service": "orders", "version": "1.4.2", "previous": "1.4.1",
                    "minutesAgo": 15}],           change_tracking events, "New APM Deployment Version: <v>"
+      "alerts": [{"id": "a1", "monitor": 101, "title": "API latency", "status": "error", "minutesAgo": 30}],
+                                                 monitor alert events (source:alert): status error | warn | ok
+      "series": {"p95": [0.08, 0.09, 0.4, 0.2]}, a health number's timeseries (a word in its query), resampled
+      "monitors"/"incidents" may carry "triggeredMinutesAgo", "createdMinutesAgo", "resolvedMinutesAgo"
       "deny": ["/api/v2/events"],                paths answered 403 (a token without that scope)
       "timeline": [{"at": 0, "note": "green"}, {"at": 20, "monitors": [...]}, ...]
     }
@@ -93,6 +97,12 @@ def state():
         last_step = current
         note(f"step {current} {timeline[current].get('note', '')}")
     return s
+
+
+def incident_time(minutes_ago, fallback):
+    if minutes_ago is None:
+        return fallback
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -154,7 +164,7 @@ class Handler(BaseHTTPRequestHandler):
                 counts[m["status"]] = counts.get(m["status"], 0) + 1
             per_page = int(query.get("per_page", ["30"])[0])
             page = [{"id": m["id"], "name": m["name"], "status": m["status"], "type": "query alert",
-                     "org_id": 1, "tags": m.get("tags", []), "classification": "metric", "last_triggered_ts": None,
+                     "org_id": 1, "tags": m.get("tags", []), "classification": "metric", "last_triggered_ts": (int(time.time() - m["triggeredMinutesAgo"] * 60) if m.get("triggeredMinutesAgo") else None),
                      "metrics": [], "notifications": [], "quality_issues": [], "query": m.get("query", ""),
                      "scopes": m.get("scopes", [])}
                     for m in monitors[:per_page]]
@@ -165,12 +175,13 @@ class Handler(BaseHTTPRequestHandler):
                 "monitors": page,
             }, self.rate(s))
         elif url.path == "/api/v2/incidents/search":
-            incidents = [i for i in s.get("incidents", []) if i.get("state", "active") != "resolved"]
+            incidents = s.get("incidents", [])
             self.answer(200, {"data": {"type": "incidents_search_results", "attributes": {
                 "facets": {"severity": [], "state": []},
                 "incidents": [{"data": {"id": i["id"], "type": "incidents", "attributes": {
                     "title": i["title"], "severity": i.get("severity", "UNKNOWN"), "state": i.get("state", "active"),
-                    "public_id": i.get("public_id"), "created": i.get("created", "2026-10-15T10:00:00.000000+00:00"),
+                    "public_id": i.get("public_id"), "created": i.get("created", incident_time(i.get("createdMinutesAgo"), "2026-10-15T10:00:00.000000+00:00")),
+                    **({"resolved": incident_time(i["resolvedMinutesAgo"], None)} if i.get("resolvedMinutesAgo") is not None else {}),
                     "customer_impacted": False,
                     "fields": ({"services": {"type": "multiselect", "value": i["services"]}} if i.get("services") else {})}}}
                     for i in incidents],
@@ -178,15 +189,34 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/api/v2/events":
             now = datetime.now(timezone.utc)
             events = []
+            since = int(query.get("filter[from]", ["0"])[0]) / 1000
+            def recent(minutes):
+                return time.time() - minutes * 60 >= since
             def stamp(minutes):
                 return (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            if "source:alert" in query.get("filter[query]", [""])[0]:
+                # Monitor alert events: "alerts": [{"id": "a1", "monitor": 101, "title": "API latency",
+                # "status": "error"|"warn"|"ok", "minutesAgo": 30}]
+                for a in s.get("alerts", []):
+                    if not recent(a.get("minutesAgo", 5)):
+                        continue
+                    word = {"error": "Triggered", "warn": "Warn", "ok": "Recovered"}.get(a.get("status", "error"), "Triggered")
+                    events.append({"id": a["id"], "type": "event", "attributes": {
+                        "timestamp": stamp(a.get("minutesAgo", 5)), "tags": ["source:alert", f"monitor_id:{a['monitor']}"],
+                        "attributes": {"title": f"[{word}] {a['title']}", "monitor_id": a["monitor"], "status": a.get("status", "error")}}})
+                events.sort(key=lambda e: e["attributes"]["timestamp"], reverse=True)
+                return self.answer(200, {"data": events[:int(query.get("page[limit]", ["100"])[0])], "meta": {"page": {}}}, self.rate(s))
             for w in s.get("watchdog", []):
+                if not recent(w.get("minutesAgo", 5)):
+                    continue
                 tags = ["source:watchdog", "story_type:logs_pattern_anomaly", f"story_status:{w.get('status', 'ongoing')}"] \
                     + ([f"service:{w['service']}"] if w.get("service") else []) \
                     + ([f"env:{w['env']}"] if w.get("env") else [])
                 events.append({"id": w["id"], "type": "event", "attributes": {
                     "timestamp": stamp(w.get("minutesAgo", 5)), "tags": tags, "attributes": {"title": w["title"]}}})
             for d in s.get("deploys", []):
+                if not recent(d.get("minutesAgo", 5)):
+                    continue
                 tags = ["source:change_tracking", f"service:{d['service']}", f"version:{d['version']}", "env:production"] \
                     + ([f"previous_version:{d['previous']}"] if d.get("previous") else [])
                 events.append({"id": d["id"], "type": "event", "attributes": {
@@ -197,10 +227,28 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.answer(404, {"errors": ["Not found"]})
 
+    def health_series(self, s, attributes, text):
+        """A health number's series: "series": {"<word in the query>": [values...]} resampled to the
+        buckets asked for (the Prod page's sparkline); null for a word with no entry."""
+        for word, points in s.get("series", {}).items():
+            if word in text:
+                now = time.time()
+                to = int(attributes.get("to", now * 1000) // 1000)
+                start = int(attributes.get("from", (now - 86400) * 1000) // 1000)
+                step = max(1, int(attributes.get("interval", 300000) // 1000))
+                times = list(range(start - start % step, to + 1, step))
+                values = [points[min(len(points) - 1, i * len(points) // max(1, len(times)))] for i in range(len(times))]
+                return self.answer(200, {"data": {"type": "timeseries_response", "attributes": {
+                    "series": [{"group_tags": [], "query_index": 0, "unit": None}], "times": [t * 1000 for t in times], "values": [values]}}},
+                    self.rate(s))
+        return False
+
     def timeseries(self, s, attributes):
         """hits, errors and p95 per (version, env), 5-minute buckets, one series per formula."""
         queries = attributes.get("queries", [])
         text = " ".join(q.get("query", "") for q in queries)
+        if "service:" not in text and self.health_series(s, attributes, text) is not False:
+            return
         service = text.split("service:")[1].replace("}", " ").replace(",", " ").split()[0] if "service:" in text else ""
         versions = s.get("apm", {}).get(service, {}).get("versions", [])
         now = time.time()
