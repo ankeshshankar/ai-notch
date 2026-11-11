@@ -12,6 +12,8 @@ import Foundation
 //   (OK → Warn → Alert → OK) is told change by change.
 // - Incidents: declared, severity changed (escalated when the number drops), resolved.
 // - Numbers: over their `amber` line for 2 polls in a row, then under it for 2 polls.
+// - Watchdog: a story not seen before (by its id) is one notice; no banner. Re-emitted events of a
+//   story carry the same id and say nothing.
 // - The first answer of each kind after launch (or a change of site or query) is history.
 // - All the news of one poll goes out as one notification.
 
@@ -32,6 +34,8 @@ struct ProdAlertPrefs: Codable, Equatable, Sendable {
     var incidentResolved = true
     /// A health number crossing its line, up (pops open) and back down.
     var metrics = true
+    /// A new Datadog Watchdog story (notification only).
+    var watchdogStory = true
     /// Alert-level news drops a banner from the notch for a few seconds.
     var popOpen = true
     /// Datadog news notifies while the screen is unlocked too (the other sources only when locked).
@@ -40,8 +44,6 @@ struct ProdAlertPrefs: Codable, Equatable, Sendable {
     var reminder = false
 
     static let defaultsKey = "prod.alerts"
-    /// The three switches before these: `alerts`, `incidents`, `recoveries`.
-    static let legacyKey = "prod.notify"
 
     init() {}
 
@@ -55,6 +57,7 @@ struct ProdAlertPrefs: Codable, Equatable, Sendable {
         incidentChanged = try c.decodeIfPresent(Bool.self, forKey: .incidentChanged) ?? d.incidentChanged
         incidentResolved = try c.decodeIfPresent(Bool.self, forKey: .incidentResolved) ?? d.incidentResolved
         metrics = try c.decodeIfPresent(Bool.self, forKey: .metrics) ?? d.metrics
+        watchdogStory = try c.decodeIfPresent(Bool.self, forKey: .watchdogStory) ?? d.watchdogStory
         popOpen = try c.decodeIfPresent(Bool.self, forKey: .popOpen) ?? d.popOpen
         notifyUnlocked = try c.decodeIfPresent(Bool.self, forKey: .notifyUnlocked) ?? d.notifyUnlocked
         reminder = try c.decodeIfPresent(Bool.self, forKey: .reminder) ?? d.reminder
@@ -64,16 +67,7 @@ struct ProdAlertPrefs: Codable, Equatable, Sendable {
         if let data = defaults.data(forKey: defaultsKey), let prefs = try? JSONDecoder().decode(ProdAlertPrefs.self, from: data) {
             return prefs
         }
-        // From the older switches, only a choice to turn something off carries over.
-        var prefs = ProdAlertPrefs()
-        if let old = defaults.dictionary(forKey: legacyKey) {
-            if old["alerts"] as? Bool == false { prefs.monitorAlert = false }
-            if old["incidents"] as? Bool == false {
-                prefs.incidentDeclared = false
-                prefs.incidentChanged = false
-                prefs.incidentResolved = false
-            }
-        }
+        let prefs = ProdAlertPrefs()
         return prefs
     }
 
@@ -93,6 +87,7 @@ struct ProdAlertPrefs: Codable, Equatable, Sendable {
         case .incidentChanged: return incidentChanged
         case .incidentResolved: return incidentResolved
         case .metricOver, .metricNormal: return metrics
+        case .watchdogStory: return watchdogStory
         }
     }
 }
@@ -104,10 +99,19 @@ struct ProdAlertEvent: Equatable, Sendable {
         case monitorAlert, monitorWarn, monitorRecovered, monitorFlapping, monitorReminder
         case incidentDeclared, incidentChanged, incidentResolved
         case metricOver, metricNormal
+        case watchdogStory
+
+        /// Bad news (not a recovery): what the production-alert sound is for.
+        var isBad: Bool {
+            switch self {
+            case .monitorRecovered, .incidentResolved, .metricNormal: return false
+            default: return true
+            }
+        }
     }
 
     var kind: Kind
-    /// "m:<monitor id>", "i:<incident id>", "n:<number label>".
+    /// "m:<monitor id>", "i:<incident id>", "n:<number label>", "w:<story id>".
     var key: String
     var name: String
     var detail: String = ""
@@ -158,6 +162,9 @@ struct ProdAlertEngine {
     private var incidents: [String: ProdIncident] = [:]
     private var numbersAt: Double = 0
     private var metrics: [String: Metric] = [:]
+    private var watchdogAt: Double = 0
+    /// Story ids already known (history or told).
+    private var stories: Set<String> = []
 
     /// Another site or query: the next answer is history again.
     mutating func reset() { self = ProdAlertEngine() }
@@ -190,6 +197,24 @@ struct ProdAlertEngine {
         if snapshot.numbersAt > numbersAt {
             numbersAt = snapshot.numbersAt
             events += numbersChanged(snapshot)
+        }
+        if snapshot.watchdogAt > watchdogAt {
+            let first = watchdogAt == 0
+            watchdogAt = snapshot.watchdogAt
+            events += storiesChanged(snapshot, history: first)
+        }
+        return events
+    }
+
+    // MARK: Watchdog
+
+    /// A story id not seen before. The first answer is history. Body: the story's title, with its service.
+    private mutating func storiesChanged(_ s: ProdSnapshot, history: Bool) -> [ProdAlertEvent] {
+        var events: [ProdAlertEvent] = []
+        for story in s.watchdog where stories.insert(story.id).inserted && !history {
+            let url = story.hasStoryKey ? Watchdog.storyURL(site: s.site, id: story.id) : nil
+            events.append(ProdAlertEvent(kind: .watchdogStory, key: "w:\(story.id)", name: story.title, detail: story.service ?? "",
+                                         url: url ?? DatadogConfig.monitorsListURL(site: s.site, query: s.monitorQuery)))
         }
         return events
     }
@@ -424,7 +449,7 @@ enum ProdAlertPlanner {
         let kinds = ProdAlertEvent.Kind.allCases.compactMap { kind in counts[kind].map { $0 > 1 ? "\(kind.rawValue)×\($0)" : kind.rawValue } }
         let body: String
         if events.count == 1 {
-            body = events[0].detail
+            body = events[0].kind == .watchdogStory ? line(events[0]) : events[0].detail
         } else {
             var lines = events.prefix(4).map { "\(short($0.kind)): \($0.name)\($0.detail.isEmpty ? "" : " (\($0.detail))")" }
             if events.count > 4 { lines.append("+\(events.count - 4) more") }
@@ -444,9 +469,15 @@ enum ProdAlertPlanner {
         return "Datadog · " + parts.joined(separator: " · ")
     }
 
+    /// A Watchdog story: its title, and its service when it has one.
+    private static func line(_ event: ProdAlertEvent) -> String {
+        event.detail.isEmpty ? event.name : "\(event.name) · \(event.detail)"
+    }
+
+    /// The names, except a lone Watchdog story's (its body already says it).
     static func subtitle(_ events: [ProdAlertEvent]) -> String {
         var seen = Set<String>()
-        return events.map(\.name).filter { seen.insert($0).inserted }.joined(separator: ", ")
+        return events.filter { !($0.kind == .watchdogStory && events.count == 1) }.map(\.name).filter { seen.insert($0).inserted }.joined(separator: ", ")
     }
 
     private static func single(_ event: ProdAlertEvent) -> String {
@@ -461,6 +492,7 @@ enum ProdAlertPlanner {
         case .incidentResolved: return "Incident resolved"
         case .metricOver: return "\(event.name) high"
         case .metricNormal: return "\(event.name) back to normal"
+        case .watchdogStory: return "Watchdog story"
         }
     }
 
@@ -476,6 +508,7 @@ enum ProdAlertPlanner {
         case .incidentResolved: return "incidents resolved"
         case .metricOver: return "numbers high"
         case .metricNormal: return "numbers back to normal"
+        case .watchdogStory: return "Watchdog stories"
         }
     }
 
@@ -492,6 +525,7 @@ enum ProdAlertPlanner {
         case .incidentResolved: return "Resolved"
         case .metricOver: return "High"
         case .metricNormal: return "Normal"
+        case .watchdogStory: return "Story"
         }
     }
 }
@@ -755,16 +789,13 @@ enum ProdAlertsCheck {
         expect(engine.take(snap, now: clock, reminders: true).isEmpty, "not again right after")
         expect(!ProdAlertPrefs().reminder && ProdAlertPrefs().allows(.monitorAlert), "defaults: all on except the reminder")
 
-        // 9. Prefs: Codable with defaults for missing keys, and the older switches.
+        // 9. Prefs: Codable with defaults for missing keys.
         let suite = "ai-notch-selfcheck-\(getpid())"
         if let defaults = UserDefaults(suiteName: suite) {
             defaults.set(Data(#"{"monitorWarn":false}"#.utf8), forKey: ProdAlertPrefs.defaultsKey)
             let loaded = ProdAlertPrefs.load(defaults)
             expect(!loaded.monitorWarn && loaded.monitorAlert && loaded.notifyUnlocked && !loaded.reminder, "missing keys take defaults")
             defaults.removeObject(forKey: ProdAlertPrefs.defaultsKey)
-            defaults.set(["alerts": true, "incidents": false, "recoveries": false], forKey: ProdAlertPrefs.legacyKey)
-            let migrated = ProdAlertPrefs.load(defaults)
-            expect(migrated.monitorAlert && !migrated.incidentDeclared && !migrated.incidentResolved && migrated.recovered, "older switches: only an off carries over")
             var changed = ProdAlertPrefs()
             changed.reminder = true
             changed.popOpen = false
@@ -772,6 +803,51 @@ enum ProdAlertsCheck {
             expect(ProdAlertPrefs.load(defaults) == changed, "save and load")
             defaults.removePersistentDomain(forName: suite)
         }
+
+        // 9b. Watchdog stories.
+        func story(_ id: String, _ service: String?, key: Bool = true) -> WatchdogStory {
+            WatchdogStory(id: id, title: "Latency up", service: service, at: clock, status: "ongoing", hasStoryKey: key)
+        }
+        func stories(_ list: [WatchdogStory]) {
+            clock += 240
+            snap.watchdog = list
+            snap.watchdogAt = clock
+        }
+        engine = ProdAlertEngine()
+        stories([story("s1", "api")])
+        expect(engine.take(snap, now: clock).isEmpty, "watchdog: first answer is history")
+        stories([story("s1", "api")])
+        expect(engine.take(snap, now: clock).isEmpty, "watchdog: same story_key re-emitted, none")
+        stories([story("s2", "api"), story("s1", "api")])
+        events = engine.take(snap, now: clock)
+        expect(kinds(events) == ["watchdogStory w:s2"] && !events[0].popsOpen, "watchdog: a new story is one event, no pop: \(kinds(events))")
+        expect(events.first?.url?.absoluteString.contains("/watchdog/story/s2") == true, "watchdog: story link")
+        stories([story("s2", "api")])
+        expect(engine.take(snap, now: clock).isEmpty, "watchdog: a story that left: none")
+        stories([story("s2", "api"), story("e9", nil, key: false)])
+        events = engine.take(snap, now: clock)
+        expect(events.first?.url == list, "watchdog: no story key, the list link")
+        stories([story("s3", "web")])
+        events = engine.take(snap, now: clock)
+        plan = ProdAlertPlanner.plan(events, prefs: ProdAlertPrefs(), snoozed: false, locked: false, popBlocked: nil, listURL: list)
+        expect(plan.notice?.title == "Datadog · Watchdog story" && plan.notice?.body == "Latency up · web" && plan.headsUp == nil,
+               "watchdog: notice text, no banner: \(plan.notice?.title ?? "") / \(plan.notice?.body ?? "")")
+        var off = ProdAlertPrefs()
+        off.watchdogStory = false
+        plan = ProdAlertPlanner.plan(events, prefs: off, snoozed: false, locked: false, popBlocked: nil, listURL: list)
+        expect(plan.notice == nil && plan.held == ["off"], "watchdog: switch off, none")
+        plan = ProdAlertPlanner.plan(events, prefs: ProdAlertPrefs(), snoozed: true, locked: false, popBlocked: nil, listURL: list)
+        expect(plan.notice == nil && plan.held == ["snoozed"], "watchdog: snoozed, held")
+        stories([story("s4", "web"), story("s5", nil)])
+        events = engine.take(snap, now: clock)
+        plan = ProdAlertPlanner.plan(events, prefs: ProdAlertPrefs(), snoozed: false, locked: false, popBlocked: nil, listURL: list)
+        expect(events.count == 2 && plan.notice?.title == "Datadog · 2 Watchdog stories" && plan.notice?.url == list, "watchdog: several in one poll merge: \(plan.notice?.title ?? "")")
+        engine.reset()
+        stories([story("s9", nil)])
+        expect(engine.take(snap, now: clock).isEmpty, "watchdog: after a reset, history again")
+        if let decoded = try? JSONDecoder().decode(ProdAlertPrefs.self, from: Data(#"{"monitorWarn":false,"metrics":false}"#.utf8)) {
+            expect(decoded.watchdogStory && !decoded.metrics, "watchdog: old stored prefs decode, switch on")
+        } else { expect(false, "watchdog: old prefs decode") }
 
         // 10. The full-screen check the banner respects.
         let screen = NSRect(x: 0, y: 0, width: 1800, height: 1169)

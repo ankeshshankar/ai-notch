@@ -60,6 +60,8 @@ enum Installer {
     static func uninstall(keepProfiles: Bool) -> Int32 {
         guard geteuid() == 0 else { return fail("uninstall must run as root") }
         _ = run("/bin/launchctl", ["bootout", "system/\(VPNPaths.label)"])
+        // The stopping helper clears the flag itself; if it did not get to, the marker says it is ours.
+        SleepLease.cleanup(runner: SystemPmset(), markerPath: VPNPaths.sleepMarker)
         unlink(VPNPaths.plist)
         unlink(VPNPaths.controlSocket)
         for name in files { unlink("\(VPNPaths.installDir)/\(name)") }

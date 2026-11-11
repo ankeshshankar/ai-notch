@@ -282,8 +282,8 @@ enum PullRequestDev {
         try? FileManager.default.removeItem(at: file)
 
         // The collapsed wing: pull-request news after a pipeline failure, before subagents.
-        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: false, pullRequestNews: 2, subagents: 3, building: 1) == .pullRequestNews(2)
-               && WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: true, pullRequestNews: 2, subagents: 0, building: 0) == .buildFailure,
+        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: false, pullRequestNews: 2, subagents: 3) == .pullRequestNews(2)
+               && WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: true, pullRequestNews: 2, subagents: 0) == .buildFailure,
                "wing: PR news before subagents, after a failure")
         // News parts: comments seen leave no news behind; a new approval is news again.
         var news = mine!
@@ -339,7 +339,8 @@ enum PullRequestDev {
             resolved.signal()
         }
         resolved.wait()
-        expect(found[folderPath] == SessionGit(repo: "ws/app", branch: "feature") && found["/nonexistent-ai-notch-folder"] == SessionGit(repo: nil, branch: nil), "git: the branch and repository of a real folder, nothing for a missing one")
+        expect(found[folderPath]?.repo == "ws/app" && found[folderPath]?.branch == "feature" && found[folderPath]?.isRepo == true
+               && found["/nonexistent-ai-notch-folder"] == SessionGit(repo: nil, branch: nil), "git: the branch and repository of a real folder, nothing for a missing one")
         try? FileManager.default.removeItem(at: gitFolder)
 
         // The pull request's line, per state.

@@ -10,21 +10,21 @@ struct RamChip: View {
     var body: some View {
         let isOpen = controller.openPanel == NotchController.machinePanel
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+            withAnimation(Motion.slide) {
                 controller.openPanel = isOpen ? nil : NotchController.machinePanel
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "memorychip").font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(isOpen ? Palette.onDone : Self.color(machine.level, known: machine.memory != nil))
+                Image(systemName: "memorychip").font(Typo.caption(.semibold))
+                    .foregroundStyle(isOpen ? Palette.onDone : Self.color(machine.level, known: machine.memory != nil)).decorative()
                 if let memory = machine.memory {
                     Text("\(MachineStore.gigabytes(tenths: memory.availableTenths)) free")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
+                        .font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
                 } else {
-                    Text("RAM —").font(.system(size: 10, weight: .semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
+                    Text("RAM —").font(Typo.label(.semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
                 }
                 if let note = machine.chipNote {
-                    Text("· \(note)").font(.system(size: 10)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink3)
+                    Text("· \(note)").font(Typo.label()).foregroundStyle(isOpen ? Palette.onDone : Palette.ink3)
                 }
             }
             .lineLimit(1)
@@ -51,17 +51,19 @@ struct RamChip: View {
 struct MachinePanel: View {
     @ObservedObject var machine: MachineStore
     @ObservedObject var feed: MachineFeed
+    @ObservedObject private var lid = LidAwake.shared
+    @ObservedObject private var effects = EffectsPrefs.shared
 
     var body: some View {
         let snapshot = feed.snapshot
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("Machine").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.done)
+                Text("Machine").font(Typo.label(.semibold)).foregroundStyle(Palette.done)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Capsule().fill(Palette.doneHue.opacity(0.16)))
                 InfoMark(text: Self.about(machine.config))
                 ForEach(machine.warnings, id: \.self) { warning in
-                    Text(warning).font(.system(size: 10, weight: .semibold))
+                    Text(warning).font(Typo.label(.semibold))
                         .foregroundStyle(warning == "Critical pressure" ? Palette.failed : Palette.waiting)
                         .padding(.horizontal, 6).padding(.vertical, 1)
                         .background(Capsule().fill((warning == "Critical pressure" ? Palette.failedHue : Palette.waitingHue).opacity(0.16)))
@@ -71,22 +73,60 @@ struct MachinePanel: View {
                 bulkButton
             }
             memoryLine
+            lidBlock
             if !snapshot.ok {
-                Text("—").font(.system(size: 12)).foregroundStyle(Palette.ink3)
+                Text("—").font(Typo.subtitle()).foregroundStyle(Palette.ink3)
             } else if snapshot.rows.isEmpty {
-                Text("No dev processes running").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+                Text("No dev processes running").font(Typo.body()).foregroundStyle(Palette.ink3)
             } else {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(snapshot.rows) { row in rowView(row) }
                 }
             }
             if let note = machine.note {
-                Text(note).font(.system(size: 10)).foregroundStyle(Palette.ink2)
+                Text(note).font(Typo.label()).foregroundStyle(Palette.ink2)
             }
         }
         .padding(10)
         .panelCard()
     }
+
+    /// Stay awake with the lid closed: the switch, and what it is doing (or why not).
+    private var lidBlock: some View {
+        let helper = lid.helperState()
+        let line = lid.status.line
+        let tone: Color = {
+            switch lid.status {
+            case .active: return Palette.done
+            case .armed: return Palette.ink2
+            case .off(let reason):
+                switch reason {
+                case .batteryLow, .hot, .managedElsewhere, .helperFailed: return Palette.waiting
+                default: return Palette.ink3
+                }
+            }
+        }()
+        return HStack(spacing: 8) {
+            Image(systemName: lid.status == .active ? "laptopcomputer.and.arrow.down" : "laptopcomputer")
+                .font(Typo.label()).foregroundStyle(tone).frame(width: 14).decorative()
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text("Stay awake, lid closed").font(Typo.label(.semibold)).foregroundStyle(Palette.ink)
+                    InfoMark(text: Self.lidAbout)
+                }
+                Text(line).font(Typo.label()).foregroundStyle(tone).lineLimit(1)
+                    .animation(Motion.ease(0.15), value: line)
+            }
+            Spacer(minLength: 6)
+            Toggle("Stay awake with the lid closed", isOn: $effects.lidAwake)
+                .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                .disabled(helper != .ok)
+                .ax("Stay awake with the lid closed", value: effects.lidAwake ? "on" : "off", hint: line)
+        }
+        .padding(.vertical, 2)
+    }
+
+    static let lidAbout = "Keeps the Mac awake with the lid closed, only while an agent or a build works and for 2 minutes after. On battery it stops at \(LidAwakePlan.lowBattery)% charge, or when the Mac runs hot. Needs AI Notch's helper (Setup). The Mac gets warm shut in a bag: do not carry it like that."
 
     @ViewBuilder private var memoryLine: some View {
         if let memory = machine.memory {
@@ -112,22 +152,22 @@ struct MachinePanel: View {
                     Text(" · \(MachineStore.gigabytes(tenths: memory.compressedTenths)) compressed · pressure \(Self.pressureName(memory.pressure))")
                         .foregroundStyle(Palette.ink3)
                 }
-                .font(.system(size: 10).monospacedDigit())
+                .font(Typo.label().monospacedDigit())
                 .lineLimit(1)
             }
         } else {
-            Text("Memory —").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+            Text("Memory —").font(Typo.label()).foregroundStyle(Palette.ink3)
         }
     }
 
     private func rowView(_ row: MachineRow) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: row.kind.icon).font(.system(size: 10)).foregroundStyle(Palette.ink2).frame(width: 14)
-            Text(row.title).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.88)).lineLimit(1).truncationMode(.middle)
+            Image(systemName: row.kind.icon).font(Typo.label()).foregroundStyle(Palette.ink2).frame(width: 14).decorative()
+            Text(row.title).font(Typo.body()).foregroundStyle(Palette.ink.opacity(0.88)).lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 6)
-            Text(MachineStore.size(row.footprintMB)).font(.system(size: 10, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.ink2)
+            Text(MachineStore.size(row.footprintMB)).font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(Palette.ink2)
                 .frame(width: 54, alignment: .trailing)
-            Text(MachineStore.stateText(row.state)).font(.system(size: 10)).lineLimit(1)
+            Text(MachineStore.stateText(row.state)).font(Typo.label()).lineLimit(1)
                 .foregroundStyle(row.state == .inUse ? Palette.done : row.state.isIdle ? Palette.waiting : Palette.ink3)
                 .frame(width: 62, alignment: .leading)
             actionButton(row).frame(minWidth: 70, alignment: .trailing)
@@ -138,7 +178,7 @@ struct MachinePanel: View {
     @ViewBuilder private func actionButton(_ row: MachineRow) -> some View {
         if !row.canClose {
             if row.kind.action != .none, let why = row.whyNot {
-                Text("—").font(.system(size: 10)).foregroundStyle(Palette.ink3).help(why)
+                Text("—").font(Typo.label()).foregroundStyle(Palette.ink3).help(why)
             } else {
                 Color.clear.frame(width: 1, height: 1)
             }
@@ -146,7 +186,7 @@ struct MachinePanel: View {
             let action = machine.actions[row.id]
             let urgent = action == .confirm || action == .confirmForce || action == .forceQuit
             Button { machine.tap(row) } label: {
-                Text(label(row, action)).font(.system(size: 10, weight: .medium))
+                Text(label(row, action)).font(Typo.label(.medium))
                     .foregroundStyle(urgent ? Palette.failed : Palette.ink2)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(urgent ? Palette.failedHue.opacity(0.16) : Palette.chip))
@@ -156,6 +196,7 @@ struct MachinePanel: View {
             .buttonStyle(.plain)
             .disabled(action == .closing)
             .help(help(row, action))
+            .ax("\(label(row, action)) \(row.title)")
         }
     }
 
@@ -187,7 +228,7 @@ struct MachinePanel: View {
             let total = rows.reduce(0) { $0 + $1.footprintMB }
             Button { machine.tapBulk() } label: {
                 Text(machine.bulkArmed ? "Confirm close \(rows.count)" : "Close idle · \(rows.count) · \(MachineStore.size(total))")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(Typo.label(.semibold))
                     .foregroundStyle(machine.bulkArmed ? Palette.failed : Palette.ink2)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(machine.bulkArmed ? Palette.failedHue.opacity(0.16) : Palette.chip))
@@ -196,6 +237,7 @@ struct MachinePanel: View {
             }
             .buttonStyle(.plain)
             .help("Closes idle Metro, Jest and Gradle/Kotlin daemons that used under 5% CPU in the last minute. Never the emulator or the Simulator. A second click confirms.")
+            .ax(machine.bulkArmed ? "Confirm closing idle processes" : "Close idle processes", value: "\(rows.count)")
         }
     }
 

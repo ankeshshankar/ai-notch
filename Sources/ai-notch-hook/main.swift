@@ -301,6 +301,8 @@ if isCursor {
     if state.pid == nil { state.pid = claudePid() }
     if state.appBundleId == nil { state.appBundleId = env["__CFBundleIdentifier"] }
     if state.entrypoint == nil { state.entrypoint = env["CLAUDE_CODE_ENTRYPOINT"] }
+    // How this process compacts (the app cannot read another process's environment).
+    if (event["agent_id"] as? String) == nil, let compact = AutoCompactEnv.read(env), compact != state.autoCompact { state.autoCompact = compact }
 }
 // The terminal it runs in, once: the agent's controlling terminal, and tmux's pane.
 if state.tty == nil, let pid = state.pid { state.tty = terminal(of: pid) }
@@ -562,6 +564,11 @@ case "SessionStart":
     state.phase = .idle
     clearWait()
     state.current = nil
+    state.failure = nil
+    state.failedAt = nil
+    state.compactingSince = nil
+    // A session that begins from a compaction has a new, shorter context.
+    if string("source") == "compact" { state.compactedAt = now }
     if let model = string("model") { state.model = model }
 
 case "PostModelSwitch":
@@ -574,6 +581,10 @@ case "UserPromptSubmit":
     state.phase = .working
     state.turnStartedAt = now
     state.finishedAt = nil
+    // The failed turn is over once you ask again.
+    state.failure = nil
+    state.failedAt = nil
+    state.compactingSince = nil
     // A background agent that finished reports back as a task notification naming it.
     if let prompt = string("prompt"), prompt.contains("<task-notification>") {
         let status = tagged("status", in: prompt) ?? "completed"
@@ -636,6 +647,9 @@ case "PreToolUse":
     }
 
 case "PermissionRequest":
+    // Headless runs (AI_NOTCH_NO_APPROVALS=1) have nobody to answer: record nothing, ask the
+    // app nothing, and let Claude Code's own permission handling decide at once.
+    if env["AI_NOTCH_NO_APPROVALS"] == "1" { break }
     // A question or a plan raises a permission request too, but it is not yes-or-no.
     // The main thread's or a subagent's: each is its own wait and its own prompt.
     if tool == "AskUserQuestion" {
@@ -756,12 +770,39 @@ case "Interrupt":
     if let started = state.turnStartedAt { state.lastTurnSeconds = now - started }
     for index in state.agents.indices where state.agents[index].isRunning { state.agents[index].end(.stopped, at: now) }
 
+case "PreCompact":
+    // Claude is summarising the conversation: the row says so until PostCompact. Nothing else
+    // changes: a compaction is not a turn.
+    if agentId == nil { state.compactingSince = now }
+
+case "PostCompact":
+    if agentId == nil {
+        state.compactingSince = nil
+        state.compactedAt = now
+    }
+
+case "StopFailure":
+    // The turn ended on an API error, in place of Stop. Not a failed tool (PostToolUseFailure):
+    // those Claude recovers from.
+    guard agentId == nil else { break }
+    resolvePending { $0.agent == nil }
+    clearMainWait()
+    state.phase = .idle
+    state.current = nil
+    state.finishedAt = now
+    state.compactingSince = nil
+    if let started = state.turnStartedAt { state.lastTurnSeconds = now - started }
+    state.failure = oneLine(string("error") ?? "unknown", max: 40)
+    state.failedAt = now
+    state.pendingAgents = []
+
 case "Stop":
     resolvePending { $0.agent == nil }
     clearMainWait()
     state.phase = .idle
     state.current = nil
     state.finishedAt = now
+    state.compactingSince = nil
     if let started = state.turnStartedAt { state.lastTurnSeconds = now - started }
     let tasks = event["background_tasks"] as? [[String: Any]] ?? []
     let live = tasks.filter { ["running", "pending"].contains($0["status"] as? String ?? "") }

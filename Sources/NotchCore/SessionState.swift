@@ -187,6 +187,20 @@ public struct SessionState: Codable, Sendable, Equatable {
     /// When the session last pushed or deployed (git push, a deploy command), and what it ran.
     public var shippedAt: Double?
     public var shipped: String?
+    /// The last turn ended on an API error (Claude Code's `StopFailure`): its `error` code and
+    /// when. Cleared by the next prompt or a new session start.
+    public var failure: String?
+    public var failedAt: Double?
+    /// While Claude compacts the conversation (PreCompact until PostCompact), since when; and
+    /// when it last finished, so a reply written before that is not read as the context now.
+    public var compactingSince: Double?
+    public var compactedAt: Double?
+    /// How the process was told to compact, from its environment.
+    public var autoCompact: AutoCompactEnv?
+    /// What the app reads from the transcript, never what the hook writes: the context in use,
+    /// in tokens, and the window it fills.
+    public var contextTokens: Int?
+    public var contextWindow: Int?
 
     public init(id: String, cwd: String, now: Double) {
         self.id = id
@@ -253,6 +267,21 @@ public struct SessionState: Codable, Sendable, Equatable {
     }
 
     public var project: String { URL(fileURLWithPath: cwd).lastPathComponent }
+    /// The turn ended on an API error and nothing has been asked since.
+    public var isFailed: Bool { failure != nil && phase == .idle }
+    public var failureText: String { FailureReason.text(failure) }
+    /// Compacting now (a PostCompact lost for a day does not count).
+    public func isCompacting(at now: Double) -> Bool { compactingSince.map { now - $0 < 1800 } ?? false }
+    /// The context's share of its window, in whole percent; nil when unread.
+    public var contextPercent: Int? {
+        guard let tokens = contextTokens, let window = contextWindow else { return nil }
+        return ContextUse.percent(tokens: tokens, window: window)
+    }
+    /// Where the context stands against the point Claude compacts at.
+    public var contextLevel: ContextLevel {
+        guard let tokens = contextTokens, let window = contextWindow else { return .normal }
+        return ContextUse.level(tokens: tokens, point: ContextUse.compactPoint(window: window, env: autoCompact))
+    }
     public var runningAgents: [AgentNow] { agents.filter(\.isRunning) }
     /// A chat of Cursor's own agent, not a Claude Code session.
     public var isCursorAgent: Bool { entrypoint == "cursor-agent" }
@@ -489,5 +518,34 @@ public struct SessionControl: Codable, Sendable, Equatable {
         control.at = Date().timeIntervalSince1970
         write(control, for: id)
         return true
+    }
+}
+
+
+/// The order of the session rows: fixed, so a row never moves because of activity.
+/// Two groups: the ones that need you (waiting, or failed) on top, in the order they came to
+/// need you (the one waiting longest first); every other row below, newest session first by its
+/// start (a time that never changes), the id breaking a tie. Working and idle share the second
+/// group, so a turn starting or ending moves nothing; a session that stops needing you goes back
+/// to its fixed place.
+public enum SessionOrder {
+    public static func needsYou(_ s: SessionState) -> Bool { s.phase == .waiting || s.isFailed }
+
+    /// When it began to need you (the first thread waiting, or the failure).
+    public static func needsSince(_ s: SessionState) -> Double {
+        if s.phase == .waiting { return s.waits?.first?.since ?? s.waitingSince ?? s.startedAt }
+        return s.failedAt ?? s.startedAt
+    }
+
+    public static func before(_ a: SessionState, _ b: SessionState) -> Bool {
+        let na = needsYou(a), nb = needsYou(b)
+        if na != nb { return na }
+        if na {
+            let ta = needsSince(a), tb = needsSince(b)
+            if ta != tb { return ta < tb }
+        } else if a.startedAt != b.startedAt {
+            return a.startedAt > b.startedAt
+        }
+        return a.id < b.id
     }
 }

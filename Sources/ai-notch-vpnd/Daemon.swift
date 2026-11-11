@@ -30,6 +30,8 @@ final class Daemon: @unchecked Sendable {
     private var promptSeq = 0
     private var sources: [Any] = []
     private var shuttingDown = false
+    /// Holds the SleepDisabled flag while the app renews its lease.
+    private let lease = SleepLease(runner: SystemPmset(), markerPath: VPNPaths.sleepMarker)
 
     init(allowedUID: uid_t) {
         self.allowedUID = allowedUID
@@ -46,6 +48,8 @@ final class Daemon: @unchecked Sendable {
             exit(1)
         }
         store.load()
+        // A flag a helper that died left set is cleared before anything else.
+        lease.start()
         let listener: Int32
         do {
             listener = try UnixSocket.listen(VPNPaths.controlSocket, mode: 0o666)
@@ -63,7 +67,16 @@ final class Daemon: @unchecked Sendable {
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: queue)
         term.setEventHandler { self.shutdown() }
         term.resume()
-        sources = [accept, term]
+        // Ends an expired lease: the flag never outlives the app by more than the TTL.
+        let leaseTimer = DispatchSource.makeTimerSource(queue: queue)
+        leaseTimer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(1))
+        leaseTimer.setEventHandler {
+            let before = self.lease.status.state
+            self.lease.tick()
+            if before == .held, self.lease.status.state != .held { self.noteLease("expired") }
+        }
+        leaseTimer.resume()
+        sources = [accept, term, leaseTimer]
         note("version \(VPNBuild.version) serving user \(allowedUID), \(store.profiles.count) profile(s)")
         dispatchMain()
     }
@@ -71,6 +84,7 @@ final class Daemon: @unchecked Sendable {
     private func shutdown() {
         pendingConnect = nil
         shuttingDown = true
+        lease.shutdown()
         guard let session else { exit(0) }
         session.stop()
         // At most 8 s for OpenVPN to take its routes and DNS back.
@@ -85,7 +99,7 @@ final class Daemon: @unchecked Sendable {
         io.async {
             defer { close(client) }
             let uid = UnixSocket.peerUID(client)
-            guard let uid, uid == 0 || uid == self.allowedUID else {
+            guard PeerCheck.allowed(peer: uid, installedFor: self.allowedUID) else {
                 note("refused a request from uid \(uid.map(String.init) ?? "?")")
                 try? UnixSocket.writeAll(client, VPNWire.encode(VPNReply.fail("This VPN helper serves another user.")))
                 return
@@ -104,13 +118,21 @@ final class Daemon: @unchecked Sendable {
 
     private func status() -> VPNStatus {
         VPNStatus(version: VPNBuild.version, engine: FileManager.default.isExecutableFile(atPath: VPNPaths.openvpn),
-                  profiles: store.profiles, session: session?.info, lastEnd: lastEnd)
+                  profiles: store.profiles, session: session?.info, lastEnd: lastEnd, leaseProtocol: SleepLeaseBuild.proto)
     }
 
     private func handle(_ request: VPNRequest) -> VPNReply {
         switch request.op {
         case .status:
-            return VPNReply(ok: true, status: status())
+            return VPNReply(ok: true, status: status(), sleep: lease.status)
+        case .sleepLease:
+            if let why = lease.acquire() { return .fail(why) }
+            if lease.status.state == .held { noteLease("held") } else { noteLease("managed elsewhere") }
+            return VPNReply(ok: true, sleep: lease.status)
+        case .sleepRelease:
+            lease.release()
+            noteLease("released")
+            return VPNReply(ok: true, sleep: lease.status)
         case .importProfile:
             guard let config = request.config else { return .fail("No profile was sent.") }
             switch OVPNProfile.check(Data(config.utf8)) {
@@ -160,6 +182,14 @@ final class Daemon: @unchecked Sendable {
         case .log:
             return VPNReply(ok: true, log: session?.log ?? lastLog)
         }
+    }
+
+    /// One line when the lease changes state, none for a renewal.
+    private var lastLease = ""
+    private func noteLease(_ what: String) {
+        guard what != lastLease else { return }
+        lastLease = what
+        note("sleep lease: \(what)")
     }
 
     // MARK: The session

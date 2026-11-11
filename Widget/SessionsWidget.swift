@@ -17,6 +17,7 @@ private struct Palette {
     var ink3: Color { isDark ? .white.opacity(0.42) : .black.opacity(0.58) }
     var background: Color { isDark ? .black : .white }
     var card: Color { isDark ? .white.opacity(0.07) : .black.opacity(0.045) }
+    var failed: Color { isDark ? Color(red: 1.0, green: 0.23, blue: 0.19) : Color(red: 0.78, green: 0.16, blue: 0.14) }
     var waitingTint: Color { isDark ? Self.waitingHue.opacity(0.16) : Color(red: 1.0, green: 0.94, blue: 0.82) }
 }
 
@@ -145,18 +146,18 @@ private struct RowView: View {
     private var palette: Palette { Palette(scheme) }
 
     var body: some View {
-        let color = row.phase == "waiting" ? palette.waiting : row.phase == "working" ? palette.claude : palette.done
+        let color = row.failed == true ? palette.failed : row.phase == "waiting" ? palette.waiting : row.phase == "working" ? palette.claude : palette.done
         HStack(spacing: 8) {
             Circle().fill(color).frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 // The chat's name first; where it runs and what it does under it.
                 HStack(spacing: 5) {
                     Text(row.title ?? row.project).font(.system(size: 12, weight: .semibold)).foregroundStyle(palette.ink).lineLimit(1)
-                    Text(row.isCursor ? "Cursor" : (row.model ?? "Claude")).font(.system(size: 9, weight: .medium)).foregroundStyle(palette.ink3)
+                    Text((row.isCursor ? "Cursor" : (row.model ?? "Claude")) + (row.context.map { " · \($0)%" } ?? "")).font(.system(size: 9, weight: .medium)).foregroundStyle(palette.ink3)
                         .lineLimit(1).fixedSize()
                 }
                 Text(row.title == nil ? row.detail : "\(row.project) · \(row.detail)").font(.system(size: 10))
-                    .foregroundStyle(row.phase == "waiting" ? palette.waiting : palette.ink2).lineLimit(1)
+                    .foregroundStyle(row.failed == true ? palette.failed : row.phase == "waiting" ? palette.waiting : palette.ink2).lineLimit(1)
             }
             Spacer(minLength: 4)
             if row.phase == "working", let started = row.turnStartedAt {

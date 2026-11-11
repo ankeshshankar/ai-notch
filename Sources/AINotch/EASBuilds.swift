@@ -93,7 +93,8 @@ struct EASBuild: Equatable, Sendable, Identifiable {
 
     /// The build page; EAS's JSON has no URL of its own.
     static func pageURL(owner: String, slug: String, id: String) -> URL {
-        URL(string: "https://expo.dev/accounts/\(owner)/projects/\(slug)/builds/\(id)")!
+        func part(_ text: String) -> String { let s = SafeLink.segment(text); return s.isEmpty ? "_" : s }
+        return URL(string: "https://expo.dev/accounts/\(part(owner))/projects/\(part(slug))/builds/\(part(id))") ?? URL(string: "https://expo.dev")!
     }
 
     /// From the CLI's JSON or the GraphQL answer (the same BuildFragment either way).
@@ -166,16 +167,14 @@ enum EASConfig {
     /// The project, or nil while builds.json has no `eas` part.
     static var settings: BuildsConfig.EAS? { BuildsConfig.current?.eas }
     static let minimumMajor = 24
-    /// An optional EXPO_TOKEN, if the user stored one (the older name is still read); else the
-    /// CLI's own login.
+    /// An optional EXPO_TOKEN, if the user stored one; else the CLI's own login.
     static let tokenService = "ai-notch.expo"
-    static let legacyTokenService = "ai-notch.expo-token"
 
     static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
     static var folder: URL { home.appendingPathComponent(".claude/notch/eas", isDirectory: true) }
 
     static func readToken() -> String? {
-        KeychainItem.read(service: tokenService)?.secret ?? KeychainItem.read(service: legacyTokenService)?.secret
+        KeychainItem.read(service: tokenService)?.secret
     }
 
     /// The CLI's login in ~/.expo/state.json: only the session secret and the user name are

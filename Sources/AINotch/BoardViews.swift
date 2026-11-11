@@ -9,6 +9,7 @@ import NotchCore
 struct BoardPanel: View {
     var board: Board
     @ObservedObject var links: SessionPRStore
+    @ObservedObject var reviews: ReviewStore
     var title: (SessionState) -> String
     var controller: NotchController
     var now: Double
@@ -18,7 +19,7 @@ struct BoardPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if board.isEmpty {
-                Text("Nothing open").font(.system(size: 11)).foregroundStyle(Palette.ink3).padding(.vertical, 2)
+                Text("Nothing open").font(Typo.body()).foregroundStyle(Palette.ink3).padding(.vertical, 2)
             } else if isWide {
                 HStack(alignment: .top, spacing: 10) {
                     ForEach(BoardColumn.allCases, id: \.self) { column in section(column) }
@@ -27,6 +28,13 @@ struct BoardPanel: View {
                 ForEach(BoardColumn.allCases, id: \.self) { column in section(column) }
             }
             if !board.idle.isEmpty { idleFooter }
+            if let status = reviews.status {
+                // The board leans on the pull-request read: say when it is missing or failed.
+                Text(status.isSetup ? "Pull requests · \(status.text)" : "Pull requests · \(status.text), last read \(reviews.updatedAt > 0 ? ago(Date().timeIntervalSince1970 - reviews.updatedAt) : "never")")
+                    .font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
+            } else if reviews.updatedAt == 0 {
+                Text("Reading pull requests…").font(Typo.label()).foregroundStyle(Palette.ink3)
+            }
         }
         .padding(10)
         .panelCard()
@@ -46,8 +54,8 @@ struct BoardPanel: View {
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
                 Circle().fill(cards.isEmpty ? Palette.ink3 : tint(column)).frame(width: 6, height: 6)
-                Text(column.title).font(.system(size: 10, weight: .semibold)).foregroundStyle(cards.isEmpty ? Palette.ink3 : Palette.ink2)
-                Text("\(cards.count)").font(.system(size: 10, weight: .medium).monospacedDigit()).foregroundStyle(Palette.ink3)
+                Text(column.title).font(Typo.label(.semibold)).foregroundStyle(cards.isEmpty ? Palette.ink3 : Palette.ink2)
+                Text("\(cards.count)").font(Typo.label(.medium).monospacedDigit()).foregroundStyle(Palette.ink3)
                 InfoMark(text: column.about)
             }
             ForEach(cards) { card in cardView(card, in: column) }
@@ -67,8 +75,9 @@ struct BoardPanel: View {
                 }
                 .buttonStyle(RowButtonStyle())
                 .help("Jump to this session")
+                .accessibilityHint("Jumps to this session")
                 if let pr = card.pr {
-                    SessionPRLine(links: links, session: session, pr: pr)
+                    SessionPRLine(controller: controller, links: links, session: session, pr: pr)
                 }
             }
             .modifier(BoardCardStyle())
@@ -76,9 +85,9 @@ struct BoardPanel: View {
             Button {
                 guard let url = pr.url else { return }
                 controller.collapse()
-                NSWorkspace.shared.open(url)
+                SafeLink.open(url, for: .bitbucket)
             } label: {
-                cardLine(dot: AnyView(Image(systemName: "arrow.triangle.pull").font(.system(size: 8, weight: .semibold)).foregroundStyle(Palette.bitbucket)),
+                cardLine(dot: AnyView(Image(systemName: "arrow.triangle.pull").font(Typo.micro(.semibold)).foregroundStyle(Palette.bitbucket).decorative()),
                          title: pr.title, state: PRLine.text(pr), stateColor: tone(pr))
             }
             .buttonStyle(RowButtonStyle())
@@ -90,8 +99,8 @@ struct BoardPanel: View {
     /// A card's first line: a mark, the name, and its state. Narrow, the state sits on the same
     /// line to keep the Board short; in a column it goes under the name.
     private func cardLine(dot: AnyView, title: String, state: String, stateColor: Color) -> some View {
-        let name = Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.tail)
-        let status = Text(state).font(.system(size: 10, weight: .medium)).foregroundStyle(stateColor).lineLimit(1).truncationMode(.tail)
+        let name = Text(title).font(Typo.subtitle(.semibold)).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.tail)
+        let status = Text(state).font(Typo.label(.medium)).foregroundStyle(stateColor).lineLimit(1).truncationMode(.tail)
         return Group {
             if isWide {
                 VStack(alignment: .leading, spacing: 1) {
@@ -132,16 +141,17 @@ struct BoardPanel: View {
     private var idleFooter: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { showsIdle.toggle() }
+                withAnimation(Motion.slide) { showsIdle.toggle() }
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: showsIdle ? "chevron.down" : "chevron.right").font(.system(size: 8, weight: .bold))
-                    Text("Idle · \(board.idle.count)").font(.system(size: 10, weight: .semibold))
+                    Image(systemName: showsIdle ? "chevron.down" : "chevron.right").font(Typo.micro(.bold)).decorative()
+                    Text("Idle · \(board.idle.count)").font(Typo.label(.semibold))
                 }
                 .foregroundStyle(Palette.ink3)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .ax("Idle sessions", value: showsIdle ? "shown" : "hidden")
             if showsIdle {
                 ForEach(board.idle, id: \.id) { session in
                     Button {
@@ -149,9 +159,9 @@ struct BoardPanel: View {
                         Jump.to(session)
                     } label: {
                         HStack(spacing: 6) {
-                            Text(title(session)).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
+                            Text(title(session)).font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
                             Spacer(minLength: 4)
-                            Text(BoardModel.detail(session, now: now)).font(.system(size: 10)).foregroundStyle(Palette.ink3).lineLimit(1)
+                            Text(BoardModel.detail(session, now: now)).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
                         }
                         .contentShape(Rectangle())
                     }

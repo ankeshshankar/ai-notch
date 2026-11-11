@@ -174,8 +174,8 @@ final class ProdStore: ObservableObject {
             if let monitor = monitors.first { return DatadogConfig.monitorURL(site: site, id: monitor.id) }
             if let incident = snapshot.incidents.first { return DatadogConfig.incidentURL(site: site, incident: incident) }
         }
-        // Nothing alerting and one Watchdog story: that story, on the org's own site.
-        if monitors.isEmpty, snapshot.incidents.isEmpty, snapshot.watchdog.count == 1, let story = snapshot.watchdog.first,
+        // Nothing alerting and one Watchdog story with a story key (an event id would 404): that story, on the org's own site.
+        if monitors.isEmpty, snapshot.incidents.isEmpty, snapshot.watchdog.count == 1, let story = snapshot.watchdog.first, story.hasStoryKey,
            let url = Watchdog.storyURL(site: site, id: story.id) { return url }
         return DatadogConfig.monitorsListURL(site: site, query: snapshot.monitorQuery)
     }
@@ -201,7 +201,7 @@ final class ProdStore: ObservableObject {
             // Not connected, the sign-in ended, refused: Setup, at its Prod section.
             SetupWindowController.shared.show(focus: .prod)
         } else if let url = clickURL {
-            NSWorkspace.shared.open(url)
+            SafeLink.open(url, for: .datadog)
         }
     }
 
@@ -249,7 +249,7 @@ final class ProdStore: ObservableObject {
 
     /// The banner's Open: the monitor or incident, else the filtered list.
     func openHeadsUp() {
-        if let url = headsUp?.url ?? clickURL { NSWorkspace.shared.open(url) }
+        SafeLink.open(headsUp?.url ?? clickURL, for: .datadog)
         if let keys = headsUp?.keys { unseen.subtract(keys) }
         dismissHeadsUp()
     }
@@ -350,6 +350,7 @@ final class ProdStore: ObservableObject {
         if !fresh.isEmpty, !isLooking {
             unseenNews.formUnion(fresh)
             for key in fresh { noteBuildLog("prod: \(key.hasPrefix("deploy:") ? "deploy looks worse" : "watchdog story")") }
+            if !isSnoozed, fresh.contains(where: { $0.hasPrefix("deploy:") }) { SoundPlayer.shared.play(.prodAlert) }
         }
         let kept = unseenNews.intersection(keys)
         if kept != unseenNews { unseenNews = kept }
@@ -391,7 +392,10 @@ final class ProdStore: ObservableObject {
         let plan = ProdAlertPlanner.plan(events, prefs: alertPrefs, snoozed: isSnoozed, locked: Notifier.shared.isScreenLocked,
                                          popBlocked: popBlocked, listURL: DatadogConfig.monitorsListURL(site: site, query: query))
         if !plan.held.isEmpty { noteBuildLog("prod: held back (\(plan.held.joined(separator: ", ")))") }
-        if let notice = plan.notice { Notifier.shared.postProd(notice) }
+        if let notice = plan.notice {
+            Notifier.shared.postProd(notice)
+            if events.contains(where: { alertPrefs.allows($0.kind) && $0.kind.isBad }) { SoundPlayer.shared.play(.prodAlert) }
+        }
         if let banner = plan.headsUp {
             showHeadsUp(banner)
             noteBuildLog("prod: banner (\(banner.keys.joined(separator: ",")))")

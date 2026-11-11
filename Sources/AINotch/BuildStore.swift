@@ -227,7 +227,7 @@ final class BuildStore: ObservableObject {
     }
 
     func open(_ url: URL) {
-        NSWorkspace.shared.open(url)
+        SafeLink.open(url, for: .anyKnown)
     }
 
     /// The newest running run, for the header's live summary.
@@ -309,11 +309,12 @@ final class BuildStore: ObservableObject {
     }
 
     private func notify(_ id: String) {
-        guard Notifier.shared.isScreenLocked || (isPreview && CommandLine.arguments.contains("--notify-unlocked")) else { return }
         let rows = allRows(now: Date().timeIntervalSince1970)
-        // "All" is for looking: only my own runs notify.
+        // "All" is for looking: only my own runs notify (and sound).
         guard let row = rows.first(where: { $0.id == id }), row.isMine, !prefs.muted.contains(row.muteKey) else { return }
         let failed = row.state == .failed
+        SoundPlayer.shared.play(failed ? .buildFailed : .buildPassed)
+        guard Notifier.shared.isScreenLocked || (isPreview && CommandLine.arguments.contains("--notify-unlocked")) else { return }
         posted.insert(id)
         let source = row.source == .eas ? "EAS build" : "Bitbucket pipeline"
         Notifier.shared.postBuild(id: id, title: "\(source) \(failed ? "failed" : "passed")",

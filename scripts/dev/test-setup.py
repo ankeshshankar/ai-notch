@@ -35,9 +35,10 @@ HOOK_NAMES = {"ai-notch-hook", "claude-notch-hook"}
 LABEL = "info.ankeshshiv.notch"
 CLAUDE_EVENTS = {
     "SessionStart": (None, 5), "SessionEnd": (None, 5), "UserPromptSubmit": (None, 5), "Stop": (None, 5),
-    "SubagentStart": (None, 5), "SubagentStop": (None, 5), "PreToolUse": ("*", 5), "PostToolUse": ("*", 5),
+    "SubagentStart": (None, 5), "SubagentStop": (None, 5), "PreToolUse": ("*", 1800), "PostToolUse": ("*", 5),
     "PostToolUseFailure": ("*", 5), "PermissionRequest": ("*", 1800), "PermissionDenied": ("*", 5),
     "Notification": ("permission_prompt|elicitation_dialog|idle_prompt", 5), "PostModelSwitch": (None, 5),
+    "StopFailure": (None, 5), "PreCompact": (None, 5), "PostCompact": (None, 5),
 }
 CURSOR_EVENTS = ["sessionStart", "sessionEnd", "beforeSubmitPrompt", "postToolUse", "postToolUseFailure",
                  "afterMCPExecution", "subagentStop", "stop"]
@@ -197,7 +198,7 @@ def check_claude_connected(path, hook, original):
             ok = ours[0][0].get("matcher") == matcher
         if not ok:
             check(False, f"{event}: one entry, this copy, timeout {timeout} (found {ours})")
-    check(total == 13, f"13 notch hook entries, one per event, none duplicated, all ai-notch-hook (found {total})")
+    check(total == 16, f"16 notch hook entries, one per event, none duplicated, all ai-notch-hook (found {total})")
     check(any(h.get("timeout") == 1800 for g in hooks["PermissionRequest"] for h in g["hooks"] if is_notch(h["command"])),
           "PermissionRequest timeout 1800")
     # Everything that is not ours is unchanged.

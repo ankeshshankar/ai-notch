@@ -36,8 +36,20 @@ final class PriceBook: @unchecked Sendable {
         if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode([String: Rate].self, from: data) {
             rates = saved
         }
-        // With no list at all, wait for one: a Codex request priced at zero would stay at zero.
+        // With no list at all a scan waits for one (`waitForFirstLoad`, off the main thread):
+        // a Codex request priced at zero would stay at zero.
         refreshIfStale(waiting: rates.isEmpty)
+    }
+
+    /// The first download, when there was no saved list: blocks up to 20 seconds. The scanner's
+    /// queue calls it before a scan; `init` runs on the main thread and never waits.
+    private var firstLoad: DispatchSemaphore?
+    func waitForFirstLoad() {
+        lock.lock()
+        let pending = firstLoad
+        lock.unlock()
+        guard let pending else { return }
+        if pending.wait(timeout: .now() + 20) == .success { pending.signal() }
     }
 
     /// The model's rate: its exact name, without a provider prefix, or with an `openai/` one.
@@ -53,6 +65,11 @@ final class PriceBook: @unchecked Sendable {
         let age = (try? FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date).map { -$0.timeIntervalSinceNow } ?? .infinity
         guard age > 86_400 else { return }
         let done = DispatchSemaphore(value: 0)
+        if waiting {
+            lock.lock()
+            firstLoad = done
+            lock.unlock()
+        }
         URLSession.shared.dataTask(with: Self.source) { [weak self] data, _, _ in
             defer { done.signal() }
             guard let self, let data, let table = (try? JSONSerialization.jsonObject(with: data)) as? [String: [String: Any]] else { return }
@@ -75,6 +92,5 @@ final class PriceBook: @unchecked Sendable {
             lock.unlock()
             if let encoded = try? JSONEncoder().encode(parsed) { try? encoded.write(to: file, options: .atomic) }
         }.resume()
-        if waiting { _ = done.wait(timeout: .now() + 20) }
     }
 }

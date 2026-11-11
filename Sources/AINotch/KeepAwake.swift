@@ -5,7 +5,9 @@ import IOKit.ps
 // Keeps the Mac from sleeping on its own while an agent works, so a long turn goes on with the
 // screen locked or the display asleep. One IOKit power assertion (the display may still sleep and
 // the screen may still lock), held while any session works and for a couple of minutes after the
-// last one stops. A closed lid is out of reach: macOS sleeps then, unless a display is attached.
+// last one stops. An assertion cannot hold the Mac awake with the lid closed (macOS sleeps then,
+// unless a display is attached); that is LidAwake.swift, a separate switch that asks the root
+// helper to hold the system's SleepDisabled flag.
 
 /// When the assertion should be held. Pure, so the self-check can run it on made-up inputs.
 enum KeepAwakePlan {
@@ -86,7 +88,7 @@ final class KeepAwake {
     }
 
     /// Whether the Mac runs on its battery, and how full it is.
-    static func readPower() -> KeepAwakePlan.Power {
+    nonisolated static func readPower() -> KeepAwakePlan.Power {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else {
             return KeepAwakePlan.Power(onBattery: false, percent: nil)
@@ -130,6 +132,14 @@ enum KeepAwakeSelfCheck {
         check("on battery, not allowed", !wants(battery: false, working: true, last: 1000, battery))
         check("on battery below 20%", !wants(working: true, last: 1000, low))
         check("below 20% but on power", wants(working: true, last: 1000, KeepAwakePlan.Power(onBattery: false, percent: 10)))
+
+        let lidBefore = failures
+        var lidChecks = 0
+        LidAwakeSelfCheck.run { name, ok in
+            lidChecks += 1
+            check(name, ok)
+        }
+        print("lid-awake: \(lidChecks - (failures - lidBefore))/\(lidChecks) passed")
 
         let awake = KeepAwake()
         let start = Date().timeIntervalSince1970

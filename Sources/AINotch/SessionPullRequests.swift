@@ -204,10 +204,85 @@ enum PRDelivery: Equatable {
 
 // MARK: Folder to branch and remote
 
-/// A session folder's Bitbucket repository ("workspace/repo") and checked-out branch.
+/// A session folder's Bitbucket repository ("workspace/repo"), checked-out branch and where its
+/// working tree stands (one `git status --porcelain=v2 --branch`).
 struct SessionGit: Equatable, Sendable {
     var repo: String?
     var branch: String?
+    /// HEAD's commit, in full; nil in a repository with no commit yet or when git said nothing.
+    var head: String?
+    /// The branch it tracks ("origin/feat/x"); nil when it has none.
+    var upstream: String?
+    /// Commits not pushed to the upstream, and commits it has that this branch lacks.
+    var ahead = 0
+    var behind = 0
+    /// Files with a change not committed: modified, staged, conflicted or untracked.
+    var changed = 0
+    var isDetached = false
+    /// Whether git answered at all: a folder that is no repository has nothing to show.
+    var isRepo = false
+
+    /// The upstream is unknown only for a named branch that tracks nothing.
+    var hasNoUpstream: Bool { isRepo && branch != nil && upstream == nil }
+}
+
+/// What `git status --porcelain=v2 --branch` says.
+enum GitStatusParse {
+    static func parse(_ output: String) -> SessionGit {
+        var git = SessionGit(isRepo: true)
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            if line.hasPrefix("# branch.oid ") {
+                let oid = String(line.dropFirst(13))
+                git.head = oid == "(initial)" ? nil : oid
+            } else if line.hasPrefix("# branch.head ") {
+                let name = String(line.dropFirst(14))
+                if name == "(detached)" { git.isDetached = true } else { git.branch = name }
+            } else if line.hasPrefix("# branch.upstream ") {
+                git.upstream = String(line.dropFirst(18))
+            } else if line.hasPrefix("# branch.ab ") {
+                // "+2 -1"
+                for part in line.dropFirst(12).split(separator: " ") {
+                    guard let count = Int(part.dropFirst()) else { continue }
+                    if part.hasPrefix("+") { git.ahead = count } else if part.hasPrefix("-") { git.behind = count }
+                }
+            } else if let first = line.first, "12u?".contains(first) {
+                git.changed += 1
+            }
+        }
+        return git
+    }
+}
+
+/// The git marks on a session's row: `feat/x  ●3 ↑2`, and the full line for its details.
+enum GitMarks {
+    /// What the branch reads as: its name, or "HEAD abc1234" when detached.
+    static func branchText(_ git: SessionGit) -> String? {
+        guard git.isRepo else { return nil }
+        if let branch = git.branch { return branch }
+        return git.isDetached ? "HEAD " + String((git.head ?? "").prefix(7)) : nil
+    }
+
+    /// The compact marks after the branch: ●n uncommitted files, ↑n unpushed commits, "no upstream".
+    static func marks(_ git: SessionGit) -> [String] {
+        guard git.isRepo else { return [] }
+        var out: [String] = []
+        if git.changed > 0 { out.append("●\(git.changed)") }
+        if git.ahead > 0 { out.append("↑\(git.ahead)") }
+        if git.behind > 0 { out.append("↓\(git.behind)") }
+        if git.hasNoUpstream { out.append("no upstream") }
+        return out
+    }
+
+    /// The details table's line: "feat/x · 3 uncommitted files · 2 unpushed commits · tracks origin/feat/x".
+    static func fullLine(_ git: SessionGit) -> String? {
+        guard let branch = branchText(git) else { return nil }
+        var parts = [branch]
+        parts.append(git.changed == 0 ? "clean" : "\(git.changed) uncommitted file\(git.changed == 1 ? "" : "s")")
+        if git.ahead > 0 { parts.append("\(git.ahead) unpushed commit\(git.ahead == 1 ? "" : "s")") }
+        if git.behind > 0 { parts.append("\(git.behind) behind") }
+        if let upstream = git.upstream { parts.append("tracks \(upstream)") } else if git.hasNoUpstream { parts.append("no upstream") }
+        return parts.joined(separator: " · ")
+    }
 }
 
 enum GitRemote {
@@ -246,9 +321,9 @@ enum GitRemote {
     }
 }
 
-/// Asks git, off the main thread, which branch and Bitbucket repository each folder is on. A
-/// folder is asked again only after 30 seconds, so the 5-second tick is cheap; two short git
-/// commands each, with a 3-second limit.
+/// Asks git, off the main thread, which branch and Bitbucket repository each folder is on and how
+/// its working tree stands. A folder is asked again only after 30 seconds, so the 5-second tick
+/// is cheap; two short git commands each, with a 3-second limit.
 actor SessionGitSource {
     private var cache: [String: (git: SessionGit, at: Double)] = [:]
     static let ttl: Double = 30
@@ -258,9 +333,11 @@ actor SessionGitSource {
         var result: [String: SessionGit] = [:]
         for folder in folders {
             if let hit = cache[folder], now - hit.at < Self.ttl { result[folder] = hit.git; continue }
-            let branch = await Self.git(folder, ["symbolic-ref", "--short", "-q", "HEAD"])?.trimmingCharacters(in: .whitespacesAndNewlines)
+            // One status call gives the branch, its upstream, ahead/behind and the changed files.
+            let status = await Self.git(folder, ["status", "--porcelain=v2", "--branch"])
             let remotes = await Self.git(folder, ["config", "--get-regexp", #"^remote\..*\.url$"#])
-            let git = SessionGit(repo: remotes.flatMap(GitRemote.repo(fromConfig:)), branch: branch?.isEmpty == false ? branch : nil)
+            var git = status.map(GitStatusParse.parse) ?? SessionGit()
+            git.repo = remotes.flatMap(GitRemote.repo(fromConfig:))
             cache[folder] = (git, now)
             result[folder] = git
         }
@@ -311,10 +388,13 @@ final class SessionPRStore: ObservableObject {
     /// Sessions whose brief is being read.
     @Published private(set) var sending: Set<String> = []
 
-    /// Pull requests are on (builds.json); off clears every link.
+    /// Pull requests are on (builds.json); off clears every link. Git is asked either way: the
+    /// row's branch, changes and CI mark need it too.
     var enabled = false {
-        didSet { if enabled != oldValue { enabled ? refreshGit() : clear() } }
+        didSet { if enabled != oldValue { enabled ? relink() : clear() } }
     }
+    /// Each session folder's git state, as last asked (at most every 30 s per folder).
+    @Published private(set) var gits: [String: SessionGit] = [:]
     /// The keys of the pull requests linked to a live session: the source reads their merge
     /// checks first.
     var onWatched: ((Set<String>) -> Void)?
@@ -323,7 +403,6 @@ final class SessionPRStore: ObservableObject {
 
     private let source = SessionGitSource()
     private var sessions: [String: SessionState] = [:]
-    private var gits: [String: SessionGit] = [:]
     private var mine: [PullRequest] = []
     private var refreshedAt: Double = 0
     private var refreshing = false
@@ -333,7 +412,6 @@ final class SessionPRStore: ObservableObject {
         let before = Set(sessions.values.map(\.cwd))
         sessions = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         takeBackUndelivered()
-        guard enabled else { return }
         if !Set(sessions.values.map(\.cwd)).isSubset(of: before) { refreshGit() } else { relink() }
     }
 
@@ -345,12 +423,12 @@ final class SessionPRStore: ObservableObject {
 
     /// Every 5 seconds: git is asked again when the last answer is 30 seconds old.
     func tick() {
-        guard enabled, Date().timeIntervalSince1970 - refreshedAt >= SessionGitSource.ttl else { return }
+        guard Date().timeIntervalSince1970 - refreshedAt >= SessionGitSource.ttl else { return }
         refreshGit()
     }
 
     private func refreshGit() {
-        guard enabled, !refreshing else { return }
+        guard !refreshing else { return }
         let folders = Array(Set(sessions.values.map(\.cwd).filter { !$0.isEmpty })).sorted()
         guard !folders.isEmpty else { return relink() }
         refreshing = true
@@ -364,7 +442,6 @@ final class SessionPRStore: ObservableObject {
     }
 
     private func clear() {
-        gits = [:]
         if !linked.isEmpty { linked = [:] }
         pushWatched([])
     }

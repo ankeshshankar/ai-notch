@@ -162,6 +162,7 @@ enum KeychainBlob {
         var query = match(service, account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        guard KeychainGuard.enter() else { return nil }
         var out: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess else { return nil }
         return out as? Data
@@ -169,6 +170,7 @@ enum KeychainBlob {
 
     @discardableResult
     static func write(_ data: Data, service: String, account: String, label: String) -> OSStatus {
+        guard KeychainGuard.enter() else { return errSecNotAvailable }
         let status = SecItemUpdate(match(service, account) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         guard status == errSecItemNotFound else { return status }
         var add = match(service, account)
@@ -180,7 +182,8 @@ enum KeychainBlob {
 
     @discardableResult
     static func delete(service: String, account: String) -> OSStatus {
-        SecItemDelete(match(service, account) as CFDictionary)
+        guard KeychainGuard.enter() else { return errSecNotAvailable }
+        return SecItemDelete(match(service, account) as CFDictionary)
     }
 }
 
@@ -441,14 +444,6 @@ final class LoopbackCallback: @unchecked Sendable {
     }
 }
 
-/// No redirects for the sign-in's own requests either.
-private final class NoRedirectOAuth: NSObject, URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
-    }
-}
-
 /// The sign-in: registration, the browser round trip, renewing, signing out. One per app; the
 /// Prod source asks it for a bearer token before each request.
 actor DatadogAuth {
@@ -500,7 +495,7 @@ actor DatadogAuth {
         config.httpCookieStorage = nil
         config.timeoutIntervalForRequest = 20
         config.httpAdditionalHeaders = ["User-Agent": "AI-Notch"]
-        return URLSession(configuration: config, delegate: NoRedirectOAuth(), delegateQueue: nil)
+        return URLSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
     }()
 
     private var token: DatadogToken?
@@ -808,7 +803,7 @@ actor DatadogAuth {
             }
             return
         }
-        await MainActor.run { _ = NSWorkspace.shared.open(url) }
+        await MainActor.run { _ = SafeLink.open(url, for: .datadog) }
     }
 
     // MARK: Requests
@@ -889,7 +884,6 @@ actor DatadogAuth {
     }
 
     var isSigningIn: Bool { signInTask != nil }
-    var currentNote: String? { note }
 }
 
 /// The sign-in on the main thread, for Setup and the chip.

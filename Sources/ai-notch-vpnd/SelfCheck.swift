@@ -135,7 +135,125 @@ enum SelfCheck {
                                    dynamic: .init(echo: false, responseRequired: true, stateId: "Om01", username: "cr1", text: "PIN"))
         if crv1 != ["username \"Auth\" \"cr1\"", "password \"Auth\" \"CRV1::Om01::8675309\""] { fail("dynamic challenge answer: \(crv1 ?? [])") }
 
-        print(failures == 0 ? "selfcheck: all \(accepted.count + refused.count + tokenCases.count + events.count + 5) cases pass" : "selfcheck: \(failures) failure(s)")
+        let lease = LeaseSelfCheck.run { fail($0) }
+        let base = accepted.count + refused.count + tokenCases.count + events.count + 5
+        print(failures == 0 ? "selfcheck: all \(base + lease) cases pass (\(base) profile and management, \(lease) sleep lease)" : "selfcheck: \(failures) failure(s)")
         return failures == 0 ? 0 : 1
+    }
+}
+
+/// The sleep-disable lease on a fake pmset and a fake clock: nothing here runs pmset or needs root.
+enum LeaseSelfCheck {
+    /// Returns how many cases ran; `fail` is told of each one that did not hold.
+    static func run(_ fail: (String) -> Void) -> Int {
+        var count = 0
+        func check(_ name: String, _ ok: Bool) {
+            count += 1
+            if !ok { fail("lease: \(name)") }
+        }
+        let dir = NSTemporaryDirectory() + "vpnd-lease-\(getpid())"
+        mkdir(dir, 0o700)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let marker = dir + "/marker"
+        var now = 1000.0
+        let on = ["-a", "disablesleep", "1"], off = ["-a", "disablesleep", "0"]
+        func make(_ pmset: FakePmset) -> SleepLease {
+            unlink(marker)
+            return SleepLease(runner: pmset, clock: { now }, markerPath: marker)
+        }
+        func hasMarker() -> Bool { FileManager.default.fileExists(atPath: marker) }
+
+        // acquire, renew, expire
+        var pmset = FakePmset()
+        var lease = make(pmset)
+        lease.start()
+        check("start with nothing: no pmset call", pmset.calls.isEmpty)
+        check("acquire ok", lease.acquire() == nil)
+        check("acquire: the flag is on, by the one fixed call", pmset.flag && pmset.calls == [on])
+        check("acquire: marker written, lease held for the TTL", hasMarker() && lease.status.state == .held && lease.status.expiresIn == SleepLeaseBuild.ttl)
+        now += 30
+        check("renew ok", lease.acquire() == nil)
+        check("renew keeps it on and makes no second call", pmset.flag && pmset.calls == [on])
+        check("renew extends the lease from now", lease.status.expiresIn == SleepLeaseBuild.ttl)
+        now += 89
+        lease.tick()
+        check("89 s after the renewal: still on", pmset.flag && lease.status.state == .held)
+        now += 2
+        lease.tick()
+        check("91 s after the renewal: expired, flag off", !pmset.flag && pmset.calls == [on, off])
+        check("expiry: marker gone, idle", !hasMarker() && lease.status.state == .idle)
+
+        // release
+        pmset = FakePmset(); lease = make(pmset); lease.start()
+        _ = lease.acquire()
+        lease.release()
+        check("release: flag off, marker gone", !pmset.flag && pmset.calls == [on, off] && !hasMarker())
+        lease.release()
+        check("a second release does nothing", pmset.calls == [on, off])
+
+        // stale marker at start
+        pmset = FakePmset(flag: true); lease = make(pmset)
+        FileManager.default.createFile(atPath: marker, contents: Data("stale".utf8))
+        lease.start()
+        check("start with a stale marker: flag cleared, marker removed", !pmset.flag && pmset.calls == [off] && !hasMarker())
+
+        // flag set by hand
+        pmset = FakePmset(flag: true); lease = make(pmset); lease.start()
+        check("manual flag: acquire ok", lease.acquire() == nil)
+        check("manual flag: reported as managed elsewhere, never set", lease.status.state == .managedElsewhere && pmset.calls.isEmpty && !hasMarker())
+        lease.release(); now += 500; lease.tick(); lease.shutdown()
+        check("manual flag: release, expiry and shutdown leave it on", pmset.flag && pmset.calls.isEmpty)
+
+        // flag cleared by someone else while we hold it
+        pmset = FakePmset(); lease = make(pmset); lease.start()
+        _ = lease.acquire()
+        pmset.flag = false
+        now += 30
+        check("renew after an outside clear sets it again", lease.acquire() == nil && pmset.flag && pmset.calls == [on, on])
+
+        // pmset failing
+        pmset = FakePmset(); pmset.failSet = true; lease = make(pmset); lease.start()
+        check("acquire with pmset failing: refused, no marker left", lease.acquire() != nil && !hasMarker() && lease.status.state == .idle)
+        pmset = FakePmset(); lease = make(pmset); lease.start()
+        _ = lease.acquire()
+        pmset.failSet = true
+        lease.release()
+        check("a clear that fails keeps the marker", hasMarker() && pmset.flag)
+        now += 16
+        pmset.failSet = false
+        lease.tick()
+        check("the failed clear is retried at the next tick", !pmset.flag && !hasMarker())
+        pmset = FakePmset(); lease = make(pmset); lease.start()
+        _ = lease.acquire()
+        lease.shutdown()
+        check("shutdown clears what the helper set", !pmset.flag && !hasMarker())
+        pmset = FakePmset(); lease = make(pmset); lease.start()
+        _ = lease.acquire()
+        FileManager.default.createFile(atPath: marker, contents: Data("x".utf8))
+        SleepLease.cleanup(runner: pmset, markerPath: marker)
+        check("uninstall cleanup clears a marked flag and the marker", !pmset.flag && !hasMarker())
+        pmset = FakePmset(flag: true)
+        SleepLease.cleanup(runner: pmset, markerPath: marker)
+        check("uninstall cleanup leaves a manual flag alone", pmset.flag && pmset.calls.isEmpty)
+
+        // who may ask, and what may be asked
+        check("peer: the installing user", PeerCheck.allowed(peer: 501, installedFor: 501))
+        check("peer: root", PeerCheck.allowed(peer: 0, installedFor: 501))
+        check("peer: another user refused", !PeerCheck.allowed(peer: 502, installedFor: 501))
+        check("peer: unknown uid refused", !PeerCheck.allowed(peer: nil, installedFor: 501))
+        check("unknown request refused", VPNWire.decode(VPNRequest.self, Data(#"{"op":"sleep-disable","value":"1"}"#.utf8)) == nil)
+        check("lease request decodes", VPNWire.decode(VPNRequest.self, Data(#"{"op":"sleep-lease"}"#.utf8))?.op == .sleepLease)
+        check("release request decodes", VPNWire.decode(VPNRequest.self, Data(#"{"op":"sleep-release"}"#.utf8))?.op == .sleepRelease)
+        // Extra fields on a lease request change nothing: the only call is the fixed one.
+        pmset = FakePmset(); lease = make(pmset); lease.start()
+        if let request = VPNWire.decode(VPNRequest.self, Data(#"{"op":"sleep-lease","name":"x; rm -rf /","id":"-a","config":"disablesleep 0"}"#.utf8)), request.op == .sleepLease {
+            _ = lease.acquire()
+        }
+        check("a lease request with extra fields still runs only the fixed call", pmset.calls == [on])
+        check("the commands are the absolute fixed ones", SystemPmset.path == "/usr/bin/pmset" && SystemPmset.arguments(on: true) == on && SystemPmset.arguments(on: false) == off)
+        check("pmset -g parse: on", SystemPmset.parse(" Sleep On Power Button 1\n SleepDisabled\t\t1\n") == true)
+        check("pmset -g parse: off or absent", SystemPmset.parse(" sleep 1\n SleepDisabled\t\t0\n") == false && SystemPmset.parse(" sleep 1\n") == false)
+        check("pmset -g parse: empty is unreadable", SystemPmset.parse("") == nil)
+        return count
     }
 }

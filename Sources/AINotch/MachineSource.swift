@@ -89,7 +89,7 @@ actor MachineSource {
     /// The table with paths and session leaders filled in (own processes), and the arguments of
     /// those that could be dev processes. Arguments stay in memory, keyed by pid and start time.
     private func readTable() -> (table: [ProcEntry], args: [Int32: [String]])? {
-        guard var table = ProcessList.table() else { return nil }
+        guard var table = ProcessList.sharedTable(maxAge: 1.5) else { return nil }
         var args: [Int32: [String]] = [:]
         var live: Set<String> = []
         for index in table.indices where table[index].uid == uid {

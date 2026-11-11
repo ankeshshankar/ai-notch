@@ -32,7 +32,7 @@ struct PipelinesSection: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            Text("Pipelines").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
+            Text("Pipelines").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
             if builds.easOn, let eas = builds.health.eas {
                 DegradedBadge(text: "EAS \(eas)", help: builds.health.easDetail ?? "status.expo.dev reports a problem with EAS Build.")
             }
@@ -50,7 +50,7 @@ struct PipelinesSection: View {
     @ViewBuilder private var rowList: some View {
         let rows = builds.rows
         if rows.isEmpty {
-            Text(emptyText).font(.system(size: 11)).foregroundStyle(Palette.ink3)
+            Text(emptyText).font(Typo.body()).foregroundStyle(Palette.ink3)
         }
         ForEach(rows.prefix(max(1, limit))) { row in
             BuildRowButton(row: row, now: now, isDetailed: detailId == row.id, showsQR: qrId == row.id, copy: builds.copying[row.id],
@@ -59,10 +59,10 @@ struct PipelinesSection: View {
                                builds.open(url)
                            },
                            toggleDetails: {
-                               withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { detailId = detailId == row.id ? nil : row.id }
+                               withAnimation(Motion.slide) { detailId = detailId == row.id ? nil : row.id }
                            },
                            toggleQR: {
-                               withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { qrId = qrId == row.id ? nil : row.id }
+                               withAnimation(Motion.slide) { qrId = qrId == row.id ? nil : row.id }
                            },
                            copyFailure: { builds.copyFailure(row) },
                            togglePin: { builds.togglePin(row.id) },
@@ -70,7 +70,7 @@ struct PipelinesSection: View {
                            onlyBranch: { builds.setBranch(row.branch) })
         }
         if rows.count > max(1, limit) {
-            Text("+\(rows.count - max(1, limit)) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+            Text("+\(rows.count - max(1, limit)) more").font(Typo.body()).foregroundStyle(Palette.ink3)
         }
         notes
     }
@@ -114,14 +114,15 @@ struct PipelinesSection: View {
             } label: {
                 HStack(spacing: 4) {
                     Spinner(size: 8)
-                    Text(text).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1)
+                    Text(text).font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Open \(newest.title) on the web")
+            .ax("Open the newest running pipeline", value: text)
         } else if !text.isEmpty {
-            Text(text).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1)
+            Text(text).font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1)
         }
     }
 
@@ -147,7 +148,7 @@ struct PipelinesSection: View {
 
     private func note(_ source: String, _ text: String, help: String, color: Color = Palette.ink3) -> some View {
         HStack(spacing: 4) {
-            Text("\(source) · \(text)").font(.system(size: 10)).foregroundStyle(color).lineLimit(1)
+            Text("\(source) · \(text)").font(Typo.label()).foregroundStyle(color).lineLimit(1)
             InfoMark(text: help)
         }
     }
@@ -160,8 +161,8 @@ private struct DegradedBadge: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8, weight: .bold))
-            Text(text).font(.system(size: 10, weight: .semibold))
+            Image(systemName: "exclamationmark.triangle.fill").font(Typo.micro(.bold)).decorative()
+            Text(text).font(Typo.label(.semibold))
         }
         .foregroundStyle(Palette.waiting)
         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -188,7 +189,7 @@ private struct ScopeSwitch: View {
 
     private func segment(_ title: String, _ value: PipelinePrefs.Scope) -> some View {
         Button { set(value) } label: {
-            Text(title).font(.system(size: 10, weight: .semibold))
+            Text(title).font(Typo.label(.semibold))
                 .foregroundStyle(scope == value ? Palette.onDone : Palette.ink2)
                 .padding(.horizontal, 7).padding(.vertical, 2)
                 .background(Capsule().fill(scope == value ? Palette.ink.opacity(0.85) : Color.clear))
@@ -196,6 +197,7 @@ private struct ScopeSwitch: View {
         }
         .buttonStyle(.plain)
         .help(value == .mine ? "Your own runs and builds; only these notify." : "Everyone's, for looking.")
+        .ax("Show \(title.lowercased()) pipelines", selected: scope == value)
     }
 }
 
@@ -219,12 +221,13 @@ private struct FilterMenu: View {
             }
         } label: {
             Image(systemName: active ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
-                .font(.system(size: 12)).foregroundStyle(active ? Palette.claude : Palette.ink2)
+                .font(Typo.subtitle()).foregroundStyle(active ? Palette.claude : Palette.ink2)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Filter by branch, mute a repository")
+        .ax("Filter pipelines", value: active ? "filtered" : "all shown")
     }
 
     @ViewBuilder private func check(_ title: String, _ on: Bool) -> some View {
@@ -257,6 +260,7 @@ private struct BuildRowButton: View {
             }
             .buttonStyle(RowButtonStyle())
             .help("Open on \(row.source == .eas ? "expo.dev" : "bitbucket.org")")
+            .accessibilityHint("Opens it on \(row.source == .eas ? "expo.dev" : "bitbucket.org")")
             .contextMenu {
                 Button(row.isPinned ? "Unpin" : "Pin (always show)", action: togglePin)
                 Button("Mute \(row.muteName)", action: mute)
@@ -309,9 +313,9 @@ private struct BuildRowButton: View {
     private func capsule(_ text: String, icon: String, trailingIcon: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 3) {
-                if !trailingIcon { Image(systemName: icon).font(.system(size: 8, weight: .bold)) }
-                Text(text).font(.system(size: 10, weight: .medium))
-                if trailingIcon { Image(systemName: icon).font(.system(size: 8, weight: .bold)) }
+                if !trailingIcon { Image(systemName: icon).font(Typo.micro(.bold)).decorative() }
+                Text(text).font(Typo.label(.medium))
+                if trailingIcon { Image(systemName: icon).font(Typo.micro(.bold)).decorative() }
             }
             .foregroundStyle(Palette.ink2)
             .padding(.horizontal, 8).padding(.vertical, 4)
@@ -331,9 +335,9 @@ private struct LinkBadge: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: "link").font(.system(size: 8, weight: .bold))
-                Text(link.label).font(.system(size: 10, weight: .semibold))
-                if link.inferred { Text("inferred").font(.system(size: 9)).foregroundStyle(Palette.ink3) }
+                Image(systemName: "link").font(Typo.micro(.bold)).decorative()
+                Text(link.label).font(Typo.label(.semibold))
+                if link.inferred { Text("inferred").font(Typo.caption()).foregroundStyle(Palette.ink3) }
             }
             .foregroundStyle(source == .bitbucket ? Palette.bitbucket : Palette.ink)
             .padding(.horizontal, 7).padding(.vertical, 4)
@@ -360,11 +364,11 @@ struct BuildRowView: View {
             SourceMark(source: row.source, platform: row.platform)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(row.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
+                    Text(row.title).font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
                         .lineLimit(1).truncationMode(.tail)
                     if !row.isMine {
-                        Image(systemName: "person.2").font(.system(size: 9)).foregroundStyle(Palette.ink3)
-                            .help("Someone else's")
+                        Image(systemName: "person.2").font(Typo.caption()).foregroundStyle(Palette.ink3)
+                            .help("Someone else's").accessibilityLabel("Someone else's")
                     }
                     Spacer(minLength: 4)
                     StatusChip(kind: chip, now: now).fixedSize()
@@ -373,40 +377,40 @@ struct BuildRowView: View {
                 HStack(spacing: 6) {
                     SourceTag(source: row.source)
                     ForEach(row.chips, id: \.self) { chip in
-                        Text(chip).font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.75))
+                        Text(chip).font(Typo.label(.medium)).foregroundStyle(Palette.ink.opacity(0.75))
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Capsule().fill(Palette.chip))
                             .lineLimit(1).truncationMode(.middle)
                     }
                     if let finished = row.finishedAt {
-                        Text(ago(now - finished)).font(.system(size: 10)).foregroundStyle(Palette.ink3).lineLimit(1).fixedSize()
+                        Text(ago(now - finished)).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1).fixedSize()
                     }
                 }
                 if row.wait == nil, let progress = row.progress, let detail = row.detail {
                     // Where it is, then the commit, on one line.
-                    (Text(progress).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.claude)
-                        + Text("  ·  " + detail).font(.system(size: 11)).foregroundStyle(Palette.ink2))
+                    (Text(progress).font(Typo.body(.medium)).foregroundStyle(Palette.claude)
+                        + Text("  ·  " + detail).font(Typo.body()).foregroundStyle(Palette.ink2))
                         .lineLimit(1).truncationMode(.tail)
                         .help(detail)
                 } else if let detail = row.detail {
-                    Text(detail).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
+                    Text(detail).font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
                 }
                 if let wait = row.wait {
                     Label(wait.detail, systemImage: wait.label.contains("lock") ? "lock" : "hand.tap")
-                        .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.waiting)
+                        .font(Typo.body(.medium)).foregroundStyle(Palette.waiting)
                         .lineLimit(1).truncationMode(.tail)
                 } else if let progress = row.progress, row.detail == nil {
                     // With a commit, it shares the commit's line above.
-                    Text(progress).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.claude)
+                    Text(progress).font(Typo.body(.medium)).foregroundStyle(Palette.claude)
                         .lineLimit(1).truncationMode(.tail)
                 }
                 if let line = row.logLine {
-                    Text(line).font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.ink3)
+                    Text(line).font(Typo.label(mono: true)).foregroundStyle(Palette.ink3)
                         .lineLimit(1).truncationMode(.tail)
                 }
                 if let failure = row.failure {
                     Label(failure, systemImage: "xmark.octagon.fill")
-                        .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.failed)
+                        .font(Typo.body(.medium)).foregroundStyle(Palette.failed)
                         .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 }
                 if showsQR, let url = row.installURL { qr(url) }
@@ -453,10 +457,10 @@ struct BuildRowView: View {
                     .padding(5).background(RoundedRectangle(cornerRadius: 6).fill(Color.white))
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("Scan to install").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.ink)
-                Text("Opens the build's page on expo.dev").font(.system(size: 10)).foregroundStyle(Palette.ink2)
+                Text("Scan to install").font(Typo.body(.semibold)).foregroundStyle(Palette.ink)
+                Text("Opens the build's page on expo.dev").font(Typo.label()).foregroundStyle(Palette.ink2)
                 if let expires = row.expiresAt {
-                    Text("Expires in \(max(0, Int((expires - now) / 86_400)))d").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                    Text("Expires in \(max(0, Int((expires - now) / 86_400)))d").font(Typo.label()).foregroundStyle(Palette.ink3)
                 }
             }
         }
@@ -480,11 +484,11 @@ private struct StepLine: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            icon.frame(width: 12, height: 12)
-            Text(step.name).font(.system(size: 11, weight: .semibold))
+            icon.frame(width: 12, height: 12).accessibilityLabel(stateWord)
+            Text(step.name).font(Typo.body(.semibold))
                 .foregroundStyle(Palette.ink.opacity(step.state.isActive ? 0.92 : 0.65)).lineLimit(1)
             Spacer(minLength: 4)
-            Text(clock).font(.system(size: 10, weight: .medium).monospacedDigit())
+            Text(clock).font(Typo.label(.medium).monospacedDigit())
                 .foregroundStyle(step.state == .running ? Palette.claude : step.state == .failed ? Palette.failed : step.waitsForClick || step.isHalted ? Palette.waiting : Palette.ink3)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
@@ -497,6 +501,20 @@ private struct StepLine: View {
         if step.isHalted { return "locked" }
         guard let started = step.startedAt else { return step.state == .queued ? "waiting" : "" }
         return elapsed((step.completedAt ?? now) - started)
+    }
+
+    private var stateWord: String {
+        if step.notRun { return "not run" }
+        if step.waitsForClick { return "waiting for a click" }
+        if step.isHalted { return "locked" }
+        switch step.state {
+        case .running: return "running"
+        case .queued: return "queued"
+        case .paused: return "paused"
+        case .succeeded: return "succeeded"
+        case .failed: return "failed"
+        case .canceled: return "canceled"
+        }
     }
 
     @ViewBuilder private var icon: some View {
@@ -553,6 +571,7 @@ struct SourceMark: View {
                 .background(Circle().fill(glass.color(Palette.badgeRing)).frame(width: 15, height: 15))
                 .offset(x: 4, y: 4)
                 .help(platform == "ios" ? "iOS" : "Android")
+                .accessibilityLabel(platform == "ios" ? "iOS" : "Android")
             }
         }
         .frame(width: 26, height: 26)
@@ -565,7 +584,7 @@ private struct SourceTag: View {
 
     var body: some View {
         Text(source == .eas ? "EAS Build" : "Bitbucket")
-            .font(.system(size: 10, weight: .semibold)).foregroundStyle(source == .eas ? Palette.ink.opacity(0.8) : Palette.bitbucket)
+            .font(Typo.label(.semibold)).foregroundStyle(source == .eas ? Palette.ink.opacity(0.8) : Palette.bitbucket)
             .padding(.horizontal, 6).padding(.vertical, 1)
             .background(Capsule().fill((source == .eas ? Palette.ink : Palette.bitbucketHue).opacity(source == .eas ? 0.08 : 0.16)))
             .lineLimit(1).fixedSize()

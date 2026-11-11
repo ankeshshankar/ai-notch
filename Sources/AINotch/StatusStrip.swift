@@ -1,4 +1,5 @@
 import AppKit
+import NotchCore
 import SwiftUI
 
 // What the status sources share on screen: the footer's strip of chips (Prod, the machine
@@ -8,6 +9,8 @@ import SwiftUI
 /// The collapsed right wing shows one thing, the first that applies.
 enum WingSlot: Equatable {
     case waiting(Int)
+    /// A Claude Code turn ended on an API error and nothing has been asked since: how many sessions.
+    case sessionFailed(Int)
     /// A VPN connection that was up ended without Disconnect, not seen yet.
     case vpnDropped
     /// The machine guard: memory critical (pressure critical, or under 2 GB for 30 s).
@@ -25,12 +28,12 @@ enum WingSlot: Equatable {
     /// failed build): how many rows have some.
     case pullRequestNews(Int)
     case subagents(Int)
-    case building(Int)
     case none
 
-    static func pick(waiting: Int, vpnDropped: Bool = false, memoryCritical: Bool = false, justDone: Bool, prodAlert: Bool, buildFailure: Bool,
-                     pullRequestNews: Int = 0, deployWorse: Bool = false, watchdog: Bool = false, subagents: Int, building: Int) -> WingSlot {
+    static func pick(waiting: Int, sessionFailures: Int = 0, vpnDropped: Bool = false, memoryCritical: Bool = false, justDone: Bool, prodAlert: Bool, buildFailure: Bool,
+                     pullRequestNews: Int = 0, deployWorse: Bool = false, watchdog: Bool = false, subagents: Int) -> WingSlot {
         if waiting > 0 { return .waiting(waiting) }
+        if sessionFailures > 0 { return .sessionFailed(sessionFailures) }
         if vpnDropped { return .vpnDropped }
         if memoryCritical { return .memoryCritical }
         if justDone { return .done }
@@ -40,7 +43,6 @@ enum WingSlot: Equatable {
         if buildFailure { return .buildFailure }
         if pullRequestNews > 0 { return .pullRequestNews(pullRequestNews) }
         if subagents > 0 { return .subagents(subagents) }
-        if building > 0 { return .building(building) }
         return .none
     }
 }
@@ -67,6 +69,8 @@ struct CornerDot: View {
 struct ProdHeadsUpHost<Content: View>: View {
     @ObservedObject var prod: ProdStore
     @ObservedObject var controller: NotchController
+    /// The strip's width follows what the wings show.
+    @ObservedObject var strip: StripModel
     var content: Content
     @State private var cardHeight: CGFloat = 40
     static var cardWidth: CGFloat { 380 }
@@ -77,7 +81,7 @@ struct ProdHeadsUpHost<Content: View>: View {
         ZStack(alignment: .top) {
             if prod.headsUp != nil, !expanded {
                 NotchShape(radius: 16).fill(Color.black)
-                    .frame(width: max(g.collapsedWidth(showsWings: controller.showsWings), Self.cardWidth + 2 * RootView.bezel),
+                    .frame(width: max(controller.collapsedWidth, Self.cardWidth + 2 * RootView.bezel),
                            height: g.notchHeight + cardHeight + 2 + RootView.bezel)
                     .transition(.opacity)
             }
@@ -91,12 +95,12 @@ struct ProdHeadsUpHost<Content: View>: View {
                     }
                     .onDisappear { controller.headsUpRect = .zero }
                     .padding(.top, g.notchHeight + 2)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                    .transition(Motion.reduce ? .opacity : .opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
                     .id(alert.id)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: prod.headsUp?.id)
+        .animation(Motion.spring(0.28, 0.86), value: prod.headsUp?.id)
     }
 }
 
@@ -108,28 +112,32 @@ private struct ProdHeadsUpCard: View {
     var body: some View {
         HStack(spacing: 8) {
             Capsule().fill(Palette.failed).frame(width: 3, height: 26)
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 12)).foregroundStyle(Palette.failed)
+            Image(systemName: "exclamationmark.triangle.fill").font(Typo.subtitle()).foregroundStyle(Palette.failed).decorative()
             VStack(alignment: .leading, spacing: 1) {
-                Text(alert.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.ink).lineLimit(1)
+                Text(alert.title).font(Typo.subtitle(.semibold)).foregroundStyle(Palette.ink).lineLimit(1)
                 if !alert.subtitle.isEmpty {
-                    Text(alert.subtitle).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
+                    Text(alert.subtitle).font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture { prod.openHeadsUp() }
+            .accessibilityHidden(true)
             Button { prod.openHeadsUp() } label: {
-                Text("Open").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.ink)
+                Text("Open").font(Typo.body(.semibold)).foregroundStyle(Palette.ink)
                     .padding(.horizontal, 9).padding(.vertical, 3)
                     .background(Capsule().fill(Palette.chip))
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)
+            .ax("Open in Datadog", value: alert.title)
             Button { prod.dismissHeadsUp() } label: {
-                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.ink3)
+                Image(systemName: "xmark").font(Typo.caption(.bold)).foregroundStyle(Palette.ink3)
                     .frame(width: 18, height: 18).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .ax("Dismiss the Prod alert")
+            .help("Dismiss")
         }
         .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 6)
         .floatingCard(radius: 11, wash: Palette.failedTint)
@@ -140,23 +148,143 @@ private struct ProdHeadsUpCard: View {
     }
 }
 
-/// The footer's left side: one chip per status source that is set up.
+/// The footer's left side: at most two chips, the ones that most need a look (see ChipPicker), then
+/// a menu with the others: "+n" when some of them need a look, a quiet "…" otherwise. Each
+/// hidden chip's information and click live in its own section, which the menu opens.
 struct StatusStrip: View {
     @ObservedObject var prod: ProdStore
     @ObservedObject var machine: MachineStore
     @ObservedObject var vpn: VPNStore
+    @ObservedObject var reviews: ReviewStore
+    var limits: ToolLimits?
+    var now: Double
     var controller: NotchController
     @ObservedObject private var commands = CommandsStore.shared
 
     var body: some View {
+        let limits = LimitsChip.displayed(limits)
+        let five = current(limits?.fiveHour, now: now), week = current(limits?.weekly, now: now)
+        let choice = ChipPicker.pick(inputs(five: five, week: week))
         HStack(spacing: 8) {
-            if prod.isOn { ProdChip(prod: prod, controller: controller, hover: controller.hover) }
-            if machine.isOn { RamChip(machine: machine, feed: machine.feed, controller: controller) }
-            if vpn.showsChip { VPNChip(vpn: vpn, controller: controller) }
-            if commands.count > 0 || controller.openPanel == NotchController.commandsPanel {
-                CommandsChip(commands: commands, controller: controller)
+            ForEach(choice.shown, id: \.self) { chip in
+                switch chip {
+                case .prod: ProdChip(prod: prod, controller: controller, hover: controller.hover)
+                case .ram: RamChip(machine: machine, feed: machine.feed, controller: controller)
+                case .vpn: VPNChip(vpn: vpn, controller: controller)
+                case .commands: CommandsChip(commands: commands, controller: controller)
+                case .prs: PRsChip(reviews: reviews, controller: controller, hover: controller.hover)
+                case .limit: LimitsChip(limits: limits, now: now, controller: controller)
+                }
+            }
+            if !choice.hidden.isEmpty {
+                MoreChipsMenu(choice: choice, summaries: Dictionary(uniqueKeysWithValues: choice.hidden.map { ($0, summary($0, five: five, week: week)) }),
+                              controller: controller)
             }
         }
+    }
+
+    private func inputs(five: LimitWindow?, week: LimitWindow?) -> [ChipInput] {
+        let prodTone: ChipTone = prod.level == .alert ? .alert : prod.level == .warn ? .warning : .calm
+        let machineTone: ChipTone = machine.level == .critical ? .alert : machine.level == .warning ? .warning : .calm
+        let vpnTone: ChipTone = vpn.level == .problem ? (vpn.helper == .notRunning ? .warning : .alert) : vpn.level == .busy ? .news : .calm
+        return [
+            ChipInput(chip: .prod, present: prod.isOn, tone: prodTone, snoozed: prod.isSnoozed),
+            ChipInput(chip: .vpn, present: vpn.showsChip, tone: vpnTone),
+            ChipInput(chip: .ram, present: machine.isOn, tone: machineTone),
+            ChipInput(chip: .limit, present: five != nil || week != nil, tone: ChipPicker.limitTone(five: five, week: week)),
+            ChipInput(chip: .prs, present: reviews.isOn, tone: reviews.unseenCount > 0 ? .news : .calm),
+            ChipInput(chip: .commands, present: commands.count > 0 || controller.openPanel == NotchController.commandsPanel, tone: .calm),
+        ]
+    }
+
+    /// What a hidden chip would have said, one line, for the menu.
+    private func summary(_ chip: FooterChip, five: LimitWindow?, week: LimitWindow?) -> String {
+        switch chip {
+        case .prod:
+            let word = prod.snapshot.access != .ok ? "not connected" : prod.level == .alert ? "alerting" : prod.level == .warn ? "warning" : prod.level == .ok ? "OK" : "no answer yet"
+            return "Prod · \(word)" + (prod.isSnoozed ? " · snoozed" : "")
+        case .vpn: return "VPN · \(vpn.chipText)"
+        case .ram:
+            guard let memory = machine.memory else { return "RAM · no reading" }
+            return "RAM · \(MachineStore.gigabytes(tenths: memory.availableTenths)) free" + (machine.level == .normal ? "" : machine.level == .critical ? " · critical" : " · low")
+        case .limit:
+            return "Limits · " + [five.map { "5h \(Int($0.usedPercent.rounded()))%" }, week.map { "wk \(Int($0.usedPercent.rounded()))%" }].compactMap { $0 }.joined(separator: " · ")
+        case .prs:
+            let count = reviews.attention.count
+            return "Pull requests · " + (count == 0 ? "none need you" : "\(count) need\(count == 1 ? "s" : "") you") + (reviews.unseenCount > 0 ? " · news" : "")
+        case .commands: return "Commands · \(commands.count) running"
+        }
+    }
+}
+
+/// The menu after the chips: the hidden ones, each opening its section. "+n" counts those that need a look.
+struct MoreChipsMenu: View {
+    var choice: ChipChoice
+    var summaries: [FooterChip: String]
+    var controller: NotchController
+
+    var body: some View {
+        let text = ChipPicker.moreText(choice)
+        let names = choice.hiddenNeedingLook.map { summaries[$0] ?? $0.rawValue }
+        let label = text.map { "\($0) more need a look: " + names.joined(separator: "; ") } ?? "More status: " + choice.hidden.compactMap { summaries[$0] }.joined(separator: "; ")
+        Menu {
+            ForEach(choice.hidden, id: \.self) { chip in
+                Button {
+                    withAnimation(Motion.slide) {
+                        controller.openPanel = controller.openPanel == chip.panel ? nil : chip.panel
+                    }
+                } label: {
+                    Text((controller.openPanel == chip.panel ? "✓ " : "") + (summaries[chip] ?? chip.rawValue))
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "ellipsis").font(Typo.caption(.bold)).decorative()
+                if let text { Text(text).font(Typo.label(.semibold).monospacedDigit()) }
+            }
+            .foregroundStyle(text == nil ? Palette.ink3 : Palette.ink2)
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(Palette.chip))
+            .contentShape(Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(label)
+        .accessibilityLabel(text == nil ? "More status" : "More status, \(text ?? "")")
+        .accessibilityValue(names.isEmpty ? choice.hidden.compactMap { summaries[$0] }.joined(separator: "; ") : names.joined(separator: "; "))
+    }
+}
+
+/// The Prod section: what the chip's hover shows, kept open, with Datadog, Snooze and Setup.
+struct ProdPanel: View {
+    @ObservedObject var prod: ProdStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Prod").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Capsule().fill(Palette.chip))
+                Spacer(minLength: 6)
+                small("Open in Datadog") { prod.open() }
+                small(prod.isSnoozed ? "Unsnooze" : "Snooze 1 h") { prod.isSnoozed ? prod.unsnooze() : prod.snooze() }
+                small("Setup…") { SetupWindowController.shared.show(focus: .prod) }
+            }
+            ProdCard(prod: prod, inPanel: true)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .panelCard()
+    }
+
+    private func small(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(Palette.chip))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -169,7 +297,7 @@ struct RaisedWhileProdCardOpen: ViewModifier {
     @ObservedObject var hover: HoverHub
 
     func body(content: Content) -> some View {
-        content.zIndex(hover.hovered == ProdChip.zone || ProdChip.cardPinned ? 2 : 0)
+        content.zIndex(hover.hovered == ProdChip.zone || ProdChip.cardPinned || hover.hovered == PRsChip.zone || PRsChip.cardPinned ? 2 : 0)
     }
 }
 
@@ -194,9 +322,9 @@ struct ProdChip: View {
             } label: {
                 HStack(spacing: 4) {
                     Circle().fill(Self.color(level)).frame(width: 6, height: 6)
-                    Text("Prod").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink2)
+                    Text("Prod").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
                     if prod.isSnoozed {
-                        Image(systemName: "moon.zzz.fill").font(.system(size: 8)).foregroundStyle(Palette.ink3)
+                        Image(systemName: "moon.zzz.fill").font(Typo.micro()).foregroundStyle(Palette.ink3)
                     }
                 }
                 .padding(.horizontal, 7).padding(.vertical, 2)
@@ -204,6 +332,7 @@ struct ProdChip: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
+            .ax("Prod", value: snapshot.access == .ok ? "\(level)" + (prod.isSnoozed ? ", snoozed" : "") : "not connected")
             .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { hover.zones[Self.zone] = $0 }
             .onDisappear { hover.zones[Self.zone] = nil }
             .contextMenu {
@@ -213,7 +342,7 @@ struct ProdChip: View {
                     Button("Snooze for 1 Hour") { prod.snooze() }
                 }
                 if snapshot.access == .ok, let url = DatadogConfig.monitorsListURL(site: snapshot.site, query: snapshot.monitorQuery) {
-                    Button("Open Monitors") { NSWorkspace.shared.open(url) }
+                    Button("Open Monitors") { SafeLink.open(url, for: .datadog) }
                 }
                 Button("Setup…") { SetupWindowController.shared.show(focus: .prod) }
             }
@@ -222,7 +351,7 @@ struct ProdChip: View {
                 HStack(spacing: 6) {
                     ForEach(snapshot.numbers, id: \.label) { number in
                         Text("\(number.label) \(number.valueText)")
-                            .font(.system(size: 10).monospacedDigit())
+                            .font(Typo.label().monospacedDigit())
                             .foregroundStyle(number.isOver ? Palette.waiting : Palette.ink3)
                     }
                 }
@@ -242,7 +371,7 @@ struct ProdChip: View {
                 .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .animation(Motion.ease(0.12), value: isHovered)
     }
 
     static func color(_ level: ProdStore.Level) -> Color {
@@ -255,9 +384,29 @@ struct ProdChip: View {
     }
 }
 
+/// The hover card's frame, or none in the Prod section.
+private struct CardFrame: ViewModifier {
+    var inPanel: Bool
+
+    func body(content: Content) -> some View {
+        if inPanel {
+            content.frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            content
+                .padding(.horizontal, 10).padding(.vertical, 8)
+                .frame(width: 300, alignment: .leading)
+                .floatingCard(radius: 10)
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.track, lineWidth: 1))
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+        }
+    }
+}
+
 /// What the chip's hover shows: the alerting monitors and incidents, else that all is well.
 private struct ProdCard: View {
     @ObservedObject var prod: ProdStore
+    /// In the Prod section: no floating card around it.
+    var inPanel = false
     private static let maxRows = 6
 
     var body: some View {
@@ -266,14 +415,14 @@ private struct ProdCard: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Circle().fill(ProdChip.color(level)).frame(width: 6, height: 6)
-                Text(headline).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.ink)
+                Text(headline).font(Typo.body(.semibold)).foregroundStyle(Palette.ink)
                 Spacer(minLength: 8)
                 if snapshot.monitorsAt > 0, prod.greyReason == nil {
-                    Text(ago(prod.now - snapshot.monitorsAt)).font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                    Text(ago(prod.now - snapshot.monitorsAt)).font(Typo.label()).foregroundStyle(Palette.ink3)
                 }
             }
             if let reason = detail {
-                Text(reason).font(.system(size: 10)).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
+                Text(reason).font(Typo.label()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
             }
             // Only a live answer lists anything: grey shows why instead.
             let incidents = prod.greyReason == nil ? snapshot.incidents : []
@@ -288,21 +437,17 @@ private struct ProdCard: View {
                      text: monitor.status == "Alert" ? monitor.name : "\(monitor.name) · \(monitor.status)")
             }
             let more = incidents.count + monitors.count - Self.maxRows
-            if more > 0 { Text("+\(more) more").font(.system(size: 10)).foregroundStyle(Palette.ink3) }
+            if more > 0 { Text("+\(more) more").font(Typo.label()).foregroundStyle(Palette.ink3) }
             if snapshot.access == .ok, prod.greyReason == nil { DeployCardSections(prod: prod) }
             ForEach(notes, id: \.self) { note in
-                Text(note).font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text(note).font(Typo.label()).foregroundStyle(Palette.ink3)
             }
             if prod.isSnoozed {
                 Text("Snoozed until \(Self.clock.string(from: Date(timeIntervalSince1970: prod.snoozedUntil)))")
-                    .font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                    .font(Typo.label()).foregroundStyle(Palette.ink3)
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 8)
-        .frame(width: 300, alignment: .leading)
-        .floatingCard(radius: 10)
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.track, lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+        .modifier(CardFrame(inPanel: inPanel))
     }
 
     private static let clock: DateFormatter = {
@@ -354,8 +499,8 @@ private struct ProdCard: View {
 
     private func line(icon: String, color: Color, text: String) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: icon).font(.system(size: 9)).foregroundStyle(color).frame(width: 12)
-            Text(text).font(.system(size: 11)).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.tail)
+            Image(systemName: icon).font(Typo.caption()).foregroundStyle(color).frame(width: 12).decorative()
+            Text(text).font(Typo.body()).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.tail)
         }
     }
 }

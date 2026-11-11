@@ -76,6 +76,44 @@ enum Palette {
     static let grid = adaptive(light: rgb(0.16, 0.62, 0.36), dark: rgb(0.30, 0.76, 0.54))
 }
 
+/// The type scale: eight steps, the only place a point size is written. Each is a function so a
+/// weight, a monospaced design or monospaced digits (for numbers that line up) ride along:
+/// `Typo.label(.semibold)`, `Typo.label(mono: true)`, `Typo.figure(.bold, digits: true)`.
+/// Pixel-drawn things (the pet, layer geometry) keep their own sizes.
+enum Typo {
+    enum Step: CGFloat, CaseIterable {
+        /// Tiny glyphs: chevrons, tag corners.
+        case micro = 8
+        /// Counters, small tags, icons in chips.
+        case caption = 9
+        /// Secondary text, chips, metadata, footer.
+        case label = 10
+        /// Row text and most body copy.
+        case body = 11
+        /// Emphasised rows, the empty-state lines.
+        case subtitle = 12
+        /// Section headers, row titles.
+        case title = 13
+        /// Figures in the panels.
+        case figure = 16
+        /// Hero figures.
+        case figureLarge = 22
+    }
+
+    static func font(_ step: Step, _ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font {
+        let font = Font.system(size: step.rawValue, weight: weight, design: mono ? .monospaced : .default)
+        return digits ? font.monospacedDigit() : font
+    }
+    static func micro(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.micro, weight, mono: mono, digits: digits) }
+    static func caption(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.caption, weight, mono: mono, digits: digits) }
+    static func label(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.label, weight, mono: mono, digits: digits) }
+    static func body(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.body, weight, mono: mono, digits: digits) }
+    static func subtitle(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.subtitle, weight, mono: mono, digits: digits) }
+    static func title(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.title, weight, mono: mono, digits: digits) }
+    static func figure(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.figure, weight, mono: mono, digits: digits) }
+    static func figureLarge(_ weight: Font.Weight = .regular, mono: Bool = false, digits: Bool = false) -> Font { font(.figureLarge, weight, mono: mono, digits: digits) }
+}
+
 /// The top row sits on the black hardware notch in every theme, so it keeps light-on-black.
 enum Strip {
     static let ink = Color.white
@@ -111,14 +149,20 @@ struct NotchShape: Shape {
 }
 
 struct RootView: View {
-    @ObservedObject var store: SessionStore
-    @ObservedObject var builds: BuildStore
-    @ObservedObject var prod: ProdStore
-    @ObservedObject var machine: MachineStore
-    @ObservedObject var vpn: VPNStore
-    @ObservedObject var reviews: ReviewStore
+    // The stores are held, not observed: the collapsed strip redraws from `strip` (derived,
+    // equatable values that change rarely), not on the session store's one-second clock. The
+    // open list observes the stores it shows itself.
+    let store: SessionStore
+    let builds: BuildStore
+    let prod: ProdStore
+    let machine: MachineStore
+    let vpn: VPNStore
+    let reviews: ReviewStore
+    @ObservedObject var strip: StripModel
     @ObservedObject var controller: NotchController
     @ObservedObject var effects = EffectsPrefs.shared
+    @ObservedObject var motion = MotionPrefs.shared
+    @ObservedObject var lid = LidAwake.shared
     /// Glass on, open, and Reduce Transparency off: the rows and panels become see-through fills.
     @Environment(\.notchGlass) private var glass
     /// The black edge left around the body's card.
@@ -126,24 +170,35 @@ struct RootView: View {
 
     var body: some View {
         let g = controller.geometry
-        let wings = controller.showsWings
+        let state = strip.state
+        let wings = state.hasReasons || !g.hasNotch
+        let wingWidth = WingMetrics.wing(state, petOn: effects.petOn)
+        let collapsedWidth = g.collapsedWidth(wing: wings ? wingWidth : nil)
         let expanded = controller.isExpanded
         // Two columns when the agents and the right side (pipeline runs, or pull requests that
         // need something) both have rows to show and the screen has room; else one, so neither
         // side stands empty.
-        let wide = g.canGoWide && !store.sessions.isEmpty && ((builds.showsSection && !builds.rows.isEmpty) || reviews.showsBlock)
+        let wide = WideRule.isWide(canGoWide: g.canGoWide, openPanel: controller.openPanel, hasRightRows: state.hasRightRows)
         let width = wide ? g.wideWidth : g.expandedWidth
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                if wings { LeftWing(store: store, builds: builds).frame(width: g.wing) }
+                if wings {
+                    LeftWing(input: LeftWingInput(dots: state.dots, builds: state.builds, pose: state.pose, petOn: effects.petOn, reduceMotion: motion.reduce,
+                                                        animated: StripMotion.animated(calm: effects.calmUntilNeeded, reduceMotion: motion.reduce),
+                                                        lidAwake: lid.isActive))
+                        .equatable().frame(width: wingWidth)
+                }
                 Color.clear.frame(width: g.notchWidth)
-                if wings { RightWing(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews).frame(width: g.wing) }
+                if wings {
+                    RightWing(input: RightWingInput(slot: state.slot, prod: state.prod, weekly: state.weekly, width: wingWidth, reduceMotion: motion.reduce))
+                        .equatable().frame(width: wingWidth)
+                }
             }
             .frame(height: g.notchHeight)
             // Something in prod is open (red), else memory is low (amber): a still dot in the
             // strip's corner (on a wing, beside the hardware notch, where it shows).
             .overlay(alignment: .topTrailing) {
-                CornerDot(color: !wings ? nil : prod.hasOpenAlert ? Strip.failed : machine.showsDot ? Strip.waiting : nil)
+                CornerDot(color: !wings ? nil : state.corner == .prod ? Strip.failed : state.corner == .memory ? Strip.waiting : nil)
             }
 
             if expanded {
@@ -151,7 +206,7 @@ struct RootView: View {
                 // inside a thin black bezel, on dark it is the black itself. With Glass on it has
                 // no fill of its own and sits straight on the glass.
                 SessionList(store: store, approvals: store.approvals, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews, prLinks: reviews.sessionLinks, controller: controller,
-                            isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, maxHeight: g.maxHeight - Self.bezel)
+                            isPinned: controller.isPinned, openPanel: controller.openPanel, isWide: wide, hasRightRows: state.hasRightRows, maxHeight: g.maxHeight - Self.bezel)
                     .background(
                         UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 22 - Self.bezel,
                                                bottomTrailingRadius: 22 - Self.bezel, topTrailingRadius: 12, style: .continuous)
@@ -167,21 +222,22 @@ struct RootView: View {
                     ))
             }
         }
-        .frame(width: expanded ? width : g.collapsedWidth(showsWings: wings))
+        .frame(width: expanded ? width : collapsedWidth)
         // Black in every theme: it is the hardware notch, grown. Open with Glass on, the body is glass.
         .background(NotchFill(glass: expanded && glass.isOn, stripHeight: g.notchHeight, radius: 22))
-        .overlay(WaitingGlow(isOn: !store.waiting.isEmpty && !expanded, radius: 11))
+        .overlay(AttentionGlow(kind: expanded ? nil : EffectGate.glow(attention: state.attention, calm: effects.calmUntilNeeded, style: effects.style),
+                               animated: !motion.reduce, radius: 11))
         .clipShape(NotchShape(radius: expanded ? 22 : 11))
         // The light effects around the closed notch, outside its clip (the notch itself is the
         // camera's cut-out). A session waiting on you has the amber glow to itself.
         .overlay(alignment: .top) {
             if !expanded {
-                let busy = !store.working.isEmpty || store.runningAgents > 0 || builds.hasActive
                 NotchEffects(pointer: controller.pointer,
-                             size: CGSize(width: g.collapsedWidth(showsWings: wings), height: g.notchHeight),
-                             playing: store.waiting.isEmpty && (busy || !effects.onlyWhileWorking),
-                             accent: NotchEffects.accent(for: store.working.first?.kind),
-                             doneAt: store.lastDoneAt)
+                             size: CGSize(width: collapsedWidth, height: g.notchHeight),
+                             mode: EffectGate.mode(style: effects.style, calm: effects.calmUntilNeeded, reduceMotion: motion.reduce, attention: state.attention,
+                                                   busy: state.busy, onlyWhileWorking: effects.onlyWhileWorking),
+                             accent: NotchEffects.accent(for: state.accent),
+                             doneAt: state.lastDoneAt)
             }
         }
         .onGeometryChange(for: CGSize.self, of: { $0.size }) { size in
@@ -189,9 +245,11 @@ struct RootView: View {
         }
         // The window is a fixed box; the shape hangs from its top centre.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(.spring(response: 0.24, dampingFraction: 0.82), value: expanded)
-        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: wings)
-        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: wide)
+        .animation(Motion.spring(0.24, 0.82), value: expanded)
+        .animation(Motion.spring(0.26, 0.86), value: wings)
+        // The wings widening for words, once (not under Reduce Motion).
+        .animation(motion.reduce ? nil : .spring(response: 0.26, dampingFraction: 0.86), value: wingWidth)
+        .animation(Motion.spring(0.26, 0.86), value: wide)
     }
 
 }
@@ -212,14 +270,16 @@ private struct CappedHeight: Layout {
     }
 }
 
-/// A pulsing amber outline while a session waits on you.
-private struct WaitingGlow: View {
-    var isOn: Bool
+/// A pulsing outline while something needs you: amber for a session that waits, red for a
+/// failure or alert when the edge style is off. Still, at full strength, under Reduce Motion.
+private struct AttentionGlow: View {
+    var kind: GlowKind?
+    var animated: Bool
     var radius: CGFloat
 
     var body: some View {
-        if isOn {
-            LoopLayer(kind: .glow(radius: radius, lineWidth: 0.75), color: Strip.waitingNS)
+        if let kind {
+            LoopLayer(kind: .glow(radius: radius, lineWidth: 0.75), color: kind == .amber ? Strip.waitingNS : NSColor(srgbRed: 1.0, green: 0.36, blue: 0.32, alpha: 1), animated: animated)
                 .allowsHitTesting(false)
         }
     }
@@ -233,83 +293,7 @@ struct Spinner: View {
     var body: some View {
         LoopLayer(kind: .spinner(lineWidth: 2), color: color)
             .frame(width: size, height: size)
-    }
-}
-
-private struct LeftWing: View {
-    @ObservedObject var store: SessionStore
-    @ObservedObject var builds: BuildStore
-
-    var body: some View {
-        HStack(spacing: 4) {
-            // Working sessions and active builds or runs.
-            let busy = store.working.count + builds.activeCount
-            if busy > 0 || store.runningAgents > 0 {
-                Spinner(color: Strip.claudeNS)
-                if busy > 1 { Text("\(busy)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink) }
-            } else {
-                Image(systemName: "sparkle").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.ink3)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private struct RightWing: View {
-    @ObservedObject var store: SessionStore
-    @ObservedObject var builds: BuildStore
-    @ObservedObject var prod: ProdStore
-    @ObservedObject var machine: MachineStore
-    @ObservedObject var vpn: VPNStore
-    @ObservedObject var reviews: ReviewStore
-
-    var body: some View {
-        // One slot, in WingSlot's order.
-        let slot = WingSlot.pick(waiting: store.waiting.count, vpnDropped: vpn.showsSlot, memoryCritical: machine.showsSlot, justDone: store.now - store.lastDoneAt < 4,
-                                 prodAlert: prod.hasUnseenAlert, buildFailure: builds.hasUnseenFailure,
-                                 pullRequestNews: reviews.unseenCount, deployWorse: prod.hasDeployNews, watchdog: prod.hasWatchdogNews, subagents: store.runningAgents, building: builds.activeCount)
-        HStack(spacing: 4) {
-            switch slot {
-            case .waiting(let count):
-                LoopLayer(kind: .dot, color: Strip.waitingNS)
-                    .frame(width: 7, height: 7)
-                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.waiting)
-            case .done:
-                Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.done)
-            case .prodAlert:
-                // A monitor went to Alert, or an incident was declared, since the notch was last looked at.
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
-            case .deployWorse:
-                // A linked service's new version has more errors or is slower than the one before.
-                Image(systemName: "chart.line.uptrend.xyaxis").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
-            case .watchdog:
-                // Datadog's Watchdog found something since the notch was last looked at.
-                Image(systemName: "eye.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.waiting)
-            case .buildFailure:
-                // A build or run failed since the notch was last opened.
-                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Strip.failed)
-            case .subagents(let count):
-                Image(systemName: "person.2.fill").font(.system(size: 9)).foregroundStyle(Strip.ink2)
-                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
-            case .building(let count):
-                Image(systemName: "hammer.fill").font(.system(size: 9)).foregroundStyle(Strip.ink2)
-                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink2)
-            case .vpnDropped:
-                // A VPN connection ended without Disconnect: traffic no longer goes through it.
-                Image(systemName: "lock.slash.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.failed)
-            case .memoryCritical:
-                // Memory critical: static, no animation.
-                Image(systemName: "memorychip.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Strip.waiting)
-            case .pullRequestNews(let count):
-                // News on pull requests (a review request, an approval, changes, comments, a failed
-                // build) since the notch was last looked at.
-                Image(systemName: "arrow.triangle.pull").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.bitbucketHue)
-                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Strip.ink)
-            case .none:
-                EmptyView()
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityLabel("Working")
     }
 }
 
@@ -332,6 +316,11 @@ private struct SessionList: View {
     var openPanel: String?
     /// Two columns, agents left and pipelines right, or one with the pipelines under the agents.
     var isWide: Bool
+    /// Pipeline runs or pull requests that need you: the right column has rows.
+    var hasRightRows: Bool
+    /// Agents and the right column side by side: wide with a right side, and no column panel open
+    /// (PRs and Board are columns themselves, with the rows under them in one).
+    private var columns: Bool { isWide && hasRightRows && !WideRule.isColumnPanel(openPanel) }
     /// The tallest the body may be; past it the rows scroll.
     var maxHeight: CGFloat
     /// Each approval card's height, which its row keeps free so the card sits inside it.
@@ -351,7 +340,7 @@ private struct SessionList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Self.spacing) {
             Group {
-                if isWide {
+                if columns {
                     HStack(alignment: .center, spacing: NotchGeometry.gutter) {
                         agentsHeader.frame(maxWidth: .infinity)
                         rightHeader.frame(maxWidth: .infinity)
@@ -367,7 +356,7 @@ private struct SessionList: View {
             // The rows, at their natural height up to what the cap leaves, then scrolling: in two
             // columns each on its own, under an open Usage or Code panel all together.
             let cap = max(120, maxHeight - Self.padTop - Self.padBottom - 2 * Self.spacing - headerHeight - footerHeight)
-            if isWide && openPanel == nil {
+            if columns && openPanel == nil {
                 HStack(alignment: .top, spacing: NotchGeometry.gutter) {
                     scrolling(cap) { agentsColumn }
                     scrolling(cap) { pipelinesColumn }
@@ -389,13 +378,14 @@ private struct SessionList: View {
                         if openPanel == NotchController.machinePanel, machine.isOn { MachinePanel(machine: machine, feed: machine.feed) }
                         if openPanel == NotchController.vpnPanel, vpn.isOn { VPNPanel(vpn: vpn, now: store.now) }
                         if openPanel == NotchController.commandsPanel { CommandsPanel(commands: CommandsStore.shared, now: store.now) }
+                        if openPanel == NotchController.prodPanel, prod.isOn { ProdPanel(prod: prod) }
                         if openPanel == NotchController.boardPanel {
-                            BoardPanel(board: board, links: prLinks, title: { store.title(of: $0) }, controller: controller, now: store.now, isWide: isWide)
+                            BoardPanel(board: board, links: prLinks, reviews: reviews, title: { store.title(of: $0) }, controller: controller, now: store.now, isWide: isWide)
                         }
                         if openPanel == NotchController.pullRequestsPanel, reviews.isOn {
                             PullRequestsPanel(reviews: reviews, controller: controller, now: store.now, isWide: isWide)
                         }
-                        if isWide {
+                        if columns {
                             HStack(alignment: .top, spacing: NotchGeometry.gutter) {
                                 agentsColumn
                                 pipelinesColumn
@@ -407,11 +397,6 @@ private struct SessionList: View {
                             if builds.showsSection {
                                 PipelinesSection(builds: builds, now: store.now, limit: pipelineRows, controller: controller, part: .all)
                             }
-                            // Pull requests in one line; it opens the PRs panel.
-                            if reviews.isOn, !reviews.mine.isEmpty || !reviews.toReview.isEmpty {
-                                PullRequestsSummaryLine(reviews: reviews, controller: controller, isOpen: openPanel == NotchController.pullRequestsPanel)
-                                    .padding(.top, builds.showsSection ? 0 : 4)
-                            }
                         }
                     }
                 }
@@ -419,15 +404,14 @@ private struct SessionList: View {
 
             HStack(spacing: 12) {
                 // The status chips on the left (Prod, RAM, VPN), Setup and Quit on the right.
-                StatusStrip(prod: prod, machine: machine, vpn: vpn, controller: controller)
+                StatusStrip(prod: prod, machine: machine, vpn: vpn, reviews: reviews, limits: store.claudeLimits, now: store.now, controller: controller)
                 Spacer()
                 Button("Setup") {
                     controller.collapse()
                     SetupWindowController.shared.show()
                 }
-                .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Palette.ink3)
-                Button("Quit") { NSApp.terminate(nil) }
-                    .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                .buttonStyle(.plain).font(Typo.label()).foregroundStyle(Palette.ink3)
+                QuitButton(busy: quitBusy)
             }
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { if footerHeight != $0 { footerHeight = $0 } }
             // Above the header only while the Prod card is open, so it covers the header whole.
@@ -452,31 +436,32 @@ private struct SessionList: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    /// Two columns: the pipelines on the right, six rows of their own, then the pull requests
-    /// that need something.
+    /// Two columns: the right side, six rows: the pipelines, then the pull requests that need you
+    /// (the PRs panel's own rows, a short slice of them).
     private var pipelinesColumn: some View {
         VStack(alignment: .leading, spacing: Self.spacing) {
             if builds.showsSection {
                 PipelinesSection(builds: builds, now: store.now, limit: maxRows, controller: controller, part: .rows)
             }
-            // With the PRs panel or the Board open above, its rows are there already.
-            if reviews.showsBlock, openPanel != NotchController.pullRequestsPanel, openPanel != NotchController.boardPanel {
-                PullRequestsBlock(reviews: reviews, controller: controller, limit: 4, header: builds.showsSection)
+            if reviews.isOn, !reviews.attention.isEmpty {
+                PullRequestsNeedYou(reviews: reviews, controller: controller, now: store.now,
+                                    limit: builds.showsSection ? 2 : maxRows, header: builds.showsSection)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    /// Two columns: the right one's header. Pipelines' (with the PRs chip when pull requests are
-    /// on), else the pull requests' own.
+    /// Two columns: the right one's header, Pipelines', or Pull requests' when only those are there.
     @ViewBuilder private var rightHeader: some View {
         if builds.showsSection {
+            PipelinesSection(builds: builds, now: store.now, limit: maxRows, controller: controller, part: .header)
+        } else if reviews.isOn, !reviews.attention.isEmpty {
             HStack(spacing: 6) {
-                PipelinesSection(builds: builds, now: store.now, limit: maxRows, controller: controller, part: .header)
-                if reviews.isOn { PRsChip(reviews: reviews, controller: controller, hover: controller.hover) }
+                Text("Pull requests").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+                Spacer(minLength: 4)
+                Text("\(reviews.attention.count) need\(reviews.attention.count == 1 ? "s" : "") you")
+                    .font(Typo.label(.medium)).foregroundStyle(Palette.waiting).lineLimit(1)
             }
-        } else {
-            PullRequestsHeader(reviews: reviews, controller: controller)
         }
     }
 
@@ -489,10 +474,9 @@ private struct SessionList: View {
 
     private var agentsHeader: some View {
         HStack(spacing: 8) {
-            Text("Agents").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink).fixedSize()
+            Text("Agents").font(Typo.title(.semibold)).foregroundStyle(Palette.ink).fixedSize()
             Spacer(minLength: 0)
-            Text(summary).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1).minimumScaleFactor(0.8).layoutPriority(1)
-            LimitsChip(limits: store.claudeLimits, now: store.now)
+            Text(summary).font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1).minimumScaleFactor(0.8).layoutPriority(1)
             panelButton(NotchController.boardPanel, icon: "square.grid.2x2.fill")
             panelButton("Usage", icon: "chart.bar.fill")
             panelButton("Code", icon: "chevron.left.forwardslash.chevron.right")
@@ -505,6 +489,12 @@ private struct SessionList: View {
         guard prod.isOn, let at = session.shippedAt, DeployWindow.isOpen(pushedAt: at, now: store.now) else { return nil }
         return ProdWatch(level: prod.level, since: at, what: session.shipped ?? "push",
                          alerting: prod.alertingMonitors.first?.name)
+    }
+
+    /// The latest CI run on the session's branch, from what Pipelines and EAS already fetched.
+    private func ciMark(for session: SessionState) -> CIMark? {
+        guard let git = prLinks.gits[session.cwd] else { return nil }
+        return SessionCI.match(git, runs: builds.bitbucket.runs, builds: builds.eas.builds)
     }
 
     /// Each session's waiting prompt, one card per session, for when a panel is open.
@@ -525,7 +515,7 @@ private struct SessionList: View {
     @ViewBuilder private func sessionRows(limit: Int) -> some View {
         if store.sessions.isEmpty {
             Text("No open sessions")
-                .font(.system(size: 12)).foregroundStyle(Palette.ink2)
+                .font(Typo.subtitle()).foregroundStyle(Palette.ink2)
                 .padding(.vertical, 6)
         }
         let rows = Array(store.sessions.prefix(limit))
@@ -546,6 +536,7 @@ private struct SessionList: View {
                                usage: store.usage.sessions[session.id], agentUsage: store.usage.agentShare[session.id], isDetailed: isOpen,
                                reserved: space, live: store.usage.live[session.id], compact: looks.compactRows,
                                prodWatch: prodWatch(session), hasPRLine: prLinks.linked[session.id] != nil,
+                               git: prLinks.gits[session.cwd], ci: ciMark(for: session),
                                paused: controls.isPaused(session), stopping: controls.isStopping(session))
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
@@ -565,11 +556,11 @@ private struct SessionList: View {
                         RowControls(controls: controls, session: session, title: title)
                     }
                     Button {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { detailId = isOpen ? nil : session.id }
+                        withAnimation(Motion.slide) { detailId = isOpen ? nil : session.id }
                     } label: {
                         HStack(spacing: 3) {
-                            Text(isOpen ? "Less" : "Details").font(.system(size: 10, weight: .medium))
-                            Image(systemName: isOpen ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
+                            Text(isOpen ? "Less" : "Details").font(Typo.label(.medium))
+                            Image(systemName: isOpen ? "chevron.up" : "chevron.down").font(Typo.micro(.bold)).decorative()
                         }
                         .foregroundStyle(Palette.ink2)
                         .padding(.horizontal, 8).padding(.vertical, 4)
@@ -577,35 +568,36 @@ private struct SessionList: View {
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .ax(isOpen ? "Hide details" : "Show details", value: title)
                     }
                 }
                 .padding(8)
 
                 // The session's pull request, along the bottom left, beside the Details corner.
                 if let pr = prLinks.linked[session.id] {
-                    SessionPRLine(links: prLinks, session: session, pr: pr)
+                    SessionPRLine(controller: controller, links: prLinks, session: session, pr: pr)
                         .frame(maxWidth: .infinity, alignment: .bottomLeading)
                         .padding(.leading, 10).padding(.trailing, 84).padding(.bottom, 10)
                 }
             }
             // A new session slides in from the top; one that ends fades out.
-            .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
+            .transition(.asymmetric(insertion: Motion.rowIn, removal: .opacity))
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: rows.map(\.id))
+        .animation(Motion.spring(0.35, 0.85), value: rows.map(\.id))
         if store.sessions.count > limit {
-            Text("+\(store.sessions.count - limit) more").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+            Text("+\(store.sessions.count - limit) more").font(Typo.body()).foregroundStyle(Palette.ink3)
         }
     }
 
     private func panelButton(_ name: String, icon: String) -> some View {
         let isOpen = openPanel == name
         return Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { controller.openPanel = isOpen ? nil : name }
+            withAnimation(Motion.slide) { controller.openPanel = isOpen ? nil : name }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 9, weight: .semibold))
+                Image(systemName: icon).font(Typo.caption(.semibold)).decorative()
                 // Only the open panel's button keeps its name: the header has to leave room for the summary.
-                if isOpen { Text(name).font(.system(size: 10, weight: .semibold)).lineLimit(1) }
+                if isOpen { Text(name).font(Typo.label(.semibold)).lineLimit(1) }
             }
             .fixedSize()
             .foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
@@ -615,7 +607,7 @@ private struct SessionList: View {
         }
         .buttonStyle(.plain)
         .help(name)
-        .accessibilityLabel(name)
+        .ax(name, value: isOpen ? "open" : "closed", selected: isOpen)
     }
 
     /// Keeps the notch open: the header's pin, filled while pinned.
@@ -624,7 +616,7 @@ private struct SessionList: View {
             controller.togglePin()
         } label: {
             Image(systemName: isPinned ? "pin.fill" : "pin")
-                .font(.system(size: 9, weight: .semibold))
+                .font(Typo.caption(.semibold))
                 .rotationEffect(.degrees(45))
                 .foregroundStyle(isPinned ? Palette.onDone : Palette.ink2)
                 .frame(width: 12, height: 12)
@@ -636,7 +628,18 @@ private struct SessionList: View {
         .help(isPinned
               ? "Pinned open: it stays open when the pointer leaves or you click a row. Click to unpin. Over a full-screen app it opens only on hover."
               : "Pin open: keep the notch open when the pointer leaves or you click a row. Clicks outside it still reach the app below.")
-        .accessibilityLabel(isPinned ? "Unpin" : "Pin open")
+        .ax(isPinned ? "Unpin" : "Pin open", value: isPinned ? "pinned" : "not pinned")
+    }
+
+    /// What quitting would cut off, in words; nil when nothing is running.
+    private var quitBusy: String? {
+        var parts: [String] = []
+        if !store.working.isEmpty { parts.append("\(store.working.count) working") }
+        if !store.waiting.isEmpty { parts.append("\(store.waiting.count) waiting") }
+        if store.runningAgents > 0 { parts.append(store.runningAgents == 1 ? "1 agent" : "\(store.runningAgents) agents") }
+        if builds.activeCount > 0 { parts.append("\(builds.activeCount) running") }
+        if !approvals.pending.isEmpty && store.waiting.isEmpty { parts.append("\(approvals.pending.count) asking") }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
     private var summary: String {
@@ -647,6 +650,28 @@ private struct SessionList: View {
         // Beside the limits chip, two parts fit; the agents show in the rows anyway.
         let hasChip = current(store.claudeLimits?.fiveHour, now: store.now) != nil || current(store.claudeLimits?.weekly, now: store.now) != nil
         return parts.isEmpty ? "\(store.sessions.count) idle" : parts.prefix(hasChip ? 2 : 3).joined(separator: " · ")
+    }
+}
+
+/// The footer's Quit: straight away when nothing is running; with sessions or builds going, the
+/// first click asks (the label says what is running) and a second within five seconds quits.
+private struct QuitButton: View {
+    var busy: String?
+    @State private var confirming = false
+
+    var body: some View {
+        Button(confirming ? "Quit anyway?" : "Quit") {
+            if busy == nil || confirming {
+                NSApp.terminate(nil)
+            } else {
+                confirming = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { confirming = false }
+            }
+        }
+        .buttonStyle(.plain).font(Typo.label()).foregroundStyle(confirming ? Palette.failed : Palette.ink3)
+        .help(confirming ? "Click again to quit. Running now: \(busy ?? "nothing")." : busy.map { "Quit AI Notch. Running now: \($0); you will be asked first." } ?? "Quit AI Notch")
+        .accessibilityLabel(confirming ? "Quit anyway" : "Quit AI Notch")
+        .onChange(of: busy) { _, now in if now == nil { confirming = false } }
     }
 }
 
@@ -672,41 +697,42 @@ private struct UsagePanel: View {
         VStack(alignment: .leading, spacing: 8) {
             LimitsBlock(claude: claudeLimits, codex: usage.codexLimits, now: now)
             HStack(spacing: 6) {
-                Text("All AI tools").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.done)
+                Text("All AI tools").font(Typo.label(.semibold)).foregroundStyle(Palette.done)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Capsule().fill(Palette.doneHue.opacity(0.16)))
-                Text("≈ API price").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("≈ API price").font(Typo.label()).foregroundStyle(Palette.ink3)
                 InfoMark(text: usageNote)
                 Spacer()
                 ForEach(Self.ranges.indices, id: \.self) { index in
                     Button { range = index } label: {
-                        Text(Self.ranges[index]).font(.system(size: 10, weight: .semibold))
+                        Text(Self.ranges[index]).font(Typo.label(.semibold))
                             .foregroundStyle(range == index ? Palette.onSelected : Palette.ink2)
                             .padding(.horizontal, 7).padding(.vertical, 3)
                             .background(Capsule().fill(range == index ? Palette.selected : Palette.chip))
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .ax("Range \(Self.ranges[index])", selected: range == index)
                 }
             }
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(compactTokens(total.total)).font(.system(size: 22, weight: .bold).monospacedDigit()).foregroundStyle(Palette.ink)
-                Text("tokens").font(.system(size: 11)).foregroundStyle(Palette.ink3)
-                Text(money(total.cost)).font(.system(size: 17, weight: .bold).monospacedDigit()).foregroundStyle(Palette.done)
+                Text(compactTokens(total.total)).font(Typo.figureLarge(.bold).monospacedDigit()).foregroundStyle(Palette.ink)
+                Text("tokens").font(Typo.body()).foregroundStyle(Palette.ink3)
+                Text(money(total.cost)).font(Typo.figure(.bold).monospacedDigit()).foregroundStyle(Palette.done)
                 Spacer()
                 if range == 2, let first = usage.earliestDay.flatMap(UsageScanner.date(of:)) {
-                    Text("since \(Self.since.string(from: first))").font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.ink2)
+                    Text("since \(Self.since.string(from: first))").font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
                 }
-                if usage.isScanning { Text("counting…").font(.system(size: 10)).foregroundStyle(Palette.ink3) }
+                if usage.isScanning { Text("counting…").font(Typo.label()).foregroundStyle(Palette.ink3) }
             }
             Text("in \(compactTokens(total.input)) · out \(compactTokens(total.output)) · cache write \(compactTokens(total.cacheWrite)) · cache read \(compactTokens(total.cacheRead))")
-                .font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3)
+                .font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink3)
             breakdown("Tool", parts.bySource.map { (Self.sourceName($0.0), $0.1) }, total: total.cost)
             breakdown("Model", parts.byModel.map { (modelName($0.0), $0.1) }, total: total.cost)
             if case .unavailable(let reason) = usage.cursor {
-                Text("Cursor usage unavailable: \(reason)").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("Cursor usage unavailable: \(reason)").font(Typo.label()).foregroundStyle(Palette.ink3)
             } else if usage.cursor == .partial {
-                Text("Cursor history incomplete").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("Cursor history incomplete").font(Typo.label()).foregroundStyle(Palette.ink3)
             }
         }
         .padding(10)
@@ -736,10 +762,10 @@ private struct UsagePanel: View {
     /// Labelled rows with a bar for each one's share of the cost.
     private func breakdown(_ title: String, _ items: [(String, TokenTally)], total: Double) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
+            Text(title).font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3)
             ForEach(items.prefix(6), id: \.0) { name, tally in
                 HStack(spacing: 8) {
-                    Text(name).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.85)).lineLimit(1)
+                    Text(name).font(Typo.body()).foregroundStyle(Palette.ink.opacity(0.85)).lineLimit(1)
                         .frame(width: 190, alignment: .leading)
                     GeometryReader { proxy in
                         Capsule().fill(Palette.track)
@@ -749,9 +775,9 @@ private struct UsagePanel: View {
                             }
                     }
                     .frame(height: 6)
-                    Text(compactTokens(tally.total)).font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink2)
+                    Text(compactTokens(tally.total)).font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink2)
                         .frame(width: 46, alignment: .trailing)
-                    Text(money(tally.cost)).font(.system(size: 10, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.done)
+                    Text(money(tally.cost)).font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(Palette.done)
                         .frame(width: 58, alignment: .trailing)
                 }
             }
@@ -790,7 +816,7 @@ private struct CodePanel: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 EngineTag(kind: .claude)
-                Text("lines per day").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("lines per day").font(Typo.label()).foregroundStyle(Palette.ink3)
                 InfoMark(text: "From the edits in Claude Code's transcripts, subagents included, by git repository; files outside a repository are left out. Git counts every commit in those repositories, on any branch, by anyone and any tool, once each, without lockfiles.")
                 Spacer()
             }
@@ -884,15 +910,15 @@ private struct CodePanel: View {
 
     private func figure(_ label: String, _ tally: LineTally, git: LineTally?) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
+            Text(label).font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3)
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text("+\(compactTokens(tally.added))").font(.system(size: 16, weight: .bold).monospacedDigit()).foregroundStyle(Palette.done)
-                Text("−\(compactTokens(tally.removed))").font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.failed)
-                Text("\(compactTokens(tally.files)) edits").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("+\(compactTokens(tally.added))").font(Typo.figure(.bold).monospacedDigit()).foregroundStyle(Palette.done)
+                Text("−\(compactTokens(tally.removed))").font(Typo.subtitle(.semibold).monospacedDigit()).foregroundStyle(Palette.failed)
+                Text("\(compactTokens(tally.files)) edits").font(Typo.label()).foregroundStyle(Palette.ink3)
             }
             if let git, !git.isEmpty {
                 Text("git +\(compactTokens(git.added)) −\(compactTokens(git.removed))")
-                    .font(.system(size: 9).monospacedDigit()).foregroundStyle(Palette.ink3)
+                    .font(Typo.caption().monospacedDigit()).foregroundStyle(Palette.ink3)
             }
         }
     }
@@ -905,17 +931,17 @@ private struct CodePanel: View {
         let date = UsageScanner.date(of: day).map { Self.labelFormatter.string(from: $0) } ?? day
         let names = repos.prefix(3).map { ($0.key as NSString).lastPathComponent }.joined(separator: ", ")
         return HStack(spacing: 6) {
-            Text(date).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink.opacity(0.85))
+            Text(date).font(Typo.label(.semibold)).foregroundStyle(Palette.ink.opacity(0.85))
             if tally.isEmpty {
-                Text("No edits").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("No edits").font(Typo.label()).foregroundStyle(Palette.ink3)
             } else {
                 Text("+\(tally.added) −\(tally.removed) · \(tally.files) edits · \(names)")
-                    .font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink2).lineLimit(1)
+                    .font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink2).lineLimit(1)
             }
             Spacer(minLength: 4)
             if !committed.isEmpty {
                 Text("git +\(compactTokens(committed.added)) −\(compactTokens(committed.removed))")
-                    .font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3).fixedSize()
+                    .font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink3).fixedSize()
             }
         }
     }
@@ -929,12 +955,12 @@ private struct CodePanel: View {
         let top = byRepo.sorted { $0.value.added > $1.value.added }.prefix(5)
         let most = top.first?.value.added ?? 1
         return VStack(alignment: .leading, spacing: 4) {
-            Text("Repositories · 30 days").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
+            Text("Repositories · 30 days").font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3)
             ForEach(Array(top), id: \.key) { repo, tally in
                 var committed = LineTally()
                 let _ = git[repo].map { for (key, t) in $0 where key >= day { committed.add(t) } }
                 HStack(spacing: 8) {
-                    Text((repo as NSString).lastPathComponent).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.85)).lineLimit(1)
+                    Text((repo as NSString).lastPathComponent).font(Typo.body()).foregroundStyle(Palette.ink.opacity(0.85)).lineLimit(1)
                         .frame(width: 150, alignment: .leading)
                     GeometryReader { proxy in
                         Capsule().fill(Palette.track).overlay(alignment: .leading) {
@@ -942,9 +968,9 @@ private struct CodePanel: View {
                         }
                     }
                     .frame(height: 6)
-                    Text("+\(compactTokens(tally.added)) −\(compactTokens(tally.removed))").font(.system(size: 10, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.done)
+                    Text("+\(compactTokens(tally.added)) −\(compactTokens(tally.removed))").font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(Palette.done)
                         .frame(width: 84, alignment: .trailing)
-                    Text(committed.isEmpty ? "git —" : "git +\(compactTokens(committed.added))").font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3)
+                    Text(committed.isEmpty ? "git —" : "git +\(compactTokens(committed.added))").font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink3)
                         .frame(width: 62, alignment: .trailing)
                 }
             }
@@ -968,34 +994,54 @@ private func resetText(_ time: Double?, now: Double) -> String {
 }
 
 /// A window whose reset has passed says nothing about now.
-private func current(_ window: LimitWindow?, now: Double) -> LimitWindow? {
+func current(_ window: LimitWindow?, now: Double) -> LimitWindow? {
     guard let window, (window.resetsAt ?? .infinity) > now else { return nil }
     return window
 }
 
 /// The header's limits: Claude Code's five-hour and weekly use, in one chip.
-private struct LimitsChip: View {
+struct LimitsChip: View {
     var limits: ToolLimits?
     var now: Double
+    var controller: NotchController
+
+    /// Dev only: a preview can show any weekly level (`CLAUDE_NOTCH_PREVIEW_WEEKLY=90`).
+    static func displayed(_ limits: ToolLimits?) -> ToolLimits? {
+        guard CommandLine.arguments.contains("--preview"),
+              let text = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_PREVIEW_WEEKLY"], let used = Double(text) else { return limits }
+        return ToolLimits(fiveHour: limits?.fiveHour, weekly: LimitWindow(usedPercent: used, resetsAt: nil, minutes: 10080),
+                          plan: limits?.plan, at: limits?.at ?? Date().timeIntervalSince1970, source: "preview")
+    }
 
     var body: some View {
         let five = current(limits?.fiveHour, now: now), week = current(limits?.weekly, now: now)
         if five != nil || week != nil {
-            HStack(spacing: 6) {
-                if let five { part("5h", five) }
-                if let week { part("wk", week) }
+            let isOpen = controller.openPanel == "Usage"
+            Button {
+                withAnimation(Motion.slide) { controller.openPanel = isOpen ? nil : "Usage" }
+            } label: {
+                HStack(spacing: 6) {
+                    if let five { part("5h", five) }
+                    if let week { part("wk", week) }
+                }
+                .padding(.horizontal, 7).padding(.vertical, 2)
+                .background(Capsule().fill(isOpen ? Palette.done.opacity(0.35) : Palette.chip))
+                .contentShape(Capsule())
             }
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(Capsule().fill(Palette.chip))
+            .buttonStyle(.plain)
             .fixedSize()
-            .help(tooltip(five: five, week: week))
+            .help(tooltip(five: five, week: week) + " · opens Usage")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Usage limits")
+            .accessibilityValue(tooltip(five: five, week: week))
+            .accessibilityAddTraits(.isButton)
         }
     }
 
     private func part(_ label: String, _ window: LimitWindow) -> some View {
         HStack(spacing: 3) {
-            Text(label).font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.ink3)
-            Text("\(Int(window.usedPercent.rounded()))%").font(.system(size: 10, weight: .semibold).monospacedDigit())
+            Text(label).font(Typo.label(.medium)).foregroundStyle(Palette.ink3)
+            Text("\(Int(window.usedPercent.rounded()))%").font(Typo.label(.semibold).monospacedDigit())
                 .foregroundStyle(window.usedPercent >= 70 ? limitColor(window.usedPercent) : Palette.ink2)
         }
     }
@@ -1020,16 +1066,16 @@ private struct LimitsBlock: View {
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text("Limits").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
+                    Text("Limits").font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3)
                     InfoMark(text: "Claude Code: from the status line in a terminal, else asked of Claude Code itself (as its /usage does) every few minutes while it is in use. Codex: its newest session log. A window past its reset shows nothing until a new reading.")
                     Spacer()
                 }
                 ForEach(rows.indices, id: \.self) { index in
                     let row = rows[index]
                     HStack(spacing: 8) {
-                        Text(row.tool).font(.system(size: 11, weight: row.tool.isEmpty ? .regular : .medium)).foregroundStyle(Palette.ink.opacity(0.85))
+                        Text(row.tool).font(Typo.body(row.tool.isEmpty ? .regular : .medium)).foregroundStyle(Palette.ink.opacity(0.85))
                             .lineLimit(1).frame(width: 78, alignment: .leading)
-                        Text(row.name).font(.system(size: 10)).foregroundStyle(Palette.ink3).frame(width: 46, alignment: .leading)
+                        Text(row.name).font(Typo.label()).foregroundStyle(Palette.ink3).frame(width: 46, alignment: .leading)
                         GeometryReader { proxy in
                             Capsule().fill(Palette.track).overlay(alignment: .leading) {
                                 Capsule().fill(limitColor(row.window.usedPercent))
@@ -1037,9 +1083,9 @@ private struct LimitsBlock: View {
                             }
                         }
                         .frame(height: 6)
-                        Text("\(Int(row.window.usedPercent.rounded()))%").font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        Text("\(Int(row.window.usedPercent.rounded()))%").font(Typo.label(.semibold).monospacedDigit())
                             .foregroundStyle(limitColor(row.window.usedPercent)).frame(width: 34, alignment: .trailing)
-                        Text(row.note).font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3)
+                        Text(row.note).font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink3)
                             .lineLimit(1).frame(width: 118, alignment: .leading)
                     }
                 }
@@ -1124,7 +1170,8 @@ struct InfoMark: View {
     var text: String
 
     var body: some View {
-        Image(systemName: "info.circle").font(.system(size: 10)).foregroundStyle(Palette.ink3).help(text)
+        Image(systemName: "info.circle").font(Typo.label()).foregroundStyle(Palette.ink3).help(text)
+            .accessibilityLabel("More information").accessibilityValue(text)
     }
 }
 
@@ -1146,10 +1193,10 @@ private struct AgentIcon: View {
                     Image(nsImage: claude).resizable()
                 } else if kind == .claude || kind == .cursor {
                     RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.claude)
-                        .overlay(Image(systemName: "asterisk").font(.system(size: 12, weight: .bold)).foregroundStyle(.white))
+                        .overlay(Image(systemName: "asterisk").font(Typo.subtitle(.bold)).foregroundStyle(.white))
                 } else {
                     RoundedRectangle(cornerRadius: 6, style: .continuous).fill(EngineTag.colors(kind).hue)
-                        .overlay(Image(systemName: EngineTag.symbol(kind)).font(.system(size: 11, weight: .bold)).foregroundStyle(.white))
+                        .overlay(Image(systemName: EngineTag.symbol(kind)).font(Typo.body(.bold)).foregroundStyle(.white))
                 }
             }
             .frame(width: 24, height: 24)
@@ -1180,7 +1227,7 @@ private struct EngineTag: View {
     var body: some View {
         let colors = Self.colors(kind)
         Text(kind.name)
-            .font(.system(size: 10, weight: .semibold)).foregroundStyle(colors.ink)
+            .font(Typo.label(.semibold)).foregroundStyle(colors.ink)
             .padding(.horizontal, 6).padding(.vertical, 1)
             .background(Capsule().fill(colors.hue.opacity(0.16)))
             .lineLimit(1)
@@ -1218,7 +1265,7 @@ private struct TurnProgress: View {
                 .frame(width: max(4, proxy.size.width * fraction))
         }
         .frame(height: 1.5)
-        .animation(.linear(duration: 1), value: fraction)
+        .animation(Motion.reduce ? nil : .linear(duration: 1), value: fraction)
         .allowsHitTesting(false)
     }
 }
@@ -1273,8 +1320,8 @@ struct RowBody<Label: View>: View {
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.cardHover).opacity(hovered && !isPressed ? 1 : 0).allowsHitTesting(false))
             .brightness(isPressed ? -0.04 : 0)
             .scaleEffect(isPressed ? 0.985 : 1)
-            .animation(.easeOut(duration: 0.12), value: isPressed)
-            .animation(.easeOut(duration: 0.12), value: hovered)
+            .animation(Motion.ease(0.12), value: isPressed)
+            .animation(Motion.ease(0.12), value: hovered)
     }
 }
 
@@ -1311,30 +1358,30 @@ private struct ApprovalCard: View {
         VStack(alignment: .leading, spacing: 7) {
             // Which chat asks: the row above may be scrolled past, or another chat's.
             HStack(spacing: 4) {
-                Image(systemName: "bubble.left.fill").font(.system(size: 8))
-                Text(chat).font(.system(size: 10, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                Image(systemName: "bubble.left.fill").font(Typo.micro()).decorative()
+                Text(chat).font(Typo.label(.medium)).lineLimit(1).truncationMode(.tail)
             }
             .foregroundStyle(Palette.ink2)
             .help(chat)
             HStack(spacing: 6) {
-                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.ink).lineLimit(1)
+                Text(title).font(Typo.body(.semibold)).foregroundStyle(Palette.ink).lineLimit(1)
                 if let type = request.agentType {
-                    Text(type).font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.ink2)
+                    Text(type).font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
                         .padding(.horizontal, 6).padding(.vertical, 1)
                         .background(Capsule().fill(Palette.chip)).lineLimit(1).fixedSize()
                 }
                 Spacer(minLength: 4)
-                if more > 0 { Text("+\(more) more").font(.system(size: 10)).foregroundStyle(Palette.ink3) }
+                if more > 0 { Text("+\(more) more").font(Typo.label()).foregroundStyle(Palette.ink3) }
                 InfoMark(text: note)
             }
             if isOneClickQuestion, let question = questions.first {
-                Text(question.text).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.85))
+                Text(question.text).font(Typo.body()).foregroundStyle(Palette.ink.opacity(0.85))
                     .lineLimit(3).fixedSize(horizontal: false, vertical: true)
             } else if !questions.isEmpty {
                 EmptyView()
             } else if !request.detail.isEmpty, request.detail != request.tool {
                 Text(request.detail)
-                    .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Palette.ink.opacity(0.8))
+                    .font(Typo.label(mono: true)).foregroundStyle(Palette.ink.opacity(0.8))
                     .lineLimit(3).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 7).padding(.vertical, 5)
@@ -1349,7 +1396,7 @@ private struct ApprovalCard: View {
                 // One single-select question: each option is its answer.
                 FlowOptions(options: question.options) { option in
                     Button { center.answer(item.id, .answer, option: option) } label: {
-                        Text(option).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Palette.ink)
+                        Text(option).font(Typo.label(.semibold)).foregroundStyle(Palette.ink)
                             .lineLimit(1)
                             .padding(.horizontal, 9).padding(.vertical, 4)
                             .background(Capsule().fill(Palette.chip))
@@ -1394,42 +1441,43 @@ private struct ApprovalCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 5) {
                         if questions.count > 1 {
-                            Text("\(index + 1)").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.ink2)
+                            Text("\(index + 1)").font(Typo.caption(.bold)).foregroundStyle(Palette.ink2)
                                 .frame(width: 14, height: 14).background(Circle().fill(Palette.chip))
                         }
                         if let header = question.header, !header.isEmpty {
-                            Text(header).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
+                            Text(header).font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
                         }
                         if question.multiSelect {
-                            Text("pick any").font(.system(size: 9.5)).foregroundStyle(Palette.ink3)
+                            Text("pick any").font(Typo.caption()).foregroundStyle(Palette.ink3)
                         }
                         Spacer(minLength: 0)
                         if !(picked[index] ?? []).isEmpty {
-                            Image(systemName: "checkmark.circle.fill").font(.system(size: 9)).foregroundStyle(Palette.done)
+                            Image(systemName: "checkmark.circle.fill").font(Typo.caption()).foregroundStyle(Palette.done).decorative()
                         }
                     }
-                    Text(question.text).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.85))
+                    Text(question.text).font(Typo.body()).foregroundStyle(Palette.ink.opacity(0.85))
                         .lineLimit(3).fixedSize(horizontal: false, vertical: true)
                     FlowOptions(options: question.options) { option in
                         let isOn = picked[index]?.contains(option) == true
                         Button { toggle(option, in: index, multi: question.multiSelect) } label: {
                             HStack(spacing: 4) {
-                                if isOn { Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)) }
+                                if isOn { Image(systemName: "checkmark").font(Typo.micro(.bold)).decorative() }
                                 Text(option).lineLimit(1)
                             }
-                            .font(.system(size: 10.5, weight: .semibold))
+                            .font(Typo.label(.semibold))
                             .foregroundStyle(isOn ? Palette.onDone : Palette.ink)
                             .padding(.horizontal, 9).padding(.vertical, 4)
                             .background(Capsule().fill(isOn ? Palette.done : Palette.chip))
                             .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
+                        .ax(option, selected: isOn)
                     }
                 }
             }
             HStack(spacing: 6) {
                 let done = questions.indices.filter { !(picked[$0] ?? []).isEmpty }.count
-                Text("\(done) of \(questions.count) answered").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("\(done) of \(questions.count) answered").font(Typo.label()).foregroundStyle(Palette.ink3)
                 Spacer(minLength: 4)
                 let ready = isArmed && isComplete
                 Button {
@@ -1437,7 +1485,7 @@ private struct ApprovalCard: View {
                         question.options.filter { picked[index]?.contains($0) == true }
                     })
                 } label: {
-                    Text("Submit").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Palette.onDone)
+                    Text("Submit").font(Typo.label(.semibold)).foregroundStyle(Palette.onDone)
                         .padding(.horizontal, 12).padding(.vertical, 4)
                         .background(Capsule().fill(Palette.done))
                         .contentShape(Capsule())
@@ -1492,7 +1540,7 @@ private struct ApprovalCard: View {
         Button {
             center.answer(item.id, decision)
         } label: {
-            Text(label).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(ink)
+            Text(label).font(Typo.label(.semibold)).foregroundStyle(ink)
                 .padding(.horizontal, 9).padding(.vertical, 4)
                 .background(Capsule().fill(fill))
                 .contentShape(Capsule())
@@ -1527,7 +1575,7 @@ private struct ProdWatchLine: View {
         HStack(spacing: 6) {
             Circle().fill(color).frame(width: 6, height: 6)
             Text("Prod \(elapsed(now - watch.since)) after \(watch.what): \(state)")
-                .font(.system(size: 10.5)).foregroundStyle(watch.level >= .warn ? color : Palette.ink2)
+                .font(Typo.label()).foregroundStyle(watch.level >= .warn ? color : Palette.ink2)
                 .lineLimit(1).truncationMode(.tail)
         }
         .help("For 20 minutes after this session ran \(watch.what), its row shows the Prod chip's state: your Datadog monitors, incidents and numbers. It does not know which service the push went to.")
@@ -1547,7 +1595,7 @@ private struct RowControls: View {
         if kind != .none, session.phase != .idle || controls.isPaused(session) {
             HStack(spacing: 4) {
                 if controls.troubled.contains(session.id) {
-                    Text(AgentControls.troubleText).font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.failed)
+                    Text(AgentControls.troubleText).font(Typo.label(.medium)).foregroundStyle(Palette.failed)
                         .lineLimit(1).fixedSize()
                 }
                 if kind == .hooked {
@@ -1582,13 +1630,14 @@ private struct RowControls: View {
 
     private func icon(_ symbol: String, tint: Color = Palette.ink2, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 9, weight: .semibold)).foregroundStyle(tint)
+            Image(systemName: symbol).font(Typo.caption(.semibold)).foregroundStyle(tint)
                 .frame(width: 22, height: 18)
                 .background(Capsule().fill(Palette.chip))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .help(help)
+        .ax(help)
     }
 }
 
@@ -1604,7 +1653,7 @@ private struct PreviewLines: View {
                     Text(line.text.isEmpty ? " " : line.text).foregroundStyle(Palette.ink.opacity(0.8))
                         .lineLimit(1).truncationMode(.tail)
                 }
-                .font(.system(size: 10, design: .monospaced))
+                .font(Typo.label(mono: true))
                 .padding(.horizontal, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(background(line.kind))
@@ -1651,11 +1700,18 @@ private struct SessionRow: View {
     var prodWatch: ProdWatch?
     /// The pull request's line is laid over the row's bottom left (so the last line leaves room).
     var hasPRLine = false
+    /// The session folder's git state, and the latest CI run on its branch.
+    var git: SessionGit?
+    var ci: CIMark?
     /// Paused or being stopped from the notch.
     var paused = false
     var stopping = false
     /// The Details button's width and gap, kept free at the end of the row's last line.
     static let cornerRoom: CGFloat = 70
+    /// A compact row's least content height (its padding, 7 a side, comes on top).
+    static let compactContentMin: CGFloat = 44
+    /// What a compact row keeps free under its last line for the Details button (its padding is 3 less).
+    static let compactCornerRoom: CGFloat = 22
 
     var body: some View {
         let app = AppInfo.of(session.appBundleId)
@@ -1665,7 +1721,7 @@ private struct SessionRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 // The chat's name, as its editor lists it.
                 HStack(spacing: 6) {
-                    Text(title).font(.system(size: compact ? 12 : 13, weight: .semibold)).foregroundStyle(Palette.ink)
+                    Text(title).font(compact ? Typo.subtitle(.semibold) : Typo.title(.semibold)).foregroundStyle(Palette.ink)
                         .lineLimit(1).truncationMode(.tail)
                         .help(title)
                     if compact { EngineTag(kind: session.kind) }
@@ -1677,14 +1733,14 @@ private struct SessionRow: View {
                 if !compact {
                 HStack(spacing: 6) {
                     if title != session.project {
-                        Text(session.project).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
+                        Text(session.project).font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
                     }
                     EngineTag(kind: session.kind)
                     if !session.isCursorAgent {
-                        Text(app.map { "in \($0.name)" } ?? "in Terminal").font(.system(size: 10)).foregroundStyle(Palette.ink3).lineLimit(1)
+                        Text(app.map { "in \($0.name)" } ?? "in Terminal").font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
                     }
                     if let model = session.model {
-                        Text(modelName(model)).font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.75))
+                        Text(modelName(model)).font(Typo.label(.medium)).foregroundStyle(Palette.ink.opacity(0.75))
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Capsule().fill(Palette.chip))
                             .lineLimit(1).fixedSize()
@@ -1696,7 +1752,12 @@ private struct SessionRow: View {
                 // button instead of a line of its own.
                 let inline = reserved == 0 && !isDetailed && session.agents.isEmpty && openTodos == nil && !paused && !stopping && prodWatch == nil && !hasPRLine
                 let mcpLine = !isDetailed && !compact && !session.mcp.isEmpty
-                activity.padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
+                let metaLine = !compact && hasMeta
+                activity.padding(.trailing, inline && !mcpLine && !metaLine ? Self.cornerRoom : 0)
+                if metaLine {
+                    SessionMetaLine(session: session, git: git, ci: ci, now: now)
+                        .padding(.trailing, inline && !mcpLine ? Self.cornerRoom : 0)
+                }
                 if let todos = openTodos { todoLine(todos) }
                 if let prodWatch { ProdWatchLine(watch: prodWatch, now: now) }
                 if !session.agents.isEmpty { agents }
@@ -1704,15 +1765,19 @@ private struct SessionRow: View {
                     details
                 } else if mcpLine {
                     Text("MCP  " + top(session.mcp, 3))
-                        .font(.system(size: 10)).foregroundStyle(Palette.ink3).lineLimit(1)
+                        .font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
                         .padding(.trailing, inline ? Self.cornerRoom : 0)
                 }
                 // Room for the Details button in the corner, and the approval card above it.
-                if !inline { Color.clear.frame(height: 14 + reserved) }
+                if !inline { Color.clear.frame(height: (compact ? Self.compactCornerRoom : 14) + reserved) }
             }
         }
-        .rowCard(tint: session.phase == .waiting ? Palette.waitingTint : Palette.card,
-                 edge: session.phase == .waiting ? Palette.waitingEdge : Palette.hairline,
+        // Compact rows: tall enough for the status chip and the Details button under it with a gap
+        // (the one-line rows were exactly their sum, so they touched or overlapped while settling),
+        // and the same in every state, so the list does not jump when a row changes state.
+        .frame(minHeight: compact ? Self.compactContentMin : nil, alignment: .top)
+        .rowCard(tint: session.phase == .waiting ? Palette.waitingTint : session.isFailed ? Palette.failedTint : Palette.card,
+                 edge: session.phase == .waiting ? Palette.waitingEdge : session.isFailed ? Palette.failedEdge : Palette.hairline,
                  padding: compact ? 7 : 10)
         // While it works, a quiet line along the bottom, timed by its last turn.
         .overlay(alignment: .bottom) {
@@ -1722,7 +1787,12 @@ private struct SessionRow: View {
                     .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: session.phase)
+        .animation(Motion.easeInOut(0.3), value: session.phase)
+    }
+
+    /// Something to show on the line under the activity: the branch, a CI mark, the context.
+    private var hasMeta: Bool {
+        (git.flatMap(GitMarks.branchText) != nil) || ci != nil || session.contextPercent != nil
     }
 
     /// How far along this turn looks, against the last turn's length (a minute when none):
@@ -1735,11 +1805,11 @@ private struct SessionRow: View {
     /// While it works, what it spends a minute; while idle, how long its prompt cache stays warm.
     @ViewBuilder private var pace: some View {
         if session.phase != .idle, let rate = live?.perMinute(now: now, since: session.turnStartedAt) {
-            Text("\(money(rate))/min").font(.system(size: 10, weight: .medium).monospacedDigit()).foregroundStyle(Palette.ink3)
+            Text("\(money(rate))/min").font(Typo.label(.medium).monospacedDigit()).foregroundStyle(Palette.ink3)
                 .lineLimit(1).fixedSize()
                 .help("This session's replies, subagents included, over the last 10 minutes (or this turn, if shorter), at API prices.")
         } else if session.phase == .idle, let cold = session.promptCacheExpiresAt ?? live?.coldAt, cold > now {
-            Text("cache \(cold - now >= 60 ? "\(Int(((cold - now) / 60).rounded(.up)))m" : "\(Int(cold - now))s")").font(.system(size: 10, weight: .medium).monospacedDigit())
+            Text("cache \(cold - now >= 60 ? "\(Int(((cold - now) / 60).rounded(.up)))m" : "\(Int(cold - now))s")").font(Typo.label(.medium).monospacedDigit())
                 .foregroundStyle(cold - now < 300 ? Palette.waiting : Palette.ink3)
                 .lineLimit(1).fixedSize()
                 .help("The prompt cache stays warm \(elapsed(cold - now)) more, renewed by each reply. A prompt after that re-reads the whole context at the full input price.")
@@ -1749,10 +1819,16 @@ private struct SessionRow: View {
     @ViewBuilder private var activity: some View {
         if stopping {
             Label("Stopping before its next step", systemImage: "stop.fill")
-                .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.failed).lineLimit(1)
+                .font(Typo.body(.medium)).foregroundStyle(Palette.failed).lineLimit(1)
         } else if paused {
             Label(session.id.hasPrefix("watch-") ? "Paused" : "Paused: its next step waits for you", systemImage: "pause.fill")
-                .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.waiting).lineLimit(1)
+                .font(Typo.body(.medium)).foregroundStyle(Palette.waiting).lineLimit(1)
+        } else if session.isCompacting(at: now) {
+            // Claude is summarising the conversation to free its context (PreCompact until PostCompact).
+            HStack(spacing: 6) {
+                Spinner(size: 9)
+                Text("Compacting context…").font(Typo.body(.medium)).foregroundStyle(Palette.claude).lineLimit(1)
+            }
         } else {
             phaseActivity
         }
@@ -1762,18 +1838,23 @@ private struct SessionRow: View {
         switch session.phase {
         case .waiting:
             Label("Waiting for \(session.waitingFor ?? "you")", systemImage: "hand.raised.fill")
-                .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.waiting).lineLimit(1)
+                .font(Typo.body(.medium)).foregroundStyle(Palette.waiting).lineLimit(1)
         case .working:
             if let tool = session.current {
                 ToolLine(tool: tool, now: now)
             } else if let last = session.lastTool {
                 Text("last ▸ \(label(last)) · \(elapsed(now - last.since)) ago")
-                    .font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1)
+                    .font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1)
             } else {
-                Text("Thinking…").font(.system(size: 11)).foregroundStyle(Palette.ink2)
+                Text("Thinking…").font(Typo.body()).foregroundStyle(Palette.ink2)
             }
         case .idle:
-            Text(idleText).font(.system(size: 11)).foregroundStyle(Palette.ink3).lineLimit(1)
+            if session.isFailed {
+                Label(session.failureText + (session.failedAt.map { " · \(elapsed(now - $0)) ago" } ?? ""), systemImage: "exclamationmark.octagon.fill")
+                    .font(Typo.body(.medium)).foregroundStyle(Palette.failed).lineLimit(1)
+            } else {
+                Text(idleText).font(Typo.body()).foregroundStyle(Palette.ink3).lineLimit(1)
+            }
         }
     }
 
@@ -1796,10 +1877,10 @@ private struct SessionRow: View {
         let done = todos.filter { $0.status == .completed }.count
         let current = todos.first { $0.status == .inProgress }
         return HStack(spacing: 6) {
-            Image(systemName: "checklist").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
-            Text("\(done)/\(todos.count)").font(.system(size: 10, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.ink2)
+            Image(systemName: "checklist").font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3).accessibilityLabel("To-do list")
+            Text("\(done)/\(todos.count)").font(Typo.label(.semibold).monospacedDigit()).foregroundStyle(Palette.ink2)
             if let current {
-                Text(current.activeForm ?? current.content).font(.system(size: 10.5)).foregroundStyle(Palette.ink2)
+                Text(current.activeForm ?? current.content).font(Typo.label()).foregroundStyle(Palette.ink2)
                     .lineLimit(1).truncationMode(.tail)
             }
         }
@@ -1815,7 +1896,7 @@ private struct SessionRow: View {
                 AgentLine(agent: agent, now: now, lastActivity: agentActivity[agent.id], model: agentModels[agent.id] ?? agent.model)
             }
             if ordered.count > shown.count {
-                Text("+\(ordered.count - shown.count) more agents").font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text("+\(ordered.count - shown.count) more agents").font(Typo.label()).foregroundStyle(Palette.ink3)
             }
         }
         .padding(.top, 2)
@@ -1850,6 +1931,13 @@ private struct SessionRow: View {
         } else if session.isCursorAgent {
             rows.append(("Tokens", "not reported by Cursor"))
         }
+        if session.isFailed {
+            rows.append(("Failed", "\(session.failureText) (\(session.failure ?? "unknown"))" + (session.failedAt.map { " · \(elapsed(now - $0)) ago" } ?? "") + ". Ends with your next message."))
+        }
+        if let line = ContextText.detail(session) { rows.append(("Context", line)) }
+        if session.isCompacting(at: now), let since = session.compactingSince { rows.append(("Compacting", "for \(elapsed(now - since))")) }
+        if let git, let line = GitMarks.fullLine(git) { rows.append(("Git", line)) }
+        if let ci { rows.append(("CI", "\(ci.name) · \(ci.word) · \(elapsed(now - ci.at)) ago")) }
         if let took = session.lastTurnSeconds { rows.append(("Last turn", "took \(elapsed(took))")) }
         if let last = session.lastTool { rows.append(("Last tool", "\(label(last)) · \(elapsed(now - last.since)) ago")) }
         let finished = session.agents.filter { !$0.isRunning }
@@ -1864,14 +1952,119 @@ private struct SessionRow: View {
         return VStack(alignment: .leading, spacing: 3) {
             ForEach(rows, id: \.0) { row in
                 HStack(alignment: .top, spacing: 8) {
-                    Text(row.0).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink3).frame(width: 62, alignment: .leading)
-                    Text(row.1).font(.system(size: 10)).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
+                    Text(row.0).font(Typo.label(.semibold)).foregroundStyle(Palette.ink3).frame(width: 62, alignment: .leading)
+                    Text(row.1).font(Typo.label()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.inset))
         .padding(.top, 2)
+    }
+}
+
+/// What the context numbers say, in words.
+enum ContextText {
+    static func tokens(_ n: Int) -> String { n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6) : n >= 1000 ? "\(Int((Double(n) / 1000).rounded()))K" : "\(n)" }
+
+    /// "124K of 1M tokens · 12% · Claude compacts at about 967K".
+    static func detail(_ session: SessionState) -> String? {
+        guard let used = session.contextTokens, let window = session.contextWindow, let percent = session.contextPercent else { return nil }
+        let point = ContextUse.compactPoint(window: window, env: session.autoCompact)
+        var text = "\(tokens(used)) of \(tokens(window)) tokens · \(percent)% · Claude compacts at about \(tokens(point))"
+        switch session.contextLevel {
+        case .normal: break
+        case .warn: text += " · getting full"
+        case .strong: text += " · almost full"
+        }
+        return text
+    }
+}
+
+/// A thin bar and percent for the context window, amber from 80% and red from 92% of the point
+/// Claude compacts at.
+private struct ContextMeter: View {
+    var session: SessionState
+
+    var body: some View {
+        if let percent = session.contextPercent {
+            let level = session.contextLevel
+            let color: Color = level == .strong ? Palette.failed : level == .warn ? Palette.waiting : Palette.ink2
+            HStack(spacing: 5) {
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Palette.track)
+                    Capsule().fill(color).frame(width: max(Self.width * CGFloat(min(percent, 100)) / 100, percent > 0 ? 4 : 0))
+                }
+                .frame(width: Self.width, height: 4)
+                Text("\(percent)%").font(Typo.label(.medium).monospacedDigit()).foregroundStyle(level == .normal ? Palette.ink3 : color)
+            }
+            .fixedSize()
+            .help(ContextText.detail(session).map { "Context window: \($0)" } ?? "Context window")
+            .ax("Context window", value: "\(percent) percent used" + (level == .strong ? ", almost full" : level == .warn ? ", getting full" : ""))
+        }
+    }
+
+    static let width: CGFloat = 34
+}
+
+/// The line under a row's activity: the git branch with its marks, the latest CI run on it, and
+/// the context window. The branch gives way first (middle-truncated); the rest keeps its size.
+private struct SessionMetaLine: View {
+    var session: SessionState
+    var git: SessionGit?
+    var ci: CIMark?
+    var now: Double
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let git, let branch = GitMarks.branchText(git) {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.triangle.branch").font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3).decorative()
+                    Text(branch).font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
+                        .lineLimit(1).truncationMode(.middle)
+                        .layoutPriority(-1)
+                    let marks = GitMarks.marks(git)
+                    if !marks.isEmpty {
+                        Text(marks.joined(separator: " ")).font(Typo.label(.medium).monospacedDigit())
+                            .foregroundStyle(git.changed > 0 || git.ahead > 0 ? Palette.waiting : Palette.ink3)
+                            .lineLimit(1).fixedSize()
+                    }
+                }
+                .help(GitMarks.fullLine(git) ?? branch)
+                .ax("Git", value: GitMarks.fullLine(git) ?? branch)
+            }
+            if let ci { CIButton(ci: ci, now: now) }
+            Spacer(minLength: 0)
+            ContextMeter(session: session)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The CI mark: running, passed or failed for the latest run on the branch; a click opens it.
+private struct CIButton: View {
+    var ci: CIMark
+    var now: Double
+
+    var body: some View {
+        let color: Color = ci.state == .failed ? Palette.failed : ci.state == .passed ? Palette.done : Palette.claude
+        Button {
+            SafeLink.open(ci.url, for: ci.source == .pipelines ? .bitbucket : .expo)
+        } label: {
+            HStack(spacing: 4) {
+                switch ci.state {
+                case .running: Spinner(size: 8)
+                case .passed: Image(systemName: "checkmark.circle.fill").font(Typo.caption(.semibold)).foregroundStyle(color).decorative()
+                case .failed: Image(systemName: "xmark.circle.fill").font(Typo.caption(.semibold)).foregroundStyle(color).decorative()
+                }
+                Text(ci.word).font(Typo.label(.medium)).foregroundStyle(ci.state == .passed ? Palette.ink3 : color)
+            }
+            .fixedSize()
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(ci.name) \(ci.word), \(elapsed(now - ci.at)) ago. Opens it.")
+        .ax("CI", value: "\(ci.name) \(ci.word)", hint: "Opens the run")
     }
 }
 
@@ -1889,16 +2082,16 @@ private struct AgentLine: View {
             icon.frame(width: 12, height: 12).padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(agent.type).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.ink.opacity(agent.isRunning ? 0.92 : 0.6))
+                    Text(agent.type).font(Typo.body(.semibold)).foregroundStyle(Palette.ink.opacity(agent.isRunning ? 0.92 : 0.6))
                     if let description = agent.description {
-                        Text(description).font(.system(size: 11)).foregroundStyle(Palette.ink2).lineLimit(1)
+                        Text(description).font(Typo.body()).foregroundStyle(Palette.ink2).lineLimit(1)
                     }
                     Spacer(minLength: 4)
                     Text(elapsed((agent.endedAt ?? now) - agent.startedAt))
-                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .font(Typo.label(.medium).monospacedDigit())
                         .foregroundStyle(agent.isRunning ? Palette.claude : Palette.ink3)
                 }
-                Text(detail).font(.system(size: 10)).foregroundStyle(detailColor).lineLimit(1)
+                Text(detail).font(Typo.label()).foregroundStyle(detailColor).lineLimit(1)
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
@@ -1908,9 +2101,9 @@ private struct AgentLine: View {
     @ViewBuilder private var icon: some View {
         switch agent.outcome {
         case nil: Spinner(size: 10)
-        case .done: Image(systemName: "checkmark.circle.fill").resizable().foregroundStyle(Palette.done)
-        case .failed: Image(systemName: "xmark.circle.fill").resizable().foregroundStyle(Palette.failed)
-        case .stopped: Image(systemName: "stop.circle.fill").resizable().foregroundStyle(Palette.waiting)
+        case .done: Image(systemName: "checkmark.circle.fill").resizable().foregroundStyle(Palette.done).accessibilityLabel("Done")
+        case .failed: Image(systemName: "xmark.circle.fill").resizable().foregroundStyle(Palette.failed).accessibilityLabel("Failed")
+        case .stopped: Image(systemName: "stop.circle.fill").resizable().foregroundStyle(Palette.waiting).accessibilityLabel("Stopped")
         }
     }
 
@@ -1959,8 +2152,8 @@ private struct ToolLine: View {
         HStack(spacing: 5) {
             Circle().fill(tool.server == nil ? Palette.claude : Palette.mcp).frame(width: 6, height: 6)
             Text(tool.server.map { "\($0) · \(tool.shortName)" } ?? tool.name)
-                .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.88)).lineLimit(1)
-            Text(elapsed(now - tool.since)).font(.system(size: 11).monospacedDigit()).foregroundStyle(Palette.ink3)
+                .font(Typo.body(.medium)).foregroundStyle(Palette.ink.opacity(0.88)).lineLimit(1)
+            Text(elapsed(now - tool.since)).font(Typo.body().monospacedDigit()).foregroundStyle(Palette.ink3)
         }
     }
 }
@@ -1986,7 +2179,7 @@ struct StatusChip: View {
         switch session.phase {
         case .working: kind = .working(since: session.turnStartedAt ?? session.updatedAt)
         case .waiting: kind = .waiting
-        case .idle: kind = .idle
+        case .idle: kind = session.isFailed ? .failed : .idle
         }
         self.now = now
     }
@@ -1997,33 +2190,33 @@ struct StatusChip: View {
             case .working(let since), .running(let since):
                 Spinner(size: 9)
                 Text(elapsed(now - since))
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit()).foregroundStyle(Palette.claude)
+                    .font(Typo.body(.semibold).monospacedDigit()).foregroundStyle(Palette.claude)
             case .waiting:
-                Text("Needs you").font(.system(size: 11, weight: .bold)).foregroundStyle(.black)
+                Text("Needs you").font(Typo.body(.bold)).foregroundStyle(.black)
             case .idle:
-                Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.done)
-                Text("Idle").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink2)
+                Image(systemName: "checkmark").font(Typo.caption(.bold)).foregroundStyle(Palette.done)
+                Text("Idle").font(Typo.body(.medium)).foregroundStyle(Palette.ink2)
             case .queued:
-                Image(systemName: "clock").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink2)
-                Text("Queued").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink2)
+                Image(systemName: "clock").font(Typo.caption(.semibold)).foregroundStyle(Palette.ink2)
+                Text("Queued").font(Typo.body(.medium)).foregroundStyle(Palette.ink2)
             case .paused(let age), .held(let age):
-                Image(systemName: kind == .paused(age: age) ? "pause.fill" : "lock.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(Palette.waiting)
+                Image(systemName: kind == .paused(age: age) ? "pause.fill" : "lock.fill").font(Typo.micro(.bold)).foregroundStyle(Palette.waiting)
                 Text((kind == .paused(age: age) ? "Paused" : "Waiting") + (age.map { " · \($0)" } ?? ""))
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.waiting)
+                    .font(Typo.body(.medium)).foregroundStyle(Palette.waiting)
             case .failed:
-                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.failed)
-                Text("Failed").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.failed)
+                Image(systemName: "xmark").font(Typo.caption(.bold)).foregroundStyle(Palette.failed)
+                Text("Failed").font(Typo.body(.semibold)).foregroundStyle(Palette.failed)
             case .passed:
-                Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.done)
-                Text("Done").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink2)
+                Image(systemName: "checkmark").font(Typo.caption(.bold)).foregroundStyle(Palette.done)
+                Text("Done").font(Typo.body(.medium)).foregroundStyle(Palette.ink2)
             case .canceled:
-                Image(systemName: "stop.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(Palette.ink3)
-                Text("Canceled").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink3)
+                Image(systemName: "stop.fill").font(Typo.micro(.bold)).foregroundStyle(Palette.ink3)
+                Text("Canceled").font(Typo.body(.medium)).foregroundStyle(Palette.ink3)
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 3)
         .background(Capsule().fill(kind == .waiting ? Palette.waitingHue : kind == .failed ? Palette.failedHue.opacity(0.14) : Palette.chip))
         // A new state cross-fades in and the capsule eases to its new width.
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: kind)
+        .animation(Motion.spring(0.3, 0.8), value: kind)
     }
 }

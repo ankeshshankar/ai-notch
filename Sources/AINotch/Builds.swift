@@ -1,6 +1,7 @@
 import CoreGraphics
 import CryptoKit
 import Foundation
+import NotchCore
 
 // What the two build sources share, and nothing more: EAS builds (EASBuilds.swift) and Bitbucket
 // Pipelines runs (BitbucketPipelines.swift) have their own models, configs, pollers and status,
@@ -151,6 +152,50 @@ func runProcess(_ path: String, _ arguments: [String], environment: [String: Str
     return ProcessResult(status: process.terminationStatus, output: data, errors: String(text.suffix(2000)), timedOut: timedOut.isSet)
 }
 
+/// The one switch that keeps a preview off the Keychain: every preview run (`--preview`,
+/// `--setup-preview`) refuses every Keychain read, write and delete, so no "wants to use your
+/// confidential information" prompt can appear. `CLAUDE_NOTCH_ALLOW_KEYCHAIN=1` lifts it for a
+/// deliberate test. `realCalls` counts the calls that did reach the Keychain (the self-check).
+enum KeychainGuard {
+    nonisolated(unsafe) static var forceBlocked: Bool?
+    nonisolated(unsafe) static var realCalls = 0
+    static var blocked: Bool {
+        if let forceBlocked { return forceBlocked }
+        if ProcessInfo.processInfo.environment["CLAUDE_NOTCH_ALLOW_KEYCHAIN"] == "1" { return false }
+        return CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview")
+    }
+    /// True when the caller may go on to the real Keychain (and counts it).
+    static func enter() -> Bool {
+        if blocked { return false }
+        realCalls += 1
+        return true
+    }
+}
+
+extension KeychainGuard {
+    /// `AINotch --keychain-selfcheck`: with the guard on, every accessor refuses and none reaches
+    /// the Keychain; a preview run is blocked by default. Exits 1 on any failure.
+    static func runIfAsked(_ arguments: [String]) {
+        guard arguments.contains("--keychain-selfcheck") else { return }
+        var failures = 0, checks = 0
+        func expect(_ ok: Bool, _ what: String) { checks += 1; if !ok { failures += 1; print("FAIL \(what)") } }
+        forceBlocked = true
+        realCalls = 0
+        expect(KeychainItem.read(service: "ai-notch.selfcheck") == nil, "KeychainItem.read refused")
+        expect(KeychainItem.read(service: "ai-notch.selfcheck", account: "a") == nil, "KeychainItem.read with account refused")
+        expect(KeychainBlob.read(service: "ai-notch.selfcheck", account: "a") == nil, "KeychainBlob.read refused")
+        expect(KeychainBlob.write(Data("x".utf8), service: "ai-notch.selfcheck", account: "a", label: "t") != errSecSuccess, "KeychainBlob.write refused")
+        expect(KeychainBlob.delete(service: "ai-notch.selfcheck", account: "a") != errSecSuccess, "KeychainBlob.delete refused")
+        expect(realCalls == 0, "no call reached the Keychain while blocked (\(realCalls))")
+        forceBlocked = false
+        expect(enter() && realCalls == 1, "unblocked: a call is counted and let through")
+        forceBlocked = nil
+        expect(blocked == arguments.contains("--preview") || !blocked, "default follows the arguments")
+        print("keychain-selfcheck: \(checks - failures)/\(checks) passed")
+        exit(failures == 0 ? 0 : 1)
+    }
+}
+
 /// Reads a generic password the user stored with `security add-generic-password` (whose items
 /// trust /usr/bin/security, so reading never prompts, whatever the app's signature). Off the main
 /// thread only. The secret never reaches a log.
@@ -170,6 +215,7 @@ enum KeychainItem {
 
     /// The item for `service` (and `account`, when one service holds several secrets).
     static func read(service: String, account: String? = nil) -> Found? {
+        guard KeychainGuard.enter() else { return nil }
         let match = ["-s", service] + (account.map { ["-a", $0] } ?? [])
         guard let secret = runProcess("/usr/bin/security", ["find-generic-password"] + match + ["-w"], timeout: 5),
               secret.status == 0 else { return nil }
@@ -265,15 +311,35 @@ func plainLogLine(_ line: Substring) -> String {
 }
 
 /// The app's own log, without secrets: one line per event.
-func noteBuildLog(_ line: String) {
-    let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/notch/notch.log")
-    let stamp = ISO8601DateFormatter().string(from: Date())
-    guard let data = "\(stamp) \(Redact.mask(line))\n".data(using: .utf8) else { return }
-    if let handle = try? FileHandle(forWritingTo: log) {
-        handle.seekToEndOfFile()
-        handle.write(data)
-        try? handle.close()
-    } else {
-        try? data.write(to: log)
+func noteBuildLog(_ line: String) { NotchLog.append(Redact.mask(line)) }
+
+/// `~/.claude/notch/notch.log`, the one writer: a line per event, stamped; at 1 MB the file
+/// becomes `notch.log.1` (the one before it goes), so the log never grows past about 2 MB.
+enum NotchLog {
+    nonisolated(unsafe) static var maxBytes = 1_000_000
+    static var url = NotchPaths.sessions.deletingLastPathComponent().appendingPathComponent("notch.log")
+    private static let lock = NSLock()
+    private static let stamp: ISO8601DateFormatter = ISO8601DateFormatter()
+
+    static func append(_ line: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let data = "\(stamp.string(from: Date())) \(line)\n".data(using: .utf8) else { return }
+        rotateIfNeeded()
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    private static func rotateIfNeeded() {
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        guard size >= maxBytes else { return }
+        let previous = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: previous)
+        try? FileManager.default.moveItem(at: url, to: previous)
     }
 }

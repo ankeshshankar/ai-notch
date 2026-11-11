@@ -146,15 +146,7 @@ final class AgentControls: ObservableObject {
 
     /// One line in `~/.claude/notch/notch.log`: what was asked, never a note's text.
     private static func log(_ line: String) {
-        let url = NotchPaths.sessions.deletingLastPathComponent().appendingPathComponent("notch.log")
-        let entry = Data("\(ISO8601DateFormatter().string(from: Date())) \(line)\n".utf8)
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(entry)
-            try? handle.close()
-        } else {
-            try? entry.write(to: url)
-        }
+        NotchLog.append(line)
     }
 
     private func update(_ session: SessionState, _ change: (inout SessionControl) -> Void) {

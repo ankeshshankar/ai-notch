@@ -73,41 +73,53 @@ final class ChatTitles: @unchecked Sendable {
 
     private static let markers = [Data(#""type":"custom-title""#.utf8), Data(#""type":"ai-title""#.utf8)]
 
-    /// Reads complete lines past `scan.offset`, 8 MB at a time, and keeps the last title of each kind.
+    /// How much is read at a time. A first read of a 300 MB transcript at 8 MB a chunk, with no
+    /// pool to drain between chunks, held every chunk until the whole job ended: a peak near
+    /// 900 MB for six sessions. 1 MB a chunk and a pool each keep it at about 2 MB.
+    static let chunkSize = 1 << 20
+
+    /// Reads complete lines past `scan.offset`, a chunk at a time, and keeps the last title of each kind.
     private static func read(_ path: String, into scan: inout Scan) {
         guard let handle = FileHandle(forReadingAtPath: path) else { return }
         defer { try? handle.close() }
-        while true {
-            guard (try? handle.seek(toOffset: scan.offset)) != nil,
-                  let chunk = try? handle.read(upToCount: 8 << 20), !chunk.isEmpty else { return }
-            // Only whole lines: a line still being written is read next time.
-            guard let lastNewline = chunk.lastIndex(of: 0x0A) else {
-                // A single line longer than the chunk (a huge tool result) holds no title: skip it.
-                if chunk.count == 8 << 20 { scan.offset += UInt64(chunk.count); continue }
-                return
+        var finished = false
+        while !finished {
+            autoreleasepool {
+                guard (try? handle.seek(toOffset: scan.offset)) != nil,
+                      let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty else { finished = true; return }
+                // Only whole lines: a line still being written is read next time.
+                guard let lastNewline = chunk.lastIndex(of: 0x0A) else {
+                    // A single line longer than the chunk (a huge tool result) holds no title: skip it.
+                    if chunk.count == chunkSize { scan.offset += UInt64(chunk.count) } else { finished = true }
+                    return
+                }
+                take(chunk[chunk.startIndex...lastNewline], into: &scan)
+                scan.offset += UInt64(lastNewline - chunk.startIndex + 1)
             }
-            let lines = chunk[chunk.startIndex...lastNewline]
-            for marker in markers {
-                var from = lines.startIndex
-                while let hit = lines.range(of: marker, in: from..<lines.endIndex) {
-                    let start = lines[..<hit.lowerBound].lastIndex(of: 0x0A).map { $0 + 1 } ?? lines.startIndex
-                    let end = lines[hit.upperBound...].firstIndex(of: 0x0A) ?? lines.endIndex
-                    from = end
-                    // The marker inside a message's text is escaped (\"type\"), so a hit is a title line;
-                    // parsing it says so for sure. Each kind is searched in file order: its last one wins.
-                    guard let entry = (try? JSONSerialization.jsonObject(with: lines[start..<end])) as? [String: Any] else { continue }
-                    switch entry["type"] as? String {
-                    case "custom-title":
-                        let title = (entry["customTitle"] as? String).map(clean)
-                        scan.custom = title?.isEmpty == false ? title : nil
-                    case "ai-title":
-                        if let title = (entry["aiTitle"] as? String).map(clean), !title.isEmpty { scan.ai = title }
-                    default:
-                        break
-                    }
+        }
+    }
+
+    /// The titles among whole lines.
+    private static func take(_ lines: Data.SubSequence, into scan: inout Scan) {
+        for marker in markers {
+            var from = lines.startIndex
+            while let hit = lines.range(of: marker, in: from..<lines.endIndex) {
+                let start = lines[..<hit.lowerBound].lastIndex(of: 0x0A).map { $0 + 1 } ?? lines.startIndex
+                let end = lines[hit.upperBound...].firstIndex(of: 0x0A) ?? lines.endIndex
+                from = end
+                // The marker inside a message's text is escaped (\"type\"), so a hit is a title line;
+                // parsing it says so for sure. Each kind is searched in file order: its last one wins.
+                guard let entry = (try? JSONSerialization.jsonObject(with: lines[start..<end])) as? [String: Any] else { continue }
+                switch entry["type"] as? String {
+                case "custom-title":
+                    let title = (entry["customTitle"] as? String).map(clean)
+                    scan.custom = title?.isEmpty == false ? title : nil
+                case "ai-title":
+                    if let title = (entry["aiTitle"] as? String).map(clean), !title.isEmpty { scan.ai = title }
+                default:
+                    break
                 }
             }
-            scan.offset += UInt64(lastNewline - chunk.startIndex + 1)
         }
     }
 

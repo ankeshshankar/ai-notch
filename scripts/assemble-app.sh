@@ -40,6 +40,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/AINotch" "$BIN/ai-notch-hook" "$APP/Contents/MacOS/"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# The event sounds (Material Design sound resources, CC BY 4.0; scripts/dev/fetch-sounds.sh makes them).
+mkdir -p "$APP/Contents/Resources/Sounds"
+cp "$ROOT"/Resources/Sounds/*.m4a "$ROOT/Resources/Sounds/LICENSE-SOUNDS.txt" "$APP/Contents/Resources/Sounds/"
 
 # The VPN: its helper with OpenVPN and OpenVPN's DNS script, when scripts/build-openvpn.sh has
 # built them into .build/openvpn. Without them the app has no VPN (Setup says so).

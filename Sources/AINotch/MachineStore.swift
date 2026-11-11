@@ -204,6 +204,7 @@ final class MachineStore: ObservableObject {
             notifyArmed = false
             noteBuildLog("machine: memory critical for 30 s")
             if notifyCritical {
+                SoundPlayer.shared.play(.trouble)
                 let biggest = next.rows.max { $0.footprintMB < $1.footprintMB }
                 let free = Self.gigabytes(tenths: memory.availableTenths) + " free"
                 Notifier.shared.postMachine(title: "Memory critical",

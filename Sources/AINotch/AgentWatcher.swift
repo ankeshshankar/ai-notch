@@ -88,7 +88,7 @@ final class AgentWatcher: @unchecked Sendable {
         // A failed read of the process list says nothing about the agents: keep the rows as they
         // were, but only for a few scans, so a list that stays unreadable cannot leave a stale
         // "working" row behind.
-        guard let table = ProcessList.table() else {
+        guard let table = ProcessList.sharedTable(maxAge: 2.5) else {
             failedReads += 1
             if failedReads == Self.failedReadsBeforeClear {
                 misses = [:]

@@ -43,6 +43,29 @@ enum ProcessList {
         return entries
     }
 
+    private static let snapshotLock = NSLock()
+    nonisolated(unsafe) private static var snapshot: (at: Double, table: [ProcEntry])?
+    nonisolated(unsafe) private static var snapshotReads = 0
+
+    /// How many full reads of the process table `sharedTable` has made (for the self-check).
+    static var sharedReads: Int { snapshotLock.lock(); defer { snapshotLock.unlock() }; return snapshotReads }
+
+    /// The process table, shared: a read made less than `maxAge` seconds ago by any caller (the
+    /// agent watcher, Commands, Machine) is handed out again instead of reading the table once
+    /// more. `read` is the reader, replaceable for the self-check.
+    static func sharedTable(maxAge: Double, now: Double = Date().timeIntervalSince1970, read: () -> [ProcEntry]? = { table() }) -> [ProcEntry]? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        if let snapshot, now - snapshot.at < maxAge, now >= snapshot.at { return snapshot.table }
+        guard let fresh = read() else { return nil }
+        snapshot = (now, fresh)
+        snapshotReads += 1
+        return fresh
+    }
+
+    /// Forgets the shared read (the self-check).
+    static func resetShared() { snapshotLock.lock(); snapshot = nil; snapshotReads = 0; snapshotLock.unlock() }
+
     /// One process now, or nil once it has exited (or is a zombie). Also the re-check before a signal.
     static func entry(_ pid: pid_t) -> ProcEntry? {
         var info = proc_bsdinfo()

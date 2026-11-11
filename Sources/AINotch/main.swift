@@ -23,6 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isPreviewRun, let i = args.firstIndex(of: "--theme"), i + 1 < args.count {
             NSApp.appearance = NSAppearance(named: args[i + 1] == "light" ? .aqua : .darkAqua)
         }
+        // A preview never asks the real helper: it shows a fixed lid-awake state (`--lid-fixture`).
+        if isPreviewRun {
+            let i = args.firstIndex(of: "--lid-fixture")
+            LidAwake.shared.applyFixture(i.flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? "off")
+        }
         let setup = SetupWindowController.shared
         // `--setup-preview`: the setup window alone (no notch, no socket), for screenshots; with
         // CLAUDE_NOTCH_SETUP_HOME it reads and writes a copy of a home folder.
@@ -30,11 +35,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setup.quitsOnClose = true
             // `--focus prod|vpn`: opened at a section, as the grey Prod chip's click does.
             let focus = args.firstIndex(of: "--focus").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
-            setup.show(focus: focus == "prod" ? .prod : focus == "vpn" ? .vpn : nil)
+            setup.show(focus: focus == "prod" ? .prod : focus == "vpn" ? .vpn : focus == "sounds" ? .sounds : nil)
             // Its number and frame once SwiftUI has laid it out, for `screencapture -l` and clicks.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 guard let info = setup.windowInfo else { return }
                 FileHandle.standardError.write(Data("setup-window \(info.number) \(Int(info.frame.minX)) \(Int(info.frame.minY)) \(Int(info.frame.width)) \(Int(info.frame.height))\n".utf8))
+            }
+            // `--cycle`: closes it after 15 s and opens it again after 30 s (the window and its tree go
+            // when it closes), for a memory check.
+            if args.contains("--cycle") {
+                setup.quitsOnClose = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { setup.closeForCheck() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 30) { setup.show() }
             }
             return
         }
@@ -46,6 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         prod.start()
         machine.start()
         vpn.start()
+        LidAwake.shared.env.helper = { [weak vpn] in MainActor.assumeIsolated { vpn?.leaseHelper ?? .missing } }
+        LidAwake.shared.env.buildsActive = { [weak builds] in MainActor.assumeIsolated { builds?.hasActive ?? false } }
         CommandsStore.shared.start()
         // Pull requests: notified through Notifier (locked screen only), a failed build Pipelines
         // already announced left out, and read less often while one of my pipelines runs.
@@ -108,7 +122,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Hooks still waiting see the socket close and leave the prompt to the editor.
         store.approvals.stop()
+        store.flushUsage()
         KeepAwake.shared.stop()
+        LidAwake.shared.stop()
     }
 
     /// A widget row's link.
@@ -146,6 +162,27 @@ DatadogAuthDev.runIfAsked(CommandLine.arguments)
 
 // Dev check of Prod's alerts (snapshot diffing, grouping, flapping), never the app: `--prod-alerts-selfcheck`.
 ProdAlertsCheck.runIfAsked(CommandLine.arguments)
+
+// Dev check of the collapsed strip's dots, words, widths, pet and calm gating, never the app: `--strip-selfcheck`.
+CollapsedStripSelfCheck.runIfAsked(CommandLine.arguments)
+
+// Dev check of the per-session row features (context, failure, git, CI), never the app: `--session-selfcheck`.
+SessionFeaturesSelfCheck.runIfAsked(CommandLine.arguments)
+
+// Dev check of the link rule (schemes, hosts, encoded ids), never the app: `--link-selfcheck`.
+SafeLink.runIfAsked(CommandLine.arguments)
+
+// Dev check of which two status chips show, never the app: `--chips-selfcheck`.
+ChipPicker.runIfAsked(CommandLine.arguments)
+
+// Dev check that a preview never reaches the Keychain, never the app: `--keychain-selfcheck`.
+KeychainGuard.runIfAsked(CommandLine.arguments)
+
+// Dev check of the event sounds (files, collision rule, switches, first sight), never the app: `--sound-selfcheck`.
+SoundSelfCheck.runIfAsked(CommandLine.arguments)
+
+// Dev check of the speed work (shared process table, ledger write gap, log rotation), never the app: `--perf-selfcheck`.
+PerfSelfCheck.runIfAsked(CommandLine.arguments)
 
 // Dev check of Prod's deploy checks, new errors, deploys list, Watchdog and budget, never the app: `--deploy-check-selfcheck`.
 DeployCheckSelfCheck.runIfAsked(CommandLine.arguments)

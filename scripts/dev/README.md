@@ -55,6 +55,14 @@
   `CLAUDE_NOTCH_BITBUCKET_TEST_TOKEN=<state.token>` and `CLAUDE_NOTCH_BUILDS_CONFIG=<a builds.json
   listing the stub's repositories>`. Against a stub the muted and seen lists use keys of their
   own (`prs.muted.stub`, `prs.seenNews.stub`).
+- `AINotch --chips-selfcheck` — the footer's chip choice (at most two, by severity; calm = Prod + limit; snoozed Prod; unconfigured sources; the "+n" text).
+- `AINotch --keychain-selfcheck` — the preview keychain guard: a `--preview` run never reads or writes the keychain unless `CLAUDE_NOTCH_ALLOW_KEYCHAIN=1`.
+- `AINotch --preview --panel <Usage|Code|Board|PRs|Prod|Commands|Machine|VPN>` opens a panel for a look.
+- `AINotch --perf-selfcheck` — the speed work: the shared process table, the usage ledger's write gap, `notch.log` rotation (1 MB, one previous file `notch.log.1`).
+- `CLAUDE_NOTCH_LATENCY_LOG=1` (stderr line per change of the session list, in ms) and `CLAUDE_NOTCH_POLL_ONLY=1` (no folder watch, 0.5 s tick: the old behaviour) time a hook event against the list; see `--preview` with `CLAUDE_NOTCH_SESSIONS`.
+- `AINotch --strip-selfcheck` — the collapsed strip's pure parts: dots (order, cap, states), wing
+  words and widths, the pet pose, effect gating with Reduce Motion, and that a clock tick changes
+  nothing.
 - `AINotch --awake-selfcheck` — when the Mac is kept awake (grace, battery, setting) on made-up
   inputs, then a real power assertion made, found in the system's list by name and released
   (also with the setting turned off mid-grace), and the zombie check the session grace uses;
@@ -183,3 +191,10 @@
   (above all the profiles it must refuse) and the management-interface parser on fixed cases.
 - [`vpnctl.py`](vpnctl.py) — talks to the installed VPN helper as the app does (`status`, `import`,
   `connect`, `answer`, `disconnect`, `log`), for driving a connection without the notch.
+
+## Sounds and memory
+
+- `AINotch --sound-selfcheck` — the event sounds with a fake player: files decode, distinct events, priorities and the 1.5 s collision rule, switches, volume, no sound on first sight.
+- `AINotch --setup-preview --focus sounds` — opens Setup at the Sounds block (previews never play audio).
+- `AINotch --setup-preview --cycle` — closes Setup after 15 s and reopens it after 30 s, to check that closing releases its memory.
+- `scripts/dev/fetch-sounds.sh` — downloads, converts and levels the nine sounds into `Resources/Sounds`.

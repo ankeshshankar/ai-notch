@@ -135,6 +135,13 @@ final class VPNStore: ObservableObject {
         return version != VPNBuild.version && Self.hasBundledEngine
     }
 
+    /// For the lid-awake lease: the helper answers and speaks the lease protocol, is missing, or is
+    /// an older one (the Update button in Setup).
+    var leaseHelper: LidAwakePlan.Helper {
+        guard helper == .running, let status else { return .missing }
+        return (status.leaseProtocol ?? 0) >= SleepLeaseBuild.proto ? .ok : .old
+    }
+
     enum Level { case off, busy, connected, problem }
 
     var level: Level {
@@ -198,6 +205,7 @@ final class VPNStore: ObservableObject {
                 if isOn, !panelOpen { unseenDrop = true }
                 noteBuildLog("vpn: connection dropped")
                 if notifyDrop {
+                    SoundPlayer.shared.play(.trouble)
                     Notifier.shared.postVPN(title: "VPN disconnected", subtitle: profile(end.profileId)?.name ?? "VPN",
                                             body: end.reason ?? "The connection ended. Open shows the VPN panel.")
                 }
@@ -226,8 +234,7 @@ final class VPNStore: ObservableObject {
         let profileId = session.profileId
         switch prompt.kind {
         case .webAuth:
-            if let text = prompt.url, let url = URL(string: text), ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
-                NSWorkspace.shared.open(url)
+            if let text = prompt.url, SafeLink.open(URL(string: text), for: .vpnSignIn) {
                 show(note: "Sign-in page opened in your browser")
             }
         case .password where prompt.text == nil && prompt.failure == nil && !autoAnswered.contains(profileId):
@@ -451,15 +458,15 @@ enum VPNClient {
 
     private static let queue = DispatchQueue(label: "info.ankeshshiv.notch.vpn-client")
 
-    static func send(_ request: VPNRequest, timeout: Int = 3) async -> Outcome {
+    static func send(_ request: VPNRequest, socket: String = VPNPaths.controlSocket, timeout: Int = 3) async -> Outcome {
         await withCheckedContinuation { continuation in
-            queue.async { continuation.resume(returning: exchange(request, timeout: timeout)) }
+            queue.async { continuation.resume(returning: exchange(request, socket: socket, timeout: timeout)) }
         }
     }
 
-    private static func exchange(_ request: VPNRequest, timeout: Int) -> Outcome {
+    private static func exchange(_ request: VPNRequest, socket: String, timeout: Int) -> Outcome {
         do {
-            let data = try UnixSocket.exchange(VPNPaths.controlSocket, VPNWire.encode(request), timeout: timeout)
+            let data = try UnixSocket.exchange(socket, VPNWire.encode(request), timeout: timeout)
             guard let reply = VPNWire.decode(VPNReply.self, data) else { return .failed("The VPN helper's answer could not be read") }
             return .reply(reply)
         } catch let failure as UnixSocket.Failure {

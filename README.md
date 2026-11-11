@@ -19,7 +19,13 @@ single-choice questions from the notch.
 - Optionally, a Pipelines section shows your EAS builds and Bitbucket Pipelines runs as they
   queue, run, wait and finish (see [Builds and pipelines](#builds-and-pipelines)).
 - With Bitbucket set up, your open pull requests and the ones waiting for your review: the ones
-  that need you inline, all of them in a **PRs** panel (see [Pull requests](#pull-requests)).
+  that need you, all in one **Pull requests** section (see [Pull requests](#pull-requests)). A
+  session row links to its PR in that section.
+- The footer shows **at most two chips**: alerts first (prod alert or incident, VPN dropped, memory
+  critical, limit at 90% or more), then warnings, then news (PR updates); a calm panel shows Prod
+  and the weekly limit. More than two non-OK adds "+n" and a "..." menu naming and opening the
+  hidden ones; every chip's detail also lives in its own section (Prod, Usage, Machine, VPN,
+  Commands, Pull requests). The rule is `ChipPicker`, checked by `--chips-selfcheck`.
 - The pin in the header keeps the notch open (see [Pinned open](#pinned-open)).
 - Optionally, a **Prod** chip in the footer shows your Datadog monitors and incidents (see
   [Prod health](#prod-health-datadog)).
@@ -88,7 +94,7 @@ checks that macOS lets the helper run (`ai-notch-hook --probe`, which exits at o
 nothing; no answer within 3 seconds counts as blocked). While it is blocked, Set Up connects
 nothing and shows the command above. Then it:
 
-- adds the hook to 13 Claude Code events in `~/.claude/settings.json` (the permission event waits
+- adds the hook to 16 Claude Code events in `~/.claude/settings.json` (the permission event waits
   up to 1800 s for a click in the notch) and wraps your status line as
   `ai-notch-hook statusline '<your command>'`, which prints exactly what your command prints;
 - adds the hook to 8 events of Cursor's own agent in `~/.cursor/hooks.json`, when `~/.cursor`
@@ -148,6 +154,10 @@ The `PermissionRequest` hook records the prompt, releases the session's lock and
 `~/.claude/notch/approvals.sock` (mode 0600; both ends check the other runs as you), then waits.
 Only a click prints an answer. No app, no socket, the app quitting, the editor answering first, or
 the timeout: it exits with no output and Claude Code asks as usual.
+
+A headless run can opt out: with `AI_NOTCH_NO_APPROVALS=1` in its environment the `PermissionRequest` hook
+records nothing, never touches the socket and exits at once, so Claude Code's own handling (for example
+`--permission-prompts none`) decides. Other events of that session are tracked as usual.
 
 - There is no "always allow". **Allow for session** appears only when Claude Code itself suggests
   rules for the prompt and none of your `permissions.ask` rules covers it; the rules are rewritten
@@ -296,6 +306,38 @@ stays warm.
 `postToolUseFailure`, `afterMCPExecution`, `subagentStop` and `stop`. Cursor's permission hooks
 are left alone, because an answer there can block or allow an action. So Cursor rows show the last
 finished tool rather than the one in flight, subagents once they stop, and no approval waits.
+
+### What a Claude Code row shows
+
+Beside the phase (working, waiting, idle) a row can be **failed** or **compacting**:
+
+- **Failed**: `StopFailure` (a turn that ended on an API error) marks the session failed, with the
+  reason in plain words (Rate limited, Overloaded, Sign-in failed, Billing problem, Server error,
+  Output limit hit, else Failed). The dot is red, the row red, and the strip's word ranks just
+  below "waiting". The next prompt, a session start or the session ending clears it. A failed tool
+  call (`PostToolUseFailure`) is not a failed session. A notification (Setup: Failed turns, on by
+  default) while the screen is locked.
+- **Compacting**: `PreCompact` shows "Compacting context..." until `PostCompact` (or the next stop);
+  the context number is then ignored until a reply newer than the compaction.
+- **Context**: the main transcript's last reply (input + cache creation + cache read tokens; subagent
+  files ignored), read from the same 64 KB tail as the interrupt check, shown as a small bar and
+  percent (amber from 80% of the compaction point, red from 92%) and in Details. The window is 200K,
+  or 1M for Fable, Sonnet 5 and later, Haiku 5.5 and later, Opus 4.7 and later, `[1m]` models and
+  any session seen over 200K; compaction starts at about 967K on 1M. The hook records
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and
+  `CLAUDE_CODE_DISABLE_1M_CONTEXT` from Claude Code's environment; `autoCompactWindow` in
+  settings.json is not read. One notification per crossing of the red level (Setup: Context
+  alerts, on by default). Not shown for Cursor or Codex, nor in compact-rows mode.
+- **Git**: branch, uncommitted files (`●3`), unpushed commits (`↑2`) and "no upstream", from one
+  `git status --porcelain=v2 --branch` per folder every 30 s (off the main thread, 3 s limit);
+  asked for every session folder, whether or not pull-request linking is on.
+- **CI**: the newest run on the session's branch (Pipelines: its repo and branch or commit; EAS:
+  its HEAD commit), matched from what Pipelines and EAS already fetched, as one mark (running,
+  passed, failed). A click opens it (`SafeLink`); Details names it and its age.
+
+Dev checks: `AINotch --session-selfcheck [transcript]` (context, failure reasons, git parse, CI
+match; with a transcript path it also prints that file's context numbers only) and
+`python3 scripts/dev/test-session-hook.py` (the new hook events through the built hook into a temp folder).
 
 ### Other agents
 
@@ -488,6 +530,9 @@ other. Nothing is read until you set it up; until then the section stays hidden.
 
 ### Pull requests
 
+One list: the Pull requests section (opened from the PRs chip or the header menu) and the Board. The
+former header summary, collapsed block and per-header views are gone.
+
 With a `bitbucket` part in `builds.json` (and `pullRequests` not `false`), the notch reads your
 open pull requests and the ones you are a reviewer on, in the same repositories as Pipelines and
 with the same token. Nothing is approved, merged or commented from the notch.
@@ -585,13 +630,37 @@ side by side.
 
 ### The collapsed notch
 
-The right wing shows one thing, the first that applies: a session waiting on you (amber dot and
-count), memory critical (a still amber memory chip), a turn that just finished (✓), a prod alert
-you have not seen (⚠), a pipeline failure of yours you have not seen (✕), news on your pull
-requests you have not seen (the pull-request mark and a count), running subagents, then running
-pipeline runs (hammer). "Not seen" ends when you move over the open notch. While a monitor
-alerts or an incident is open, a still red dot sits in the strip's top right corner; else, while
-memory is low, an amber one.
+The left wing shows a pet (an original pixel sprite) and one dot per agent session, in a stable
+order (oldest first), at most 5 and then "+n" (fewer dots when the wing would pass 120 pt).
+Dot colours: orange working, amber waiting, green done in the last 30 s, red a failed subagent,
+a hollow ring idle. Running pipeline runs show as a hammer and a count after the dots.
+
+The pet follows the strongest state: waving (waiting on you), alarmed (a failure, a prod alert,
+a failed build), a short celebrate (done, build passed), focused (working), asleep (idle). It is
+off with Setup → Effects → **Pet**.
+
+The right wing shows one thing, the first that applies, as an icon and a few words: a session
+waiting on you ("2 waiting"), memory critical ("Memory high"), a dropped VPN ("VPN dropped"), a
+turn that just finished ("Done"), a prod alert ("Prod alert") or a deploy that looks worse
+("Deploy worse"), the machine watchdog ("Watchdog"), a pipeline failure ("Build failed"), news on
+your pull requests ("3 PR updates"), then running subagents and pipeline runs (icon and
+number). "Not seen" ends when you move over the open notch. After the words come a prod dot
+(green, amber, red; hidden when Prod is not set up, off or snoozed) and a thin ring for the
+weekly usage limit (calm, amber from 70%, red from 90%). While a monitor alerts or an incident is
+open, a still red dot sits in the strip's top right corner; else, while memory is low, an amber
+one.
+
+Both wings have the same width (the wider of the two, 40 to 120 pt, animated once when it
+changes), so the hardware notch stays centred; a long phrase falls back to a shorter one, then
+is cut. The strip also shows with no session when the prod dot or the weekly ring is available.
+Each wing has one VoiceOver label that says what it shows. The strip is recomputed only when
+something it shows changes, not on the one-second tick.
+
+**Calm until needed** (Setup → Effects, off by default; with it off the pet and the working or waiting dots keep moving on Core Animation layers, `StripMotion.swift`, removed while the screen is locked, the display sleeps or the strip is not visible): dots and pet stand still while idle or
+working; motion is a single move on a state change, or a gentle repeating cue while something
+needs you (the amber or red edge glow, the pet's wave). The edge effect rests (neon and lights
+as a dimmed still picture, scanner and aurora hidden) unless something needs you. Reduce Motion
+stops every cue.
 
 ### Prod health (Datadog)
 
@@ -965,6 +1034,35 @@ into thin see-through fills on it, and the hover cards and the Prod banner sit o
 sheet so the rows under them do not show through. Collapsed, the notch looks as it always does.
 Reduce Transparency keeps the solid look; Increase Contrast strengthens the fills, edges and shade.
 
+### Sounds
+
+One short, soft sound per event, so each can be told by ear. They replace the system's Ping and
+Glass, and while **Sounds** is on the notifications themselves are silent (the app plays the sound).
+Set in Setup → Sounds: a master switch, a volume (default 0.6), and a switch plus a ▶ play button per
+event. Prefs: `effects.sounds` (master, on), `sound.volume`, `sound.<event>` (each, on).
+
+| Event | File | Length |
+| --- | --- | --- |
+| Agent needs you | notification_simple-01 | 0.82 s |
+| Agent finished (turn of 20 s or more) | state-change_confirm-up | 0.73 s |
+| Turn failed | alert_error-01 | 0.95 s |
+| Context almost full | alert_simple | 0.58 s |
+| Production alert, worse deploy | alert_high-intensity | 1.90 s |
+| Build failed | alert_error-03 | 0.95 s |
+| Build passed | hero_simple-celebration-02 | 1.62 s |
+| Pull request news | notification_decorative-02 | 1.78 s |
+| VPN dropped, memory critical | notification_high-intensity | 1.29 s |
+
+A sound plays once per transition, never on first sight of a session or at launch, and not for
+`watch-` sessions. Two events within 1.5 s: the higher priority wins (prod alert, needs input,
+failed, VPN or memory, build failed, context, PR news, build passed, finished). A sound is loaded
+when it plays and released when it ends; nothing runs while silent.
+
+The files are mono AAC, levelled to about -20 LUFS with a true peak under -3 dB and short fades,
+bundled in `Contents/Resources/Sounds` by `scripts/assemble-app.sh`. `scripts/dev/fetch-sounds.sh`
+re-creates them (download, convert, level) and the licence note `Resources/Sounds/LICENSE-SOUNDS.txt`.
+Sounds: Material Design sound resources by Google, CC BY 4.0 (levels adjusted).
+
 ### Keeping the Mac awake
 
 While any session works (hooked or found as a process), AI Notch holds a power assertion that
@@ -977,7 +1075,39 @@ released when the setting is turned off and when the app quits. `pmset -g assert
 - **Keep the Mac awake while an agent works** (on by default).
 - **Also on battery** (on by default): on battery it lets go below 20% charge.
 
-A closed lid is out of reach: macOS sleeps the Mac then unless an external display is attached.
+A power assertion cannot hold the Mac awake with the lid closed (macOS sleeps then unless an
+external display is attached). That is a separate switch:
+
+#### Stay awake, lid closed
+
+**Stay awake, lid closed** (Setup → Effects, and the Machine panel; off by default) keeps an
+Apple-silicon MacBook awake with the lid shut while any session works or a build/pipeline runs,
+and for the same 2 minutes after. Only the system's SleepDisabled flag does that
+(`pmset -a disablesleep 1`, root), so the switch asks AI Notch's helper (`ai-notch-vpnd`, the VPN's
+root helper, helper version 2) for a **sleep-disable lease**:
+
+- Two requests only, `sleep-lease` and `sleep-release`, no arguments. The helper runs exactly
+  `/usr/bin/pmset -a disablesleep 1` or `... 0` by absolute path, no shell, nothing from the
+  request. Same caller check as the VPN (the installing user, or root).
+- The lease lasts 90 s; the app renews it every 30 s while the plan says hold. It ends on release,
+  on expiry (app quit, killed or asleep), when the helper starts or stops, and on uninstall, so the
+  flag never outlives the app by more than 90 s.
+- The helper clears only what it set (a marker in its root-owned folder). A flag already on when
+  the helper first sees it (set by hand) is left alone: the panel says "Sleep is already disabled
+  by something else".
+- Held only on AC, or on battery above 20% (it stops at 20% and returns above 25%), and only while
+  the Mac's thermal state is below serious (it returns after a minute at a lower one).
+- With the lid shut and no external display, AI Notch puts the display to sleep once per close
+  (`pmset displaysleepnow`) so the panel is not left lit under the lid.
+- An older helper (version 1) shows "Helper update needed" with the usual Update… button, which
+  asks for the password only when clicked. The collapsed strip gets no chip; the wing's spoken
+  label says "Staying awake with the lid closed".
+
+**Heat: a Mac working with the lid shut has nowhere to put the heat. Do not carry it in a bag
+while this is active.** Dev check: `AINotch --awake-selfcheck` (plan, hysteresis and the controller
+against a fake helper on a temp socket), `ai-notch-vpnd selfcheck` (the lease on a fake pmset), and
+`AINotch --preview --panel Machine --lid-fixture active|armed|battery|hot|helper-missing|helper-old`
+(`--lid-on` for the switch on) for screenshots; a preview never contacts the helper.
 
 ### Light and dark
 

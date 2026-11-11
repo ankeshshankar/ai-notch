@@ -16,6 +16,10 @@ public struct VPNRequest: Codable, Sendable {
         case answer
         /// The last lines of OpenVPN's log.
         case log
+        /// Acquire or renew the sleep-disable lease (SleepLease.swift). Takes no argument.
+        case sleepLease = "sleep-lease"
+        /// Let the lease go. Takes no argument.
+        case sleepRelease = "sleep-release"
     }
 
     public var op: Op
@@ -48,9 +52,12 @@ public struct VPNReply: Codable, Sendable {
     public var profile: VPNProfileInfo?
     public var dropped: [String]?
     public var log: [String]?
+    /// status, sleep-lease, sleep-release: the lease as the helper holds it.
+    public var sleep: SleepStatus?
 
     public init(ok: Bool, error: String? = nil, status: VPNStatus? = nil, profile: VPNProfileInfo? = nil,
-                dropped: [String]? = nil, log: [String]? = nil) {
+                dropped: [String]? = nil, log: [String]? = nil, sleep: SleepStatus? = nil) {
+        self.sleep = sleep
         self.ok = ok
         self.error = error
         self.status = status
@@ -70,8 +77,12 @@ public struct VPNStatus: Codable, Equatable, Sendable {
     public var session: VPNSession?
     /// How the last session ended, for "dropped" and its reason.
     public var lastEnd: VPNEnd?
+    /// The sleep-lease protocol the helper speaks; absent on a helper from before it existed.
+    public var leaseProtocol: Int?
 
-    public init(version: String, engine: Bool, profiles: [VPNProfileInfo], session: VPNSession?, lastEnd: VPNEnd?) {
+    public init(version: String, engine: Bool, profiles: [VPNProfileInfo], session: VPNSession?, lastEnd: VPNEnd?,
+                leaseProtocol: Int? = nil) {
+        self.leaseProtocol = leaseProtocol
         self.version = version
         self.engine = engine
         self.profiles = profiles

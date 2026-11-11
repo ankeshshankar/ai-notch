@@ -20,10 +20,13 @@ final class LoopLayerView: NSView {
     private let shape = CAShapeLayer()
     private var kind: Kind
     private var color: NSColor
+    /// False under Reduce Motion: the layer holds its still, high-contrast state instead of looping.
+    private var animated: Bool
 
-    init(kind: Kind, color: NSColor) {
+    init(kind: Kind, color: NSColor, animated: Bool = true) {
         self.kind = kind
         self.color = color
+        self.animated = animated
         super.init(frame: .zero)
         wantsLayer = true
         layer?.addSublayer(shape)
@@ -37,12 +40,15 @@ final class LoopLayerView: NSView {
     /// Clicks and hover pass through to the SwiftUI view underneath.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    func update(kind: Kind, color: NSColor) {
+    func update(kind: Kind, color: NSColor, animated: Bool = true) {
         let changed = kind != self.kind
+        let motionChanged = animated != self.animated
         self.kind = kind
         self.color = color
+        self.animated = animated
         applyColor()
         if changed { needsLayout = true }
+        if motionChanged, shape.superlayer != nil, window != nil { startLoop() }
     }
 
     override func layout() {
@@ -54,7 +60,7 @@ final class LoopLayerView: NSView {
         shape.path = path(in: bounds)
         CATransaction.commit()
         applyColor()
-        if shape.animation(forKey: "loop") == nil { startLoop() }
+        if animated, shape.animation(forKey: "loop") == nil { startLoop() }
     }
 
     override func viewDidMoveToWindow() {
@@ -121,6 +127,12 @@ final class LoopLayerView: NSView {
 
     private func startLoop() {
         shape.removeAnimation(forKey: "loop")
+        // Still: the glow and the dot rest at full strength, readable without motion.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.opacity = 1
+        CATransaction.commit()
+        guard animated else { return }
         let animation: CABasicAnimation
         switch kind {
         case .spinner:
@@ -159,8 +171,10 @@ final class LoopLayerView: NSView {
 struct LoopLayer: NSViewRepresentable {
     var kind: LoopLayerView.Kind
     var color: NSColor
+    /// False for a still layer (Reduce Motion).
+    var animated = true
 
-    func makeNSView(context: Context) -> LoopLayerView { LoopLayerView(kind: kind, color: color) }
+    func makeNSView(context: Context) -> LoopLayerView { LoopLayerView(kind: kind, color: color, animated: animated) }
 
-    func updateNSView(_ view: LoopLayerView, context: Context) { view.update(kind: kind, color: color) }
+    func updateNSView(_ view: LoopLayerView, context: Context) { view.update(kind: kind, color: color, animated: animated) }
 }

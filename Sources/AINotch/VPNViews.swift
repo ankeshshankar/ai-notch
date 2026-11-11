@@ -11,15 +11,15 @@ struct VPNChip: View {
     var body: some View {
         let isOpen = controller.openPanel == NotchController.vpnPanel
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+            withAnimation(Motion.slide) {
                 controller.openPanel = isOpen ? nil : NotchController.vpnPanel
             }
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: vpn.level == .connected ? "lock.shield.fill" : "lock.shield")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(isOpen ? Palette.onDone : Self.color(vpn.level))
-                Text(vpn.chipText).font(.system(size: 10, weight: .semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
+                    .font(Typo.caption(.semibold))
+                    .foregroundStyle(isOpen ? Palette.onDone : Self.color(vpn.level)).decorative()
+                Text(vpn.chipText).font(Typo.label(.semibold)).foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
             }
             .lineLimit(1)
             .padding(.horizontal, 7).padding(.vertical, 2)
@@ -28,6 +28,7 @@ struct VPNChip: View {
         }
         .buttonStyle(.plain)
         .fixedSize()
+        .ax("VPN", value: vpn.chipText, selected: isOpen)
     }
 
     static func color(_ level: VPNStore.Level) -> Color {
@@ -53,11 +54,11 @@ struct VPNPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("VPN").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.done)
+                Text("VPN").font(Typo.label(.semibold)).foregroundStyle(Palette.done)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Capsule().fill(Palette.doneHue.opacity(0.16)))
                 if let working = vpn.working {
-                    Text(working).font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                    Text(working).font(Typo.label()).foregroundStyle(Palette.ink3)
                 }
                 Spacer(minLength: 6)
                 if expanded, vpn.helper == .running {
@@ -71,21 +72,22 @@ struct VPNPanel: View {
                     small("Import…") { vpn.importProfile() }
                 }
                 Button {
-                    withAnimation(.easeOut(duration: 0.15)) {
+                    withAnimation(Motion.ease(0.15)) {
                         expanded.toggle()
                         if !expanded { showsLog = false }
                     }
                 } label: {
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.ink3)
+                        .font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3)
                         .frame(width: 18, height: 16).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(expanded ? "Fewer details" : "Details, Import… and the log")
+                .ax(expanded ? "Fewer VPN details" : "More VPN details")
             }
             content
             if let note = vpn.note {
-                Text(note).font(.system(size: 10)).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
+                Text(note).font(Typo.label()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
@@ -95,34 +97,34 @@ struct VPNPanel: View {
     @ViewBuilder private var content: some View {
         switch vpn.helper {
         case .unknown:
-            Text("—").font(.system(size: 12)).foregroundStyle(Palette.ink3)
+            Text("—").font(Typo.subtitle()).foregroundStyle(Palette.ink3)
         case .notInstalled:
             HStack(spacing: 8) {
                 Text("The VPN helper is not installed. Setup installs it with your admin password, once.")
-                    .font(.system(size: 11)).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
+                    .font(Typo.body()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 6)
                 small("Setup…") { SetupWindowController.shared.show(focus: .vpn) }
             }
         case .notRunning:
             Text("The VPN helper does not answer. It restarts by itself; if it stays this way, Setup → VPN can install it again.")
-                .font(.system(size: 11)).foregroundStyle(Palette.waiting).fixedSize(horizontal: false, vertical: true)
+                .font(Typo.body()).foregroundStyle(Palette.waiting).fixedSize(horizontal: false, vertical: true)
         case .running:
             if let error = vpn.helperError {
-                Text(error).font(.system(size: 11)).foregroundStyle(Palette.failed)
+                Text(error).font(Typo.body()).foregroundStyle(Palette.failed)
             }
             if vpn.needsUpdate {
                 HStack(spacing: 8) {
-                    Text("A newer VPN helper comes with this version of AI Notch.").font(.system(size: 11)).foregroundStyle(Palette.waiting)
+                    Text("A newer VPN helper comes with this version of AI Notch.").font(Typo.body()).foregroundStyle(Palette.waiting)
                     Spacer(minLength: 6)
                     small("Update…") { vpn.install() }
                 }
             }
             if vpn.status?.engine == false {
-                Text("OpenVPN is missing beside the helper. Setup → VPN can install it again.").font(.system(size: 11)).foregroundStyle(Palette.failed)
+                Text("OpenVPN is missing beside the helper. Setup → VPN can install it again.").font(Typo.body()).foregroundStyle(Palette.failed)
             }
             if vpn.profiles.isEmpty {
                 HStack(spacing: 8) {
-                    Text("No profiles yet.").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+                    Text("No profiles yet.").font(Typo.body()).foregroundStyle(Palette.ink3)
                     Spacer(minLength: 6)
                     small("Import…") { vpn.importProfile() }
                 }
@@ -133,7 +135,7 @@ struct VPNPanel: View {
             }
             if vpn.session == nil, let end = vpn.status?.lastEnd, !end.byUser, let reason = end.reason {
                 Text("\(vpn.profile(end.profileId)?.name ?? "VPN"): \(reason)")
-                    .font(.system(size: 10)).foregroundStyle(Palette.failed).lineLimit(expanded ? 3 : 1)
+                    .font(Typo.label()).foregroundStyle(Palette.failed).lineLimit(expanded ? 3 : 1)
                     .fixedSize(horizontal: false, vertical: true)
                     .help(reason)
             }
@@ -147,17 +149,17 @@ struct VPNPanel: View {
         let showsDetail = expanded || session?.problem != nil || session?.prompt != nil
         return HStack(spacing: 8) {
             Image(systemName: session?.phase == .connected ? "lock.shield.fill" : "network")
-                .font(.system(size: 11)).frame(width: 14)
+                .font(Typo.body()).frame(width: 14)
                 .foregroundStyle(session.map { $0.phase == .connected ? Palette.done : Palette.waiting } ?? Palette.ink2)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    Text(profile.name).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.9)).lineLimit(1)
+                    Text(profile.name).font(Typo.body(.medium)).foregroundStyle(Palette.ink.opacity(0.9)).lineLimit(1)
                     if !showsDetail, let session {
-                        Text(short(session)).font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3).lineLimit(1)
+                        Text(short(session)).font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink3).lineLimit(1)
                     }
                 }
                 if showsDetail {
-                    Text(detail(profile, session)).font(.system(size: 10).monospacedDigit())
+                    Text(detail(profile, session)).font(Typo.label().monospacedDigit())
                         .foregroundStyle(session?.problem != nil ? Palette.failed : Palette.ink3)
                         .lineLimit(1).truncationMode(.tail)
                 }
@@ -197,8 +199,8 @@ struct VPNPanel: View {
             HStack(spacing: 6) {
                 if let prompt = session.prompt {
                     small(prompt.kind == .webAuth ? "Open page" : "Sign in…") {
-                        if prompt.kind == .webAuth, let text = prompt.url, let url = URL(string: text) {
-                            NSWorkspace.shared.open(url)
+                        if prompt.kind == .webAuth, let text = prompt.url {
+                            SafeLink.open(URL(string: text), for: .vpnSignIn)
                         } else {
                             VPNSignInController.shared.show(prompt: prompt, profile: profile, store: vpn)
                         }
@@ -218,7 +220,7 @@ struct VPNPanel: View {
     private var logView: some View {
         ScrollView(.vertical) {
             Text(vpn.log.suffix(40).joined(separator: "\n"))
-                .font(.system(size: 9).monospaced()).foregroundStyle(Palette.ink2)
+                .font(Typo.caption().monospaced()).foregroundStyle(Palette.ink2)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
@@ -229,7 +231,7 @@ struct VPNPanel: View {
 
     private func small(_ title: String, urgent: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(.system(size: 10, weight: .medium))
+            Text(title).font(Typo.label(.medium))
                 .foregroundStyle(urgent ? Palette.failed : Palette.ink2)
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(Capsule().fill(urgent ? Palette.failedHue.opacity(0.16) : Palette.chip))

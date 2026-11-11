@@ -10,12 +10,13 @@ public enum VPNPaths {
     public static let installDir = "/Library/PrivilegedHelperTools/\(label)"
     public static let helper = "\(installDir)/ai-notch-vpnd"
     public static let openvpn = "\(installDir)/openvpn"
-    public static let dnsScript = "\(installDir)/dns-updown"
     public static let plist = "/Library/LaunchDaemons/\(label).plist"
     /// The imported profiles (checked, then written by the helper) and their index.
     public static let dataDir = "/Library/Application Support/\(label)"
     public static let profilesDir = "\(dataDir)/profiles"
     public static let index = "\(dataDir)/profiles.json"
+    /// Present while the helper itself holds the SleepDisabled flag (SleepLease.swift).
+    public static let sleepMarker = "\(dataDir)/sleep-lease.marker"
     /// The helper's and OpenVPN's output.
     public static let log = "/Library/Logs/\(label).log"
     /// The app's requests: anyone may connect, the helper answers only the user it was installed for.
@@ -34,7 +35,8 @@ public enum VPNPaths {
 /// The helper's version. The app compares the installed helper's with the one it carries and
 /// offers an update when they differ.
 public enum VPNBuild {
-    public static let version = "1"
+    /// "2": the sleep-disable lease.
+    public static let version = "2"
     /// The OpenVPN release scripts/build-openvpn.sh builds.
     public static let openvpnVersion = "2.7.8"
 }

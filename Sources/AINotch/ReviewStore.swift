@@ -59,11 +59,6 @@ final class ReviewStore: ObservableObject {
     /// (not at once, so a row does not vanish under the pointer).
     private var shownWhileLooking: [String: PullRequest] = [:]
 
-    var needsCount: Int { attention.count }
-    /// The section has rows to show inline (two columns: the right one).
-    var showsBlock: Bool { isOn && !attention.isEmpty }
-    /// Something to say at all: pull requests, or a reason there are none.
-    var hasAnything: Bool { isOn && (!mine.isEmpty || !toReview.isEmpty || status != nil) }
     /// Not readable now for a setup reason (no read:pullrequest, no token): quiet, grey.
     var isQuietSetup: Bool { status?.isSetup == true }
 
@@ -128,6 +123,16 @@ final class ReviewStore: ObservableObject {
     }
 
     func start() {
+        // `--preview --board-fixtures`: sample pull requests, no source (dev only).
+        if BoardFixtures.isOn, CommandLine.arguments.contains("--preview") {
+            isOn = true
+            mine = BoardFixtures.mine
+            toReview = BoardFixtures.toReview
+            all = mine + toReview
+            refreshAttention()
+            updatedAt = Date().timeIntervalSince1970
+            return
+        }
         startConfigured()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -321,9 +326,12 @@ final class ReviewStore: ObservableObject {
     /// The notification step (`onEvents`): each event of a pull request that is not muted and
     /// whose kind is ticked in Setup, only while the screen is locked (Notifier decides that).
     func post(_ events: [PREvent]) {
+        var told = false
         for event in events where !muted.contains(event.pr.key) && notify.allows(event.kind) {
             Notifier.shared.postPullRequest(event)
+            told = true
         }
+        if told { SoundPlayer.shared.play(.prNews) }
     }
 
     // MARK: Pure parts

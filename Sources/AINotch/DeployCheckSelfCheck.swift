@@ -227,6 +227,21 @@ enum DeployCheckSelfCheck {
                "one events request for both")
         expect(Watchdog.storyURL(site: "us5.datadoghq.com", id: "abc")?.absoluteString == "https://us5.datadoghq.com/watchdog/story/abc"
                && Watchdog.storyURL(site: "datadoghq.com", id: "abc")?.host == "app.datadoghq.com", "story links are on the org's own site")
+        // The story id is Datadog's story key, not the event id; each re-emitted event is the same story.
+        let key = "0a1b2c3d-4e5f-5a6b-8c7d-9e0f1a2b3c4d"
+        let storyLink = "[View Watchdog Story](/watchdog/story/\(key))"
+        let storyTags = ["source:watchdog", "env:production", "service:billing-cron", "story_status:ongoing", "story_category:third_party"]
+        let keyed = ["data": [
+            event("AwAAAaSampleEvent0001A", "2026-11-10T12:50:59.000Z", "Third party slowdown", storyTags + ["story_key:\(key)"], message: storyLink),
+            event("AwAAAaSampleEvent0001B", "2026-11-10T12:46:43.000Z", "Third party slowdown", storyTags + ["story_key:\(key)"], message: storyLink),
+        ]]
+        let viaTag = Watchdog.parse((try? JSONSerialization.data(withJSONObject: keyed)) ?? Data(), hidden: [], now: buildTime("2026-11-10T12:51:00.000Z") ?? 0) ?? []
+        let viaLink = Watchdog.parse((try? JSONSerialization.data(withJSONObject: ["data": [event("AwEvt", "2026-11-10T12:50:59.000Z", "Third party slowdown", storyTags, message: "x\n" + storyLink)]])) ?? Data(),
+                                     hidden: [], now: buildTime("2026-11-10T12:51:00.000Z") ?? 0) ?? []
+        expect(viaTag.count == 1 && viaTag.first?.id == key && viaTag.first?.hasStoryKey == true
+               && Watchdog.storyURL(site: "us5.datadoghq.com", id: viaTag[0].id)?.absoluteString == "https://us5.datadoghq.com/watchdog/story/\(key)", "story id from the story_key tag: \(viaTag.map { $0.id })")
+        expect(viaLink.first?.id == key && viaLink.first?.hasStoryKey == true, "story id from the message storyLink: \(viaLink.map { $0.id })")
+        expect(stories.first?.hasStoryKey == false && stories.first?.id == "w1", "no key: the event id, no story storyLink")
         // The deploys list: events win over the same version in the metrics; the newest first.
         let seriesDeploys = [DeployEntry(version: "ai_gateway_800fbcb", previous: "ai_gateway_5c1d", at: t0 - 1500), DeployEntry(version: "x1", previous: "x0", at: t0 - 90000)]
         let merged = DeployFeed.merge(seriesDeploys, events: deployEvents + [DeployEvent(service: "orders", version: "9", previous: nil, at: t0)], service: "AI-Gateway")
@@ -353,9 +368,9 @@ enum DeployCheckSelfCheck {
         expect(DatadogOAuth.scopes.contains("apm_read") && DatadogOAuth.scopes.contains("events_read") && !old.contains("apm_read"), "the sign-in asks for apm_read and events_read")
 
         // 13. The collapsed strip's chips come after a prod alert and before a build failure.
-        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: true, deployWorse: true, subagents: 0, building: 0) == .deployWorse, "deploy chip before a failed build")
-        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: true, buildFailure: false, deployWorse: true, watchdog: true, subagents: 0, building: 0) == .prodAlert, "a prod alert comes first")
-        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: true, watchdog: true, subagents: 0, building: 0) == .watchdog, "watchdog chip")
+        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: true, deployWorse: true, subagents: 0) == .deployWorse, "deploy chip before a failed build")
+        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: true, buildFailure: false, deployWorse: true, watchdog: true, subagents: 0) == .prodAlert, "a prod alert comes first")
+        expect(WingSlot.pick(waiting: 0, justDone: false, prodAlert: false, buildFailure: true, watchdog: true, subagents: 0) == .watchdog, "watchdog chip")
 
         print("deploy check selfcheck: \(checks - failures)/\(checks) passed")
         return failures == 0 ? 0 : 1

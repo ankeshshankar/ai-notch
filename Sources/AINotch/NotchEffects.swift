@@ -48,10 +48,17 @@ final class EffectsPrefs: ObservableObject {
     @Published var compactRows: Bool { didSet { save(compactRows, "effects.compactRows") } }
     /// The open notch's body as frosted glass instead of solid (the strip on the notch stays black).
     @Published var glass: Bool { didSet { save(glass, "effects.glass") } }
+    /// The collapsed strip is calm until something needs you: the edge effect rests (still or
+    /// hidden, by style) unless a session waits or something failed. Off: the effect loops as before.
+    @Published var calmUntilNeeded: Bool { didSet { save(calmUntilNeeded, "effects.calmUntilNeeded") } }
+    /// The little pet beside the session dots.
+    @Published var petOn: Bool { didSet { save(petOn, "effects.petOn") } }
     /// Hold the Mac awake while an agent works (KeepAwake).
     @Published var keepAwake: Bool { didSet { save(keepAwake, "effects.keepAwake") } }
     /// Keep holding on battery too (it still lets go below 20%).
     @Published var keepAwakeOnBattery: Bool { didSet { save(keepAwakeOnBattery, "effects.keepAwakeOnBattery") } }
+    /// Stay awake with the lid closed while an agent works (LidAwake; needs the root helper).
+    @Published var lidAwake: Bool { didSet { save(lidAwake, "effects.lidAwake"); LidAwake.shared.settingChanged() } }
 
     private init() {
         let defaults = UserDefaults.standard
@@ -62,8 +69,13 @@ final class EffectsPrefs: ObservableObject {
         compactRows = defaults.object(forKey: "effects.compactRows") as? Bool ?? false
         // `--preview --glass` shows it on whatever is saved, for screenshots.
         glass = CommandLine.arguments.contains("--glass") || defaults.object(forKey: "effects.glass") as? Bool ?? false
+        calmUntilNeeded = defaults.object(forKey: "effects.calmUntilNeeded") as? Bool ?? false
+        petOn = defaults.object(forKey: "effects.petOn") as? Bool ?? true
         keepAwake = defaults.object(forKey: "effects.keepAwake") as? Bool ?? true
         keepAwakeOnBattery = defaults.object(forKey: "effects.keepAwakeOnBattery") as? Bool ?? true
+        // `--preview --lid-on` shows the switch on, whatever is saved.
+        lidAwake = (CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview")) && CommandLine.arguments.contains("--lid-on")
+            || defaults.object(forKey: "effects.lidAwake") as? Bool ?? false
     }
 
     private func save(_ value: Any, _ key: String) { UserDefaults.standard.set(value, forKey: key) }
@@ -102,8 +114,8 @@ struct NotchEffects: View {
     @ObservedObject var prefs = EffectsPrefs.shared
     @ObservedObject var pointer: PointerFeed
     var size: CGSize
-    /// The style plays (an agent works, or the user wants it always).
-    var playing: Bool
+    /// What the style does now: hidden, resting (still, dimmed), still, or looping (see EffectGate).
+    var mode: EffectMode
     var accent: NSColor
     /// When the last turn finished, for the sparkles.
     var doneAt: Double
@@ -113,8 +125,8 @@ struct NotchEffects: View {
 
     var body: some View {
         ZStack {
-            if playing, prefs.style != .off {
-                EffectLayer(style: prefs.style, shape: size, accent: accent)
+            if mode != .hidden, prefs.style != .off {
+                EffectLayer(style: prefs.style, shape: size, accent: accent, mode: mode)
                     .transition(.opacity)
             }
             if prefs.pointerGlow {
@@ -126,7 +138,7 @@ struct NotchEffects: View {
         }
         .frame(width: size.width + 2 * Self.pad, height: size.height + Self.pad)
         .allowsHitTesting(false)
-        .animation(.easeInOut(duration: 0.4), value: playing)
+        .animation(Motion.easeInOut(0.4), value: mode)
     }
 
     /// The working agent's colour, for the scanner and the glow.
@@ -183,12 +195,14 @@ final class EffectLayerView: NSView {
     private var style: EffectsPrefs.Style
     private var shape: CGSize
     private var accent: NSColor
+    private var mode: EffectMode
     private let root = CALayer()
 
-    init(style: EffectsPrefs.Style, shape: CGSize, accent: NSColor) {
+    init(style: EffectsPrefs.Style, shape: CGSize, accent: NSColor, mode: EffectMode = .animated) {
         self.style = style
         self.shape = shape
         self.accent = accent
+        self.mode = mode
         super.init(frame: .zero)
         wantsLayer = true
         layer?.addSublayer(root)
@@ -199,11 +213,12 @@ final class EffectLayerView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    func update(style: EffectsPrefs.Style, shape: CGSize, accent: NSColor) {
-        guard style != self.style || shape != self.shape || accent != self.accent else { return }
+    func update(style: EffectsPrefs.Style, shape: CGSize, accent: NSColor, mode: EffectMode) {
+        guard style != self.style || shape != self.shape || accent != self.accent || mode != self.mode else { return }
         self.style = style
         self.shape = shape
         self.accent = accent
+        self.mode = mode
         rebuild()
     }
 
@@ -232,8 +247,18 @@ final class EffectLayerView: NSView {
             case .lights: lights()
             case .aurora: aurora()
             }
+            // Resting or still: the same layers without their loops (a layer without its
+            // animation shows its plain state), dimmed when resting.
+            if mode != .animated { Self.stopLoops(in: root) }
+            root.opacity = mode == .resting ? 0.5 : 1
         }
         CATransaction.commit()
+    }
+
+    private static func stopLoops(in layer: CALayer) {
+        layer.removeAllAnimations()
+        layer.sublayers?.forEach(stopLoops)
+        layer.mask.map(stopLoops)
     }
 
     /// A stroke along the outline, as a mask: what shows through it lights the notch's edge.
@@ -393,10 +418,11 @@ struct EffectLayer: NSViewRepresentable {
     var style: EffectsPrefs.Style
     var shape: CGSize
     var accent: NSColor
+    var mode: EffectMode
 
-    func makeNSView(context: Context) -> EffectLayerView { EffectLayerView(style: style, shape: shape, accent: accent) }
+    func makeNSView(context: Context) -> EffectLayerView { EffectLayerView(style: style, shape: shape, accent: accent, mode: mode) }
 
-    func updateNSView(_ view: EffectLayerView, context: Context) { view.update(style: style, shape: shape, accent: accent) }
+    func updateNSView(_ view: EffectLayerView, context: Context) { view.update(style: style, shape: shape, accent: accent, mode: mode) }
 }
 
 // MARK: The pointer's glow

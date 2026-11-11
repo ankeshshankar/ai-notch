@@ -27,8 +27,13 @@ public struct WidgetSnapshot: Codable, Sendable {
         public var isCursor: Bool
         public var turnStartedAt: Double?
         public var agents: Int
+        /// The context window in use, whole percent; absent from an older app, and for any session whose transcript says nothing.
+        public var context: Int?
+        /// The last turn ended on an API error (absent from an older app).
+        public var failed: Bool?
 
-        public init(id: String, project: String, title: String? = nil, phase: String, detail: String, model: String?, isCursor: Bool, turnStartedAt: Double?, agents: Int) {
+        public init(id: String, project: String, title: String? = nil, phase: String, detail: String, model: String?, isCursor: Bool, turnStartedAt: Double?, agents: Int,
+                    context: Int? = nil, failed: Bool? = nil) {
             self.id = id
             self.project = project
             self.title = title
@@ -38,6 +43,8 @@ public struct WidgetSnapshot: Codable, Sendable {
             self.isCursor = isCursor
             self.turnStartedAt = turnStartedAt
             self.agents = agents
+            self.context = context
+            self.failed = failed
         }
     }
 

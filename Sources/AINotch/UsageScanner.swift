@@ -365,6 +365,7 @@ final class UsageScanner: @unchecked Sendable {
         guard !isRunning else { return }
         isRunning = true
         defer { isRunning = false }
+        prices.waitForFirstLoad()
 
         if let config = try? String(contentsOf: home.appendingPathComponent(".codex/config.toml"), encoding: .utf8),
            let line = config.split(separator: "\n").first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("service_tier") }),
@@ -401,12 +402,43 @@ final class UsageScanner: @unchecked Sendable {
 
     /// Writes the ledger and sends a snapshot when something changed.
     private func publish() {
-        if isDirty, let data = try? JSONEncoder().encode(ledger) {
-            try? data.write(to: ledgerURL, options: .atomic)
-        }
+        if isDirty { unsavedSince = unsavedSince ?? Date() }
+        // The ledger is about 2 MB: written at most every `Self.minWriteGap` seconds while it
+        // changes, and at once on quit or sleep (`flush`). A crash loses at most that much; the
+        // scan reads the transcripts again from the offsets the saved ledger holds.
+        if let since = unsavedSince, Self.shouldWrite(unsavedSince: since, lastWrite: lastWrite, now: Date()) { writeLedger() }
         if isDirty || !hasSentSnapshot { onUpdate(snapshot(scanning: false)) }
         hasSentSnapshot = true
         isDirty = false
+    }
+
+    static let minWriteGap: TimeInterval = 120
+    private var unsavedSince: Date?
+    private var lastWrite = Date.distantPast
+
+    /// Whether a ledger changed since `unsavedSince` is written now: the first write at once,
+    /// then no sooner than `minWriteGap` after the last one.
+    static func shouldWrite(unsavedSince: Date?, lastWrite: Date, now: Date, gap: TimeInterval = minWriteGap) -> Bool {
+        unsavedSince != nil && now.timeIntervalSince(lastWrite) >= gap
+    }
+
+    private func writeLedger() {
+        if let data = try? JSONEncoder().encode(ledger) {
+            try? data.write(to: ledgerURL, options: .atomic)
+        }
+        unsavedSince = nil
+        lastWrite = Date()
+    }
+
+    /// Writes a ledger not yet saved (quit, sleep).
+    /// Waits at most 3 seconds, so a scan in progress cannot hold up quitting.
+    func flush() {
+        let done = DispatchSemaphore(value: 0)
+        queue.async { [self] in
+            if unsavedSince != nil { writeLedger() }
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 3)
     }
 
     /// Reads Cursor's newest usage events (all of its history the first time, in chunks), then

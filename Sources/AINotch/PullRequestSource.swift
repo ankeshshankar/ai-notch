@@ -680,5 +680,4 @@ actor PullRequestSource {
 
     func debugCounts() async -> (RequestCount, Int) { await client.counts(Self.lane) }
     func debugMe() -> BitbucketOwner? { me }
-    func debugCombined() -> Bool? { combined }
 }

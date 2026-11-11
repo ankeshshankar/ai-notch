@@ -53,7 +53,8 @@ enum DatadogConfig {
     }
 
     static func incidentURL(site: String, incident: ProdIncident) -> URL? {
-        URL(string: "https://\(webHost(site))/incidents/\(incident.publicId.map(String.init) ?? incident.id)")
+        let id = SafeLink.segment(incident.publicId.map(String.init) ?? incident.id)
+        return id.isEmpty ? nil : URL(string: "https://\(webHost(site))/incidents/\(id)")
     }
 
     /// The Manage Monitors list filtered by the configured query.
@@ -226,8 +227,8 @@ struct ProdSnapshot: Equatable, Sendable {
     var warnCount: Int { statusCounts["Warn"] ?? monitors.filter { $0.status == "Warn" }.count }
 }
 
-/// No redirects: the keys stay with the host they were meant for.
-private final class NoRedirect: NSObject, URLSessionTaskDelegate {
+/// No redirects: the keys stay with the host they were meant for (the sign-in's own requests too).
+final class NoRedirect: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)

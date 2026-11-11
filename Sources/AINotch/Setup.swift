@@ -306,6 +306,13 @@ enum HookPlan {
         Event(name: "PermissionDenied", matcher: "*", timeout: 5),
         Event(name: "Notification", matcher: "permission_prompt|elicitation_dialog|idle_prompt", timeout: 5),
         Event(name: "PostModelSwitch", timeout: 5),
+        // A turn that ended on an API error (instead of Stop), and a compaction's start and end.
+        // Claude Code 2.1.300 accepts all three; a version that does not know one skips just that
+        // entry with a notice (checked against a scratch config: an unknown event name is skipped
+        // the same way, the rest of the file stays in effect).
+        Event(name: "StopFailure", timeout: 5),
+        Event(name: "PreCompact", timeout: 5),
+        Event(name: "PostCompact", timeout: 5),
     ]
 
     /// Cursor's events that act on nothing the hook answers. Its permission hooks (preToolUse,

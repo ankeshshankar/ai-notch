@@ -9,8 +9,6 @@ struct NotchGeometry {
     var notchWidth: CGFloat
     var notchHeight: CGFloat
     var hasNotch: Bool
-    /// The width of each wing beside the notch, where the collapsed status shows.
-    let wing: CGFloat = 46
     /// One column: the agents, with the pipelines under them.
     let expandedWidth: CGFloat = 470
     /// The gap between the two columns.
@@ -19,7 +17,9 @@ struct NotchGeometry {
     /// 40 pt from each screen edge.
     var wideWidth: CGFloat { min(expandedWidth * 2 + Self.gutter + 8, screen.width - 80) }
     /// Whether two columns fit side by side at all; else one column even with both sections.
-    var canGoWide: Bool { wideWidth >= 2 * 400 + Self.gutter }
+    /// `--preview --narrow`: a screen with no room for two columns, for a look (dev only).
+    var canGoWide: Bool { wideWidth >= 2 * 400 + Self.gutter && !Self.previewNarrow }
+    private static let previewNarrow = CommandLine.arguments.contains("--preview") && CommandLine.arguments.contains("--narrow")
     /// The tallest the expanded body may grow below the strip, about half the screen at most;
     /// past it the list scrolls. The window is a fixed transparent box, and its size costs
     /// nothing to draw.
@@ -39,8 +39,9 @@ struct NotchGeometry {
         return NotchGeometry(screen: screen.frame, notchWidth: 120, notchHeight: NSStatusBar.system.thickness, hasNotch: false)
     }
 
-    func collapsedWidth(showsWings: Bool) -> CGFloat {
-        notchWidth + (showsWings ? wing * 2 : 0)
+    /// The closed shape: the notch and, with wings, two of `wing` points each (see WingMetrics).
+    func collapsedWidth(wing: CGFloat?) -> CGFloat {
+        notchWidth + (wing.map { $0 * 2 } ?? 0)
     }
 }
 
@@ -173,6 +174,7 @@ final class NotchController: ObservableObject {
             machine.setPanelOpen(isExpanded && openPanel == Self.machinePanel)
             vpn.setPanelOpen(isExpanded && openPanel == Self.vpnPanel)
             CommandsStore.shared.setPanelOpen(isExpanded && openPanel == Self.commandsPanel)
+            retime()
         }
     }
     /// Which full-width panel is open under the header: Usage, Code, Board, Machine, VPN or PRs, one at a time.
@@ -186,8 +188,11 @@ final class NotchController: ObservableObject {
     static let machinePanel = "Machine"
     static let commandsPanel = "Commands"
     static let vpnPanel = "VPN"
-    static let pullRequestsPanel = "PRs"
-    static let boardPanel = "Board"
+    nonisolated static let pullRequestsPanel = "PRs"
+    nonisolated static let boardPanel = "Board"
+    static let prodPanel = "Prod"
+    /// The pull request a session's link (or a chip) asked the PRs section to show; read once there.
+    @Published var focusedPullRequest: String?
     @Published private(set) var geometry = NotchGeometry.current()
     /// Pinned open: the notch stays expanded until unpinned, and no click or pointer leaving
     /// collapses it. Remembered across restarts.
@@ -209,6 +214,8 @@ final class NotchController: ObservableObject {
     private let machine: MachineStore
     private let vpn: VPNStore
     let reviews: ReviewStore
+    /// What the collapsed wings show, derived and published only when it changes.
+    let strip: StripModel
     /// A notification's Open showed the Machine panel: it stays open, as if pinned, until the
     /// pointer has been over it and left, or 20 seconds pass untouched.
     private var revealHold: Date?
@@ -235,6 +242,10 @@ final class NotchController: ObservableObject {
     private var collapseWork: DispatchWorkItem?
     private var monitors: [Any] = []
     private var timer: Timer?
+    private var tickIsFast = false
+    /// The pointer is close to the closed notch (see `trackPointer`), so a fast tick may be needed.
+    private var pointerIsNear = false
+    private static let debugPointer = CommandLine.arguments.contains("--debug")
     private var watchers: Set<AnyCancellable> = []
 
     init(store: SessionStore, builds: BuildStore, prod: ProdStore, machine: MachineStore, vpn: VPNStore, reviews: ReviewStore) {
@@ -244,9 +255,10 @@ final class NotchController: ObservableObject {
         self.machine = machine
         self.vpn = vpn
         self.reviews = reviews
-        panel.contentView = ClickThroughHostingView(rootView: ProdHeadsUpHost(prod: prod, controller: self,
+        strip = StripModel(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews)
+        panel.contentView = ClickThroughHostingView(rootView: ProdHeadsUpHost(prod: prod, controller: self, strip: strip,
                                                                               content: RootView(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn,
-                                                                                               reviews: reviews, controller: self))
+                                                                                               reviews: reviews, strip: strip, controller: self))
             .modifier(GlassScope(controller: self))
             .environment(\.hoverHub, hover))
         // Prod's banner gives way to a full-screen app (notification only).
@@ -263,6 +275,10 @@ final class NotchController: ObservableObject {
             reviews.setLooking(true)
             // `--preview --board`: the Board open, for a look.
             if CommandLine.arguments.contains("--board") { openPanel = Self.boardPanel }
+            // `--preview --panel <Usage|Code|Board|PRs|Commands|Machine|VPN>`: any panel open, for a look.
+            if let at = CommandLine.arguments.firstIndex(of: "--panel"), at + 1 < CommandLine.arguments.count {
+                openPanel = CommandLine.arguments[at + 1]
+            }
         }
         placeWindow()
         panel.orderFrontRegardless()
@@ -274,10 +290,9 @@ final class NotchController: ObservableObject {
             track(event)
             return event
         } as Any)
-        // And a slow tick for a shape that changed under a pointer standing still.
-        timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.trackPointer() }
-        }
+        // And a tick for a shape that changed under a pointer standing still: 12 times a second
+        // while the notch is open or the pointer is near it, twice a second otherwise.
+        startTick(fast: true)
 
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .sink { [weak self] _ in
@@ -297,9 +312,11 @@ final class NotchController: ObservableObject {
         checkFullScreen()
     }
 
-    var showsWings: Bool {
-        !store.sessions.isEmpty || !geometry.hasNotch || builds.hasActive || builds.hasUnseenFailure
-            || prod.hasOpenAlert || prod.hasUnseenAlert || prod.hasDeployNews || prod.hasWatchdogNews || machine.showsDot || machine.showsSlot || vpn.showsSlot || reviews.unseenCount > 0
+    var showsWings: Bool { strip.state.hasReasons || !geometry.hasNotch }
+
+    /// The closed shape's width now: the notch, and two wings sized to what they show.
+    var collapsedWidth: CGFloat {
+        geometry.collapsedWidth(wing: showsWings ? WingMetrics.wing(strip.state, petOn: EffectsPrefs.shared.petOn) : nil)
     }
 
     /// Pinned and nothing full-screen in the way: the notch stays expanded. Also for a while after
@@ -409,7 +426,7 @@ final class NotchController: ObservableObject {
 
     private func placeWindow() {
         let g = geometry
-        let width = max(g.wideWidth, g.expandedWidth, g.collapsedWidth(showsWings: true)) + 40
+        let width = max(g.wideWidth, g.expandedWidth, g.collapsedWidth(wing: WingMetrics.cap)) + 40
         let height = g.notchHeight + g.maxHeight
         let top = isPreview ? g.screen.midY + 300 : g.screen.maxY
         panel.setFrame(NSRect(x: g.screen.midX - width / 2, y: top - height, width: width, height: height), display: true)
@@ -419,11 +436,31 @@ final class NotchController: ObservableObject {
     private var shapeOnScreen: NSRect {
         let window = panel.frame
         var size = shapeSize
-        if size == .zero { size = CGSize(width: geometry.collapsedWidth(showsWings: showsWings), height: geometry.notchHeight) }
+        if size == .zero { size = CGSize(width: collapsedWidth, height: geometry.notchHeight) }
         return NSRect(x: window.midX - size.width / 2, y: window.maxY - size.height, width: size.width, height: size.height)
     }
 
+    private func startTick(fast: Bool) {
+        timer?.invalidate()
+        tickIsFast = fast
+        let tick = Timer(timeInterval: fast ? 0.08 : 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.trackPointer() }
+        }
+        if !fast { tick.tolerance = 0.1 }
+        RunLoop.main.add(tick, forMode: .common)
+        timer = tick
+    }
+
+    /// The fast tick only while something can change under a still pointer: the notch open or
+    /// about to close, pinned or held, Prod's banner up, or the pointer near the notch. Moves of
+    /// the pointer arrive from the monitors at once, so a far pointer needs no fast tick.
+    private func retime() {
+        let fast = isExpanded || isPinned || revealHold != nil || collapseWork != nil || prod.headsUp != nil || pointerIsNear || isStill
+        if fast != tickIsFast, timer != nil { startTick(fast: fast) }
+    }
+
     private func trackPointer() {
+        defer { retime() }
         trackHover()
         // Prod's banner: the pointer on it keeps it up. Collapsed, it lies outside the shape, so
         // it takes clicks there itself and does not open the notch.
@@ -441,12 +478,15 @@ final class NotchController: ObservableObject {
             return
         }
         let point = NSEvent.mouseLocation
+        var nearZone = shapeOnScreen.insetBy(dx: -80, dy: -80)
+        nearZone.size.height += 80
+        pointerIsNear = nearZone.contains(point)
         pointer.update(pointer: point, shape: shapeOnScreen, active: !isExpanded && EffectsPrefs.shared.pointerGlow)
         // A little slop, and up to the very top edge, so the screen's edge counts as the notch.
         var zone = shapeOnScreen.insetBy(dx: -6, dy: -6)
         zone.size.height += 6
         let isInside = zone.contains(point)
-        if CommandLine.arguments.contains("--debug") {
+        if Self.debugPointer {
             FileHandle.standardError.write("pointer \(point) shapeSize \(shapeSize) zone \(zone) window \(panel.frame) inside \(isInside) expanded \(isExpanded) pinned \(isPinned) looking \(isLooking) fullScreen \(fullScreenAhead) key \(panel.isKeyWindow)\n".data(using: .utf8)!)
         }
         // Each change is a call to the window server; the tick runs 12 times a second.

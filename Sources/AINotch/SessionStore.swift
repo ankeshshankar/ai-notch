@@ -56,8 +56,25 @@ final class SessionStore: ObservableObject {
     private var phases: [String: Phase] = [:]
     /// What the end of each transcript says, cached by the file's modification time:
     /// the last interrupt, and the model of the last reply.
-    private var tails: [String: (mtime: Double, interruptAt: Double?, model: String?)] = [:]
+    /// And the context in use, which keeps its last value when a newer end of the file holds no reply.
+    private var tails: [String: (mtime: Double, interruptAt: Double?, model: String?, context: ContextUse.Reading?)] = [:]
+    /// Sessions seen over 200K tokens (or on a 1M model): their window stays 1M after a compaction.
+    private var wideSessions: Set<String> = []
+    /// Sessions already told their context is nearly full, until they fall back under it.
+    private var contextAlerted: Set<String> = []
+    /// The failure each session was last told about (by when it failed).
+    private var failureNotified: [String: Double] = [:]
     private var timer: Timer?
+    /// `CLAUDE_NOTCH_LATENCY_LOG=1`: each change of the session list is written to stderr with its
+    /// time in ms, to time a hook event against the list (scripts/dev/README.md).
+    private static let latencyLog = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_LATENCY_LOG"] != nil
+    /// `CLAUDE_NOTCH_POLL_ONLY=1`: no folder watch and the old 0.5 s tick, to measure the poll.
+    private static let pollOnly = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_POLL_ONLY"] != nil
+    private var folderWatch: DispatchSourceFileSystemObject?
+    private var reloadQueued = false
+    /// Each state file as last decoded, by path, with its modification time and size: a file
+    /// that has not changed is not read again.
+    private var decoded: [String: (mtime: Date, size: Int, state: SessionState)] = [:]
 
     var working: [SessionState] { sessions.filter { $0.phase == .working } }
     var waiting: [SessionState] { sessions.filter { $0.phase == .waiting } }
@@ -80,10 +97,48 @@ final class SessionStore: ObservableObject {
         }
         scanner?.start()
         watcher.start()
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushUsage() }
+        }
         reload()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Once a second, on the second (so the clocks never skip one): the clock, transcripts and
+        // process checks. A hook's write reaches us at once through the folder watch.
+        let first = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) + 1.05)
+        let tick = Timer(fire: first, interval: Self.pollOnly ? 0.5 : 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.reload() }
         }
+        tick.tolerance = 0.05
+        RunLoop.main.add(tick, forMode: .common)
+        timer = tick
+        if !Self.pollOnly { watchSessions() }
+    }
+
+    func flushUsage() { scanner?.flush() }
+
+    /// The hook saves each event by renaming a new file over the old one, which is a write to the
+    /// folder: that wakes a reload without waiting for the next tick.
+    private func watchSessions() {
+        try? FileManager.default.createDirectory(at: NotchPaths.sessions, withIntermediateDirectories: true)
+        let fd = Darwin.open(NotchPaths.sessions.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // A burst of writes is one reload.
+                guard !self.reloadQueued else { return }
+                self.reloadQueued = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                    MainActor.assumeIsolated {
+                        self.reloadQueued = false
+                        self.reload()
+                    }
+                }
+            }
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        folderWatch = source
     }
 
     private func reload() {
@@ -91,12 +146,24 @@ final class SessionStore: ObservableObject {
         let time = Date().timeIntervalSince1970
         if time.rounded(.down) != now.rounded(.down) { now = time }
         let dir = NotchPaths.sessions
-        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys)) ?? []
         var live: [SessionState] = []
         var seenIds = Set<String>()
+        var present = Set<String>()
         for file in files where file.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: file),
-                  let state = try? JSONDecoder.notch.decode(SessionState.self, from: data) else { continue }
+            present.insert(file.path)
+            let values = try? file.resourceValues(forKeys: Set(keys))
+            let stamp = (values?.contentModificationDate ?? .distantPast, values?.fileSize ?? -1)
+            let state: SessionState
+            if let hit = decoded[file.path], hit.mtime == stamp.0, hit.size == stamp.1 {
+                state = hit.state
+            } else {
+                guard let data = try? Data(contentsOf: file),
+                      let read = try? JSONDecoder.notch.decode(SessionState.self, from: data) else { continue }
+                decoded[file.path] = (stamp.0, stamp.1, read)
+                state = read
+            }
             // A session that never got a prompt is a helper run, not a conversation: not shown,
             // and its file goes once it is ten minutes old.
             let isEmpty = state.turnStartedAt == nil && state.toolCount == 0 && state.firstPrompt == nil && state.sessionTitle == nil && state.agents.isEmpty
@@ -114,15 +181,25 @@ final class SessionStore: ObservableObject {
             if let first = usage.firstAt[shown.id], first < shown.startedAt { shown.startedAt = first }
             live.append(shown)
         }
+        if decoded.count != present.count || decoded.keys.contains(where: { !present.contains($0) }) {
+            decoded = decoded.filter { present.contains($0.key) }
+        }
         failingSince = failingSince.filter { seenIds.contains($0.key) }
         // Agents the hooks do not cover, seen as processes; one a hook reports is left to the hook.
         watcher.setHooked(Set(live.compactMap(\.pid)))
         live += watcher.sessions.filter { row in !live.contains { $0.pid != nil && $0.pid == row.pid } }
-        live.sort(by: order)
+        live.sort(by: SessionOrder.before)
         approvals.reconcile(with: live)
         alert(for: live)
-        if live != sessions { sessions = live }
-        KeepAwake.shared.update(working: live.contains { $0.phase == .working }, now: time)
+        if live != sessions {
+            if Self.latencyLog {
+                FileHandle.standardError.write(Data("sessions-changed \(Int(Date().timeIntervalSince1970 * 1000)) \(live.map(\.id).joined(separator: ","))\n".utf8))
+            }
+            sessions = live
+        }
+        let anyWorking = live.contains { $0.phase == .working }
+        KeepAwake.shared.update(working: anyWorking, now: time)
+        LidAwake.shared.update(working: anyWorking, now: time)
         AgentControls.shared.refresh(sessions)
         CommandsStore.shared.setAgents(sessions.compactMap { session in
             session.pid.map { CommandScanner.Agent(pid: $0, sessionId: session.id, title: title(of: session)) }
@@ -197,7 +274,11 @@ final class SessionStore: ObservableObject {
     private func settled(_ original: SessionState) -> SessionState {
         var state = approved(original)
         // The last reply names its model; that covers a session that began before the hooks did.
-        if let path = state.transcriptPath, let model = tail(path).model { state.model = model }
+        if let path = state.transcriptPath {
+            let end = tail(path)
+            if let model = end.model { state.model = model }
+            if state.kind == .claude { fillContext(&state, reading: end.context) }
+        }
         guard state.phase != .idle, let path = state.transcriptPath, let at = tail(path).interruptAt,
               at >= (state.turnStartedAt ?? 0) - 1 else { return state }
         state.phase = .idle
@@ -209,6 +290,21 @@ final class SessionStore: ObservableObject {
             state.agents[index].end(.stopped, at: at)
         }
         return state
+    }
+
+    /// The context in use and its window, from the transcript's last reply. Nothing at all when the
+    /// transcript says nothing (or says it oddly) or the last reply is older than the last compaction.
+    private func fillContext(_ state: inout SessionState, reading: ContextUse.Reading?) {
+        guard let tokens = reading?.valid(after: state.compactedAt)?.tokens else {
+            state.contextTokens = nil
+            state.contextWindow = nil
+            return
+        }
+        var window = ContextUse.window(model: state.model, observed: tokens, env: state.autoCompact)
+        if window >= ContextUse.wideWindow { wideSessions.insert(state.id) }
+        else if wideSessions.contains(state.id), state.autoCompact?.no1M != true { window = ContextUse.wideWindow }
+        state.contextTokens = tokens
+        state.contextWindow = window
     }
 
     /// A permission prompt you approved raises no hook until the tool finishes; a shell command
@@ -230,17 +326,20 @@ final class SessionStore: ObservableObject {
     /// The end of a transcript: when its last exchange is "[Request interrupted by user…]", its
     /// time, and the model of its last reply.
     /// `isAgent`: a subagent's own transcript, where every line is a sidechain.
-    private func tail(_ path: String, isAgent: Bool = false) -> (interruptAt: Double?, model: String?) {
+    private func tail(_ path: String, isAgent: Bool = false) -> (interruptAt: Double?, model: String?, context: ContextUse.Reading?) {
         let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        if let hit = tails[path], hit.mtime == mtime { return (hit.interruptAt, hit.model) }
+        if let hit = tails[path], hit.mtime == mtime { return (hit.interruptAt, hit.model, hit.context) }
         var found: Double?
         var model: String?
+        var context: ContextUse.Reading? = tails[path]?.context
         var exchangeSeen = false
         if let handle = FileHandle(forReadingAtPath: path) {
             defer { try? handle.close() }
             let size = (try? handle.seekToEnd()) ?? 0
             try? handle.seek(toOffset: size > 65_536 ? size - 65_536 : 0)
             let tail = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+            // The context in use, from the same read (a subagent's file has none of its own).
+            if !isAgent { context = ContextUse.reading(inTail: tail) ?? context }
             for line in tail.split(separator: "\n").reversed() {
                 guard let data = line.data(using: .utf8),
                       let entry = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -259,8 +358,8 @@ final class SessionStore: ObservableObject {
                 }
             }
         }
-        tails[path] = (mtime, found, model)
-        return (found, model)
+        tails[path] = (mtime, found, model, context)
+        return (found, model, context)
     }
 
     private static func isoTime(_ text: String) -> Double? {
@@ -322,14 +421,15 @@ final class SessionStore: ObservableObject {
             switch session.phase {
             case .waiting: detail = "Waiting for \(session.waitingFor ?? "you")"
             case .working: detail = session.current.map { $0.server.map { s in "\(s) · \(session.current?.shortName ?? "")" } ?? $0.name } ?? "Thinking…"
-            case .idle: detail = session.finishedAt.map { "Done \(elapsed(now - $0)) ago" } ?? "Idle"
+            case .idle: detail = session.isFailed ? session.failureText : session.finishedAt.map { "Done \(elapsed(now - $0)) ago" } ?? "Idle"
             }
             return WidgetSnapshot.Row(id: session.id, project: session.project, title: title(of: session), phase: session.phase.rawValue, detail: detail,
                                       model: session.model.map(modelName), isCursor: session.isCursorAgent,
-                                      turnStartedAt: session.phase == .working ? session.turnStartedAt : nil, agents: session.runningAgents.count)
+                                      turnStartedAt: session.phase == .working ? session.turnStartedAt : nil, agents: session.runningAgents.count,
+                                      context: session.contextPercent, failed: session.isFailed ? true : nil)
         }
         // Idle rows' "Done … ago" changes every second; compare what matters to the widget.
-        let key: (WidgetSnapshot.Row) -> String = { "\($0.id)|\($0.title ?? "")|\($0.phase)|\($0.phase == "idle" ? "" : $0.detail)|\($0.agents)" }
+        let key: (WidgetSnapshot.Row) -> String = { "\($0.id)|\($0.title ?? "")|\($0.phase)|\($0.phase == "idle" && $0.failed != true ? "" : $0.detail)|\($0.agents)|\($0.context.map { $0 / 5 } ?? -1)|\($0.failed == true)" }
         let changed = rows.map(key) != widgetRows.map(key)
         guard changed || widgetReloadPending else { return }
         widgetRows = Array(rows)
@@ -390,28 +490,25 @@ final class SessionStore: ObservableObject {
         return false
     }
 
-    /// Waiting first, then working, then the most recently active.
-    private func order(_ a: SessionState, _ b: SessionState) -> Bool {
-        func rank(_ s: SessionState) -> Int { s.phase == .waiting ? 0 : s.phase == .working ? 1 : 2 }
-        return rank(a) != rank(b) ? rank(a) < rank(b) : a.updatedAt > b.updatedAt
-    }
-
     private func alert(for live: [SessionState]) {
         // A watched agent's working or idle is read from its CPU: no sounds or notifications on it.
         for session in live where !session.id.hasPrefix("watch-") {
             let before = phases[session.id]
             defer { phases[session.id] = session.phase }
+            alertContext(session, firstSight: before == nil)
+            alertFailure(session, firstSight: before == nil)
             guard let before, before != session.phase else { continue }
+            let took = session.lastTurnSeconds ?? 0
+            if let cue = SoundCues.session(before: before, now: session.phase, tookSeconds: took, soundAfterTurn: soundAfterTurn) {
+                SoundPlayer.shared.play(cue)
+            }
             if session.phase == .waiting {
-                NSSound(named: "Ping")?.play()
                 if shouldNotify(session) {
                     Notifier.shared.post(session: session.id, title: title(of: session), subtitle: "\(session.project) needs you",
                                          body: "Waiting for \(session.waitingFor ?? "you")")
                 }
             } else if session.phase == .idle, before == .working {
                 lastDoneAt = now
-                let took = session.lastTurnSeconds ?? 0
-                if took >= soundAfterTurn { NSSound(named: "Glass")?.play() }
                 if took >= notifyAfterTurn, shouldNotify(session) {
                     Notifier.shared.post(session: session.id, title: title(of: session), subtitle: "\(session.project) finished",
                                          body: "Took \(elapsed(took))")
@@ -420,5 +517,30 @@ final class SessionStore: ObservableObject {
         }
         let ids = Set(live.map(\.id))
         phases = phases.filter { ids.contains($0.key) }
+        contextAlerted.formIntersection(ids)
+        failureNotified = failureNotified.filter { ids.contains($0.key) }
+    }
+
+    /// One notification each time a session's context reaches the strong level (and not again
+    /// until it is back under the warn level, which a compaction does). A session already there
+    /// when the app starts is not told.
+    private func alertContext(_ session: SessionState, firstSight: Bool) {
+        let step = ContextUse.alertStep(level: session.contextLevel, alerted: contextAlerted.contains(session.id))
+        if step.alerted { contextAlerted.insert(session.id) } else { contextAlerted.remove(session.id) }
+        if step.fire, !firstSight, SessionAlerts.contextOn { SoundPlayer.shared.play(.contextFull) }
+        guard step.fire, !firstSight, SessionAlerts.contextOn, shouldNotify(session) else { return }
+        Notifier.shared.post(session: session.id, title: title(of: session), subtitle: "\(session.project): context almost full",
+                             body: "Will compact soon")
+    }
+
+    /// One notification when a turn ends on an API error. One already failed when the app starts is not told.
+    private func alertFailure(_ session: SessionState, firstSight: Bool) {
+        guard session.isFailed, let at = session.failedAt else { return }
+        guard failureNotified[session.id] != at else { return }
+        failureNotified[session.id] = at
+        if !firstSight, SessionAlerts.failureOn { SoundPlayer.shared.play(.failed) }
+        guard !firstSight, SessionAlerts.failureOn, shouldNotify(session) else { return }
+        Notifier.shared.post(session: session.id, title: title(of: session), subtitle: "\(session.project) failed",
+                             body: session.failureText)
     }
 }

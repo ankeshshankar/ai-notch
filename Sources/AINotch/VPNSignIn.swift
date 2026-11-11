@@ -121,17 +121,17 @@ private struct VPNSignInView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                Image(systemName: "lock.shield.fill").font(.system(size: 24)).foregroundStyle(.green)
+                Image(systemName: "lock.shield.fill").font(Typo.figureLarge()).foregroundStyle(.green)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(headline).font(.system(size: 14, weight: .semibold))
-                    Text(profileName).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(headline).font(Typo.title(.semibold))
+                    Text(profileName).font(Typo.subtitle()).foregroundStyle(.secondary)
                 }
             }
             if let failure = prompt.failure {
-                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(failure).font(Typo.subtitle()).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             if prompt.asksResponse, let text = prompt.text, !text.isEmpty {
-                Text(text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                Text(text).font(Typo.subtitle()).fixedSize(horizontal: false, vertical: true)
             }
             VStack(spacing: 8) {
                 if asksUsername {
@@ -152,7 +152,7 @@ private struct VPNSignInView: View {
             .onSubmit { if canSend { send() } }
             if prompt.kind == .password {
                 Toggle("Remember the password in my Keychain", isOn: $remember)
-                    .toggleStyle(.checkbox).font(.system(size: 12))
+                    .toggleStyle(.checkbox).font(Typo.subtitle())
             }
             HStack {
                 Spacer()

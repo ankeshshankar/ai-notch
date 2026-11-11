@@ -59,6 +59,11 @@ enum BoardFixtures {
         pr(46, "Update the onboarding copy", approved: 1, checks: true),
         pr(47, "Try out the new router", draft: true, build: nil),
     ]
+    /// Ones waiting for my review, for the PRs panel's second column.
+    static let toReview: [PullRequest] = [
+        { var p = pr(61, "Rework the notification settings", comments: 2); p.role = .reviewing; p.myReview = .none; p.author = person("Dana"); return p }(),
+        { var p = pr(62, "Bump the SDK and fix the lint errors", approved: 1); p.role = .reviewing; p.author = person("Eli"); return p }(),
+    ]
 }
 
 enum BoardDev {

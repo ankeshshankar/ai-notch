@@ -61,6 +61,8 @@ final class CommandsStore: ObservableObject {
         let now = Date().timeIntervalSince1970
         guard now - lastScan >= (panelOpen ? 3 : 10) else { return }
         lastScan = now
+        // Nothing here notifies: no scan while the screen is locked.
+        if BuildPolling.isScreenLocked { return }
         guard Self.isEnabled else {
             if !commands.isEmpty { commands = [] }
             return
@@ -91,7 +93,7 @@ final class CommandsStore: ObservableObject {
     }
 
     func open(port: Int) {
-        if let url = URL(string: "http://localhost:\(port)") { NSWorkspace.shared.open(url) }
+        SafeLink.open(URL(string: "http://localhost:\(port)"), for: .localhost)
     }
 
     /// The footer chip's count: the agents' commands, and your terminals' that use a port or the CPU.
@@ -127,7 +129,7 @@ final class CommandScanner: @unchecked Sendable {
     static let agentAge: Double = 5
 
     func scan(agents: [Agent]) -> [CommandsStore.Command] {
-        guard let table = ProcessList.table() else { return [] }
+        guard let table = ProcessList.sharedTable(maxAge: 2.5) else { return [] }
         let now = Date().timeIntervalSince1970
         let me = getuid()
         let byPid = Dictionary(table.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
@@ -303,13 +305,13 @@ struct CommandsChip: View {
     var body: some View {
         let isOpen = controller.openPanel == NotchController.commandsPanel
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+            withAnimation(Motion.slide) {
                 controller.openPanel = isOpen ? nil : NotchController.commandsPanel
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "terminal").font(.system(size: 9, weight: .semibold))
-                Text("\(commands.count)").font(.system(size: 10, weight: .semibold).monospacedDigit())
+                Image(systemName: "terminal").font(Typo.caption(.semibold)).decorative()
+                Text("\(commands.count)").font(Typo.label(.semibold).monospacedDigit())
             }
             .foregroundStyle(isOpen ? Palette.onDone : Palette.ink2)
             .lineLimit(1)
@@ -320,6 +322,7 @@ struct CommandsChip: View {
         .buttonStyle(.plain)
         .fixedSize()
         .help("Commands running in the background: what agents started, and what has run a minute in your terminals")
+        .ax("Commands", value: "\(commands.count) running", selected: isOpen)
     }
 }
 
@@ -333,15 +336,15 @@ struct CommandsPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("Commands").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink2)
+                Text("Commands").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Capsule().fill(Palette.chip))
-                Text(summary).font(.system(size: 10)).foregroundStyle(Palette.ink3)
+                Text(summary).font(Typo.label()).foregroundStyle(Palette.ink3)
                 Spacer(minLength: 6)
                 InfoMark(text: Self.about)
             }
             if commands.commands.isEmpty {
-                Text("Nothing running in the background.").font(.system(size: 11)).foregroundStyle(Palette.ink3)
+                Text("Nothing running in the background.").font(Typo.body()).foregroundStyle(Palette.ink3)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(commands.commands) { command in row(command) }
@@ -364,23 +367,24 @@ struct CommandsPanel: View {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return HStack(alignment: .top, spacing: 8) {
             Image(systemName: command.fromAgent ? "sparkles" : "terminal")
-                .font(.system(size: 10)).frame(width: 14).padding(.top, 1)
+                .font(Typo.label()).frame(width: 14).padding(.top, 1)
                 .foregroundStyle(command.fromAgent ? Palette.claude : Palette.ink3)
+                .accessibilityLabel(command.fromAgent ? "Started by an agent" : "Terminal command")
             VStack(alignment: .leading, spacing: 2) {
-                Text(command.text).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Palette.ink.opacity(0.88))
+                Text(command.text).font(Typo.label(mono: true)).foregroundStyle(Palette.ink.opacity(0.88))
                     .lineLimit(1).truncationMode(.tail)
                     .help(command.text)
-                Text(meta(command, home: home)).font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.ink3)
+                Text(meta(command, home: home)).font(Typo.label().monospacedDigit()).foregroundStyle(Palette.ink3)
                     .lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 6)
             ForEach(command.ports.prefix(2), id: \.self) { port in
-                small(":\(port)") { commands.open(port: port) }.help("Open http://localhost:\(port)")
+                small(":\(port)") { commands.open(port: port) }.help("Open http://localhost:\(port)").accessibilityLabel("Open localhost port \(port)")
             }
             if isStopping {
-                Text("Stopping…").font(.system(size: 10)).foregroundStyle(Palette.ink3).padding(.top, 3)
+                Text("Stopping…").font(Typo.label()).foregroundStyle(Palette.ink3).padding(.top, 3)
             } else {
-                small(confirming == command.id ? "Confirm stop" : "Stop", urgent: true) {
+                small(confirming == command.id ? "Confirm stop" : "Stop", urgent: true, label: (confirming == command.id ? "Confirm stop " : "Stop ") + command.text) {
                     if confirming == command.id {
                         confirming = nil
                         commands.stop(command)
@@ -401,9 +405,9 @@ struct CommandsPanel: View {
         return parts.joined(separator: " · ")
     }
 
-    private func small(_ title: String, urgent: Bool = false, action: @escaping () -> Void) -> some View {
+    private func small(_ title: String, urgent: Bool = false, label: String? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(.system(size: 10, weight: .medium))
+            Text(title).font(Typo.label(.medium))
                 .foregroundStyle(urgent ? Palette.failed : Palette.ink2)
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(Capsule().fill(urgent ? Palette.failedHue.opacity(0.16) : Palette.chip))
@@ -411,6 +415,7 @@ struct CommandsPanel: View {
                 .fixedSize()
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label ?? title)
     }
 
     static let about = "Commands an agent runs (Claude Code's background and long Bash commands, its monitors, a watched agent's shells) once they have run 5 seconds, and what has run a minute in your terminals, without editors, pagers, shells or agents. CPU, memory and ports count everything under the command. Stop sends SIGTERM to it and everything under it, then SIGKILL 4 s later to what is left; Claude Code sees its command end. Setup → Machine turns the list off."

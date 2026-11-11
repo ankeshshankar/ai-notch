@@ -114,15 +114,7 @@ final class ApprovalCenter: ObservableObject {
 
     /// One line in `~/.claude/notch/notch.log`: the tool and what happened, never its input.
     private func log(_ line: String) {
-        let url = NotchPaths.sessions.deletingLastPathComponent().appendingPathComponent("notch.log")
-        let entry = Data("\(ISO8601DateFormatter().string(from: Date())) \(line)\n".utf8)
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(entry)
-            try? handle.close()
-        } else {
-            try? entry.write(to: url)
-        }
+        NotchLog.append(line)
     }
 
     /// Ends the connection: its thread sees the end of the stream and closes the descriptor, so a

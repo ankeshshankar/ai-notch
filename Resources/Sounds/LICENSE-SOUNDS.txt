@@ -1,0 +1,4 @@
+Sounds: Material Design sound resources by Google, licensed under CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/). Source: https://m2.material.io/design/sound/sound-resources.html,
+fetched from https://github.com/nana-4/materia-sound-theme (material_product_sounds).
+Changes: converted to mono AAC, loudness-levelled to about -20 LUFS, short fade in and out.

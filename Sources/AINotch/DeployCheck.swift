@@ -650,6 +650,9 @@ struct WatchdogStory: Equatable, Sendable {
     var at: Double
     /// From the event's `story_status` tag ("ongoing"); Datadog sends no priority.
     var status: String?
+    /// True when `id` is Datadog's story key (the `story_key` tag or the message's story link), so
+    /// it can open the story page; false when it is only the events API's event id.
+    var hasStoryKey: Bool = false
 }
 
 /// A deployment Datadog's APM deployment tracking noticed: `source:change_tracking`, titled
@@ -681,7 +684,15 @@ enum Watchdog {
         var title: String
         var tags: [String]
         var at: Double
+        var message: String = ""
         func tag(_ name: String) -> String? { tags.first { $0.hasPrefix(name + ":") }.map { String($0.dropFirst(name.count + 1)) } }
+        /// The story's own id: the `story_key` tag, else the id in the message's `/watchdog/story/<id>` link.
+        var storyKey: String? {
+            if let key = tag("story_key"), !key.isEmpty { return key }
+            guard let range = message.range(of: "/watchdog/story/") else { return nil }
+            let id = message[range.upperBound...].prefix { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+            return id.isEmpty ? nil : String(id)
+        }
         var isDeploy: Bool { title.hasPrefix("New APM Deployment Version") || tags.contains("source:change_tracking") }
     }
 
@@ -696,7 +707,8 @@ enum Watchdog {
             if title.isEmpty { title = (attributes["message"] as? String)?.split(separator: "\n").first.map(String.init) ?? "" }
             var all = tags
             if !tags.contains(where: { $0.hasPrefix("service:") }), let service = inner["service"] as? String { all.append("service:\(service)") }
-            return Event(id: event["id"] as? String ?? title, title: title, tags: all, at: buildTime(attributes["timestamp"]) ?? 0)
+            return Event(id: event["id"] as? String ?? title, title: title, tags: all, at: buildTime(attributes["timestamp"]) ?? 0,
+                         message: attributes["message"] as? String ?? "")
         }
     }
 
@@ -719,7 +731,8 @@ enum Watchdog {
             let status = event.tag("story_status")?.lowercased()
             if let status { guard status == "ongoing" else { continue } } else if now - event.at >= activeFor { continue }
             guard !event.title.isEmpty, seen.insert(event.title + "|" + (service ?? "")).inserted else { continue }
-            out.append(WatchdogStory(id: event.id, title: String(event.title.prefix(120)), service: service, at: event.at, status: status))
+            out.append(WatchdogStory(id: event.storyKey ?? event.id, title: String(event.title.prefix(120)), service: service, at: event.at, status: status,
+                                    hasStoryKey: event.storyKey != nil))
         }
         return out
     }
@@ -739,7 +752,8 @@ enum Watchdog {
 
     /// The story in Datadog's web app, on the org's own site.
     static func storyURL(site: String, id: String) -> URL? {
-        URL(string: "https://\(DatadogConfig.webHost(site))/watchdog/story/\(id)")
+        let story = SafeLink.segment(id)
+        return story.isEmpty ? nil : URL(string: "https://\(DatadogConfig.webHost(site))/watchdog/story/\(story)")
     }
 }
 

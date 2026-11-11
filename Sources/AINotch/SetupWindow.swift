@@ -50,6 +50,8 @@ final class SetupModel: ObservableObject {
     @Published private(set) var commandsOn = CommandsStore.isEnabled
     @Published private(set) var hotkeysOn = Hotkeys.isEnabled
     @Published private(set) var limitAlertsOn = LimitAlerts.isEnabled
+    @Published private(set) var contextAlertsOn = SessionAlerts.contextOn
+    @Published private(set) var failureAlertsOn = SessionAlerts.failureOn
     @Published private(set) var telemetryOn = AgentTelemetry.isOn()
     @Published private(set) var telemetryProblem: String?
     @Published private(set) var machineNotify = UserDefaults.standard.object(forKey: "machine.notifyCritical") as? Bool ?? true
@@ -237,6 +239,16 @@ final class SetupModel: ObservableObject {
         UserDefaults.standard.set(on, forKey: LimitAlerts.enabledKey)
     }
 
+    func setContextAlerts(_ on: Bool) {
+        contextAlertsOn = on
+        UserDefaults.standard.set(on, forKey: SessionAlerts.contextKey)
+    }
+
+    func setFailureAlerts(_ on: Bool) {
+        failureAlertsOn = on
+        UserDefaults.standard.set(on, forKey: SessionAlerts.failureKey)
+    }
+
     func setHotkeys(_ on: Bool) {
         hotkeysOn = on
         UserDefaults.standard.set(on, forKey: Hotkeys.enabledKey)
@@ -273,6 +285,8 @@ final class SetupModel: ObservableObject {
 enum SetupFocus: Equatable {
     case prod
     case vpn
+    /// Dev only: `--setup-preview --focus sounds`.
+    case sounds
 }
 
 /// builds.json in Setup: whether it is there and what it sets up.
@@ -553,6 +567,12 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         return frame
     }
 
+    /// `--setup-preview --cycle`: closes the window as its close button does.
+    func closeForCheck() { window?.close() }
+
+    /// Whether the window (and the SwiftUI tree in it) exists.
+    var hasWindow: Bool { window != nil }
+
     /// The window's number and frame, for a preview's screenshots.
     var windowInfo: (number: Int, frame: NSRect)? { window.map { ($0.windowNumber, $0.frame) } }
 
@@ -561,6 +581,16 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         model.stop()
         UserDefaults.standard.set(model.location.bundle.path, forKey: Self.seenKey)
         if quitsOnClose { NSApp.terminate(nil) }
+        // The window and its SwiftUI tree (the whole of Setup: about 15 MB) went on living, hidden,
+        // after the first time it opened. Let go once the close has finished; show() makes a new one.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window, !window.isVisible, !window.isMiniaturized else { return }
+            window.delegate = nil
+            window.contentViewController = nil
+            self.window = nil
+            contentHeight = 0
+            footerHeight = 0
+        }
     }
 
     private func confirmDisconnect() {
@@ -624,6 +654,7 @@ struct SetupView: View {
     @State private var showsTokenSteps = false
     @ObservedObject private var auth = DatadogAuthModel.shared
     @ObservedObject private var effects = EffectsPrefs.shared
+    @ObservedObject private var soundPrefs = SoundPrefs.shared
     /// The running notch's VPN (a placeholder that asks nothing in a setup preview).
     @ObservedObject private var vpn = SetupWindowController.shared.vpn ?? VPNStore()
     /// A team-signed build carries the widget and the app group it reads; an ad-hoc one neither.
@@ -662,7 +693,7 @@ struct SetupView: View {
         guard let focus = model.focus else { return }
         DispatchQueue.main.async {
             if animated {
-                withAnimation(.easeOut(duration: 0.3)) { proxy.scrollTo(focus, anchor: .top) }
+                withAnimation(Motion.ease(0.3)) { proxy.scrollTo(focus, anchor: .top) }
             } else {
                 proxy.scrollTo(focus, anchor: .top)
             }
@@ -675,10 +706,11 @@ struct SetupView: View {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable().interpolation(.high)
                     .frame(width: 88, height: 88)
+                    .decorative()
                 (Text("Welcome to ") + Text("AI Notch").foregroundStyle(wordmark))
-                    .font(.system(size: 22, weight: .bold))
+                    .font(Typo.figureLarge(.bold))
                 Text(isDone ? "You're all set." : "Your agents' sessions, live under the notch.")
-                    .font(.system(size: 13)).foregroundStyle(.secondary)
+                    .font(Typo.title()).foregroundStyle(.secondary)
             }
             .padding(.top, 8)
 
@@ -727,7 +759,7 @@ struct SetupView: View {
             section("Optional") {
                 row("Notifications", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
                     info: "Only while the screen is locked: a session that needs you, or a long turn finishing.") {
-                    optional(granted: model.notifications == .authorized || model.notifications == .provisional,
+                    optional("Notifications", granted: model.notifications == .authorized || model.notifications == .provisional,
                              unavailable: model.notifications == nil,
                              denied: model.notifications == .denied,
                              wants: $model.wantsNotifications, ask: model.askForNotifications)
@@ -735,36 +767,51 @@ struct SetupView: View {
                 divider
                 row("Limit alerts", icon: "gauge.with.dots.needle.67percent", tint: Color(red: 0.96, green: 0.62, blue: 0.14),
                     info: "A notification, while unlocked too, when Claude's 5-hour or weekly limit passes 80% and again at 95%: when it resets and, from the last readings, when this pace runs out. Once per window and mark.") {
-                    Toggle("", isOn: Binding(get: { model.limitAlertsOn }, set: { model.setLimitAlerts($0) }))
+                    Toggle("Limit alerts", isOn: Binding(get: { model.limitAlertsOn }, set: { model.setLimitAlerts($0) }))
+                        .toggleStyle(.switch).controlSize(.small).labelsHidden()
+                }
+                divider
+                row("Context alerts", icon: "gauge.with.dots.needle.100percent", tint: Color(red: 0.96, green: 0.62, blue: 0.14),
+                    info: "A notification, only while the screen is locked, when a Claude Code session's context window is nearly full (about 92% of where Claude compacts it on its own). Once each time it gets there, and again after a compaction. The percent comes from the session's transcript; the notch shows it on the row either way.") {
+                    Toggle("Context alerts", isOn: Binding(get: { model.contextAlertsOn }, set: { model.setContextAlerts($0) }))
+                        .toggleStyle(.switch).controlSize(.small).labelsHidden()
+                }
+                divider
+                row("Failed turns", icon: "exclamationmark.octagon.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
+                    info: "A notification, only while the screen is locked, when a Claude Code turn ends on an API error (rate limited, overloaded, sign-in or billing problem, server error, output limit). The row and the strip's dot turn red until your next message. A failed tool call is not one: Claude recovers from those.") {
+                    Toggle("Failed turns", isOn: Binding(get: { model.failureAlertsOn }, set: { model.setFailureAlerts($0) }))
                         .toggleStyle(.switch).controlSize(.small).labelsHidden()
                 }
                 divider
                 row("Jump to window", icon: "macwindow.on.rectangle", tint: Color(red: 0.25, green: 0.52, blue: 0.93),
                     info: "Accessibility access lets a click on a session raise its exact window. Without it, the app it runs in comes to the front.") {
-                    optional(granted: model.accessibility, unavailable: false, denied: false,
+                    optional("Jump to window", granted: model.accessibility, unavailable: false, denied: false,
                              wants: $model.wantsAccessibility, ask: model.askForAccessibility)
                 }
                 divider
                 row("Other agents", icon: "cpu", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
                     info: "Coding agents without hooks, found as processes: Aider, Goose, Amp, Factory Droid, Crush, GitHub Copilot CLI, OpenCode, Qwen Code, Kimi and others, and Codex or Gemini CLI where their hooks are not set up. Each shows as a row with its folder and the app it runs in; working or idle is read from its CPU. Add names in \(BuildsConfig.displayPath): \"agents\": {\"watch\": {\"mybot\": \"My Bot\"}, \"ignore\": [\"amp\"]}. Any agent or script can also report itself: ai-notch-hook report working --agent \"My Bot\" (see the README).") {
-                    Toggle("", isOn: Binding(get: { model.watchAgents }, set: { model.setWatchAgents($0) }))
+                    Toggle("Other agents", isOn: Binding(get: { model.watchAgents }, set: { model.setWatchAgents($0) }))
                         .toggleStyle(.switch).controlSize(.small).labelsHidden()
                 }
                 divider
                 if hasWidget {
                     row("Desktop widget", icon: "square.grid.2x2.fill", tint: Color(red: 0.20, green: 0.65, blue: 0.70),
                         info: "Right-click the desktop, choose Edit Widgets, and search for AI Notch.") {
-                        Text("Edit Widgets").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Text("Edit Widgets").font(Typo.subtitle()).foregroundStyle(.secondary)
                     }
                 } else {
                     row("Desktop widget", icon: "square.grid.2x2.fill", tint: Color(red: 0.20, green: 0.65, blue: 0.70),
                         info: "macOS only runs a widget from an app signed with an Apple team. This build is signed ad hoc, so it has none; the notch works the same. A build you sign with your own team includes it (see the README).") {
-                        Text("Needs a signed build").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Text("Needs a signed build").font(Typo.subtitle()).foregroundStyle(.secondary)
                     }
                 }
             }
 
             effectsSection
+
+            soundsSection
+                .id(SetupFocus.sounds)
 
             buildsSection
 
@@ -779,7 +826,7 @@ struct SetupView: View {
             if isDone {
                 HStack(spacing: 10) {
                     NotchGlyph().frame(width: 34, height: 14)
-                    Text("Hover the notch to see your sessions.").font(.system(size: 13, weight: .medium))
+                    Text("Hover the notch to see your sessions.").font(Typo.title(.medium))
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 12).padding(.vertical, 10)
@@ -858,8 +905,8 @@ struct SetupView: View {
             info = "Contents/MacOS/ai-notch-hook is missing from the app. Install it again."
         }
         return HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text(text).font(.system(size: 13, weight: .medium))
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).decorative()
+            Text(text).font(Typo.title(.medium))
             InfoMark(text: info)
             Spacer(minLength: 0)
         }
@@ -876,20 +923,20 @@ struct SetupView: View {
         if let mark = model.quarantine { info += " Quarantine flag: \(mark)" }
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                Text("macOS is blocking AI Notch's helper.").font(.system(size: 13, weight: .medium))
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).decorative()
+                Text("macOS is blocking AI Notch's helper.").font(Typo.title(.medium))
                 InfoMark(text: info)
                 Spacer(minLength: 0)
             }
             Text(model.unquarantineCommand)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Typo.body(mono: true))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 9).padding(.vertical, 7)
                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
             HStack(spacing: 8) {
-                Text("Run it in Terminal, then Check Again.").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("Run it in Terminal, then Check Again.").font(Typo.subtitle()).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 CopyButton(text: model.unquarantineCommand)
             }
@@ -950,13 +997,13 @@ struct SetupView: View {
                 badge(prs.text, symbol: prs.ok ? "checkmark.circle.fill" : "circle.dashed", color: prs.ok ? .green : .secondary)
                     .lineLimit(1).fixedSize()
             }
-            Toggle("", isOn: Binding(get: { prs.on }, set: { model.setPullRequests($0) }))
+            Toggle("Pull requests", isOn: Binding(get: { prs.on }, set: { model.setPullRequests($0) }))
                 .toggleStyle(.switch).controlSize(.small).labelsHidden()
         }
         if prs.needsToken && !stepsShown {
             // A quiet hint: Pipelines works; pull requests wait for a token with the scope.
             HStack(spacing: 8) {
-                Text("PRs need a new token.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("PRs need a new token.").font(Typo.body()).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button(showsTokenSteps ? "Hide" : "How") { showsTokenSteps.toggle() }.controlSize(.small)
                 Button("Check Again", action: model.recheckBitbucket).controlSize(.small)
@@ -984,7 +1031,7 @@ struct SetupView: View {
                         Toggle("Ready to merge", isOn: Binding(get: { notify.ready }, set: { var next = notify; next.ready = $0; model.setPRNotify(next) }))
                     }
                 }
-                .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+                .toggleStyle(.checkbox).font(Typo.subtitle()).fixedSize()
             }
             .padding(.vertical, 4)
         }
@@ -1006,15 +1053,15 @@ struct SetupView: View {
     private var configSteps: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Save as \(BuildsConfig.displayPath) with your own values. Leave out a part you don't use.")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(Typo.body()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text(BuildsConfig.example)
-                .font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+                .font(Typo.label(mono: true)).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8).padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
             HStack(spacing: 8) {
-                Text("searchRoots finds your Bitbucket clones.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("searchRoots finds your Bitbucket clones.").font(Typo.body()).foregroundStyle(.secondary)
                 InfoMark(text: Self.configHelp)
                 Spacer(minLength: 0)
                 CopyButton(text: BuildsConfig.example)
@@ -1030,15 +1077,15 @@ struct SetupView: View {
                 Text("1. In Atlassian account settings → Security → API tokens, create an API token with scopes for Bitbucket: read:repository, read:pipeline, read:pullrequest and read:user (up to 365 days). A token cannot gain scopes later; a new one replaces the old.")
                 Text("2. Paste this command into Terminal and put in the token's expiry date. Then copy the token and press Return: the command reads it from the clipboard and clears the clipboard. (Typing it at the `-w` prompt cuts it to 128 characters; these tokens are 192.)")
             }
-            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            .font(Typo.body()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text(Self.bitbucketCommand)
-                .font(.system(size: 10.5, design: .monospaced)).textSelection(.enabled)
+                .font(Typo.label(mono: true)).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8).padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
             HStack(spacing: 8) {
-                Text("3. Check Again (or open the notch). Nothing else to set.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("3. Check Again (or open the notch). Nothing else to set.").font(Typo.body()).foregroundStyle(.secondary)
                 InfoMark(text: "The token stays in your login Keychain (not synced) and is read with /usr/bin/security; it is never written to a file or a log. AI Notch warns 14 days before the date you give. To disconnect: security delete-generic-password -s \(BitbucketConfig.tokenService)")
                 Spacer(minLength: 0)
                 CopyButton(text: Self.bitbucketCommand)
@@ -1067,7 +1114,7 @@ struct SetupView: View {
             divider
             row("Agent analytics", icon: "chart.xyaxis.line", tint: Color(red: 0.39, green: 0.17, blue: 0.64), info: Self.telemetryHelp) {
                 if let problem = model.telemetryProblem {
-                    Text(problem).font(.system(size: 11)).foregroundStyle(.orange).lineLimit(2).frame(maxWidth: 220, alignment: .trailing)
+                    Text(problem).font(Typo.body()).foregroundStyle(.orange).lineLimit(2).frame(maxWidth: 220, alignment: .trailing)
                 }
                 Button(model.telemetryOn ? "Turn Off" : "Turn On…") { model.setTelemetry(!model.telemetryOn) }
                     .controlSize(.small)
@@ -1107,6 +1154,7 @@ struct SetupView: View {
                 box("Incident resolved", \.incidentResolved)
                 box("Error rate / latency", \.metrics)
             }
+            box("Watchdog story", \.watchdogStory)
             Divider().padding(.vertical, 2)
             HStack(spacing: 12) {
                 box("Pop open the notch", \.popOpen)
@@ -1114,7 +1162,7 @@ struct SetupView: View {
             }
             box("Remind every 2 h if still alerting", \.reminder)
         }
-        .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+        .toggleStyle(.checkbox).font(Typo.subtitle()).fixedSize()
         .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
     }
 
@@ -1122,15 +1170,15 @@ struct SetupView: View {
     private var prodConfigSteps: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Add this to \(BuildsConfig.displayPath) (inside its outer braces) with your own site, query and numbers.")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(Typo.body()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text(DatadogConfig.example)
-                .font(.system(size: 9.5, design: .monospaced)).textSelection(.enabled)
+                .font(Typo.caption(mono: true)).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8).padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
             HStack(spacing: 8) {
-                Text("monitors is the Manage Monitors search.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("monitors is the Manage Monitors search.").font(Typo.body()).foregroundStyle(.secondary)
                 InfoMark(text: Self.prodConfigHelp)
                 Spacer(minLength: 0)
                 CopyButton(text: DatadogConfig.example)
@@ -1161,50 +1209,50 @@ struct SetupView: View {
                 case .signedOut:
                     Button("Sign in with Datadog") { auth.signIn() }
                         .controlSize(.small).buttonStyle(.borderedProminent)
-                    Text(site).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(site).font(Typo.body()).foregroundStyle(.secondary).lineLimit(1)
                     InfoMark(text: "Opens Datadog's sign-in in your browser. Approve AI Notch there; it asks only to read monitors, incidents, metrics, traces and Watchdog events (monitors_read, incident_read, timeseries_query, apm_read, events_read). The tokens stay in your login Keychain (\(DatadogConfig.keyService), not synced) and renew by themselves for about 30 days.")
                     Spacer(minLength: 0)
                 case .working(let text):
-                    Image(systemName: "hourglass").foregroundStyle(.secondary)
-                    Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Image(systemName: "hourglass").foregroundStyle(.secondary).decorative()
+                    Text(text).font(Typo.subtitle()).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     Button("Cancel") { auth.cancel() }.controlSize(.small)
                 case .waiting:
-                    Image(systemName: "safari").foregroundStyle(.secondary)
-                    Text("Waiting for the browser…").font(.system(size: 12))
+                    Image(systemName: "safari").foregroundStyle(.secondary).decorative()
+                    Text("Waiting for the browser…").font(Typo.subtitle())
                     InfoMark(text: "Approve AI Notch in the Datadog tab that opened. AI Notch waits 5 minutes for the answer on 127.0.0.1. Open Again shows the same page if you closed it.")
                     Spacer(minLength: 0)
                     Button("Open Again") { auth.reopen() }.controlSize(.small)
                     Button("Cancel") { auth.cancel() }.controlSize(.small)
                 case .signedIn(let org, let tokenSite, let scopes, let expiry):
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).decorative()
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Signed in\(org.map { " as \($0)" } ?? "")").font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
-                        Text("Renews automatically").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("Signed in\(org.map { " as \($0)" } ?? "")").font(Typo.subtitle()).lineLimit(1).truncationMode(.tail)
+                        Text("Renews automatically").font(Typo.body()).foregroundStyle(.secondary)
                     }
                     InfoMark(text: "\(tokenSite), scopes \(scopes.joined(separator: ", ")). The access token lasts an hour (this one until \(Self.clock.string(from: Date(timeIntervalSince1970: expiry)))) and renews itself; the sign-in lasts about 30 days, then asks again. Sign Out deletes the tokens from this Mac. \(DatadogOAuth.revokeHint)")
                     Spacer(minLength: 0)
                     Button("Sign Out") { auth.signOut() }.controlSize(.small)
                 case .signInAgain(let why):
-                    Image(systemName: "circle.dashed").foregroundStyle(.secondary)
-                    Text("Sign in again").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Image(systemName: "circle.dashed").foregroundStyle(.secondary).decorative()
+                    Text("Sign in again").font(Typo.subtitle()).foregroundStyle(.secondary)
                     InfoMark(text: why)
                     Spacer(minLength: 0)
                     Button("Sign In Again") { auth.signIn() }.controlSize(.small)
                 }
             }
             if let note = auth.note {
-                Text(note).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(note).font(Typo.body()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if !isSignedIn {
                 Button {
                     showsProdSteps.toggle()
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: showsProdSteps ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .semibold))
+                        Image(systemName: showsProdSteps ? "chevron.down" : "chevron.right").font(Typo.caption(.semibold)).decorative()
                         Text("Or use service-account keys")
                     }
-                    .font(.system(size: 11)).foregroundStyle(.secondary).contentShape(Rectangle())
+                    .font(Typo.body()).foregroundStyle(.secondary).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -1234,11 +1282,11 @@ struct SetupView: View {
                 }
                 Text("Then copy each key and run its command; it reads the key from the clipboard and clears it.")
             }
-            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            .font(Typo.body()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             ForEach([DatadogConfig.apiKeyAccount, DatadogConfig.appKeyAccount], id: \.self) { account in
                 HStack(alignment: .top, spacing: 8) {
                     Text(DatadogConfig.saveCommand(account))
-                        .font(.system(size: 10.5, design: .monospaced)).textSelection(.enabled)
+                        .font(Typo.label(mono: true)).textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 8).padding(.vertical, 6)
@@ -1259,19 +1307,19 @@ struct SetupView: View {
     private var machineSection: some View {
         section("Machine") {
             row("Dev machine guard", icon: "memorychip", tint: Color(red: 0.16, green: 0.55, blue: 0.45), info: Self.machineHelp) {
-                Toggle("", isOn: Binding(get: { model.machineOn }, set: { model.setMachineOn($0) }))
+                Toggle("Dev machine guard", isOn: Binding(get: { model.machineOn }, set: { model.setMachineOn($0) }))
                     .toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Notify", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
                 info: "Only while the screen is locked: memory critical (under 2 GB available, or the kernel's critical pressure) for 30 seconds, naming the biggest dev process. Its one action opens the Machine panel; nothing is closed from a notification. It comes again only after 10 minutes back at normal.") {
                 Toggle("Memory critical", isOn: Binding(get: { model.machineNotify }, set: { model.setMachineNotify($0) }))
-                    .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+                    .toggleStyle(.checkbox).font(Typo.subtitle()).fixedSize()
                     .disabled(!model.machineOn)
             }
             divider
             row("Background commands", icon: "terminal", tint: Color(red: 0.35, green: 0.38, blue: 0.45), info: CommandsPanel.about) {
-                Toggle("", isOn: Binding(get: { model.commandsOn }, set: { model.setCommandsOn($0) }))
+                Toggle("Background commands", isOn: Binding(get: { model.commandsOn }, set: { model.setCommandsOn($0) }))
                     .toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
         }
@@ -1285,57 +1333,177 @@ struct SetupView: View {
     warnBelowMB: amber under this much free memory. idleMinutes: quiet this long counts as idle. exclude: kinds never shown (metro, jest, verify, turbo, emulator, simulator, simulatorApp, gradle, kotlin, adb, watchman).
     """
 
+    /// One short sound per kind of event (SoundPlayer): a master switch, the volume, a row for each.
+    private var soundsSection: some View {
+        section("Sounds", highlighted: model.focus == .sounds) {
+            row("Sounds", icon: "speaker.wave.2.fill", tint: Color(red: 0.36, green: 0.40, blue: 0.80),
+                info: "A short, soft sound for each kind of event, a different one each, so you learn what means what. They replace the notification's own sound (a notification for an event switched off below is silent too). Two events within 1.5 s play only the more important one, in this order: production alert, needs you, failed turn, VPN or memory, build failed, context, pull request news, build passed, finished. Nothing plays when the app starts for what was already there. ▶ plays one. Nothing is kept loaded while silent.") {
+                Toggle("Sounds", isOn: $soundPrefs.master).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
+            row("Volume", icon: "speaker.fill", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
+                info: "How loud the sounds play, on top of the Mac's volume. All nine are levelled to the same loudness.") {
+                Slider(value: $soundPrefs.volume, in: 0...1).controlSize(.small).frame(width: 120)
+                    .ax("Sound volume", value: "\(Int((soundPrefs.volume * 100).rounded())) percent")
+                    .disabled(!soundPrefs.master)
+            }
+            ForEach(EventSound.allCases, id: \.self) { event in
+                divider
+                row(event.title, icon: Self.soundIcon(event), tint: Self.soundTint(event),
+                    info: Self.soundHelp(event)) {
+                    Button { SoundPlayer.shared.preview(event) } label: {
+                        Image(systemName: "play.fill").font(Typo.caption(.semibold))
+                    }
+                    .buttonStyle(.borderless).controlSize(.small)
+                    .ax("Play the \(event.title) sound")
+                    Toggle(event.title, isOn: Binding(get: { soundPrefs.isOn(event) }, set: { soundPrefs.set(event, on: $0) }))
+                        .toggleStyle(.switch).controlSize(.small).labelsHidden()
+                        .disabled(!soundPrefs.master)
+                }
+            }
+            Text("Sounds: Material Design sound resources by Google, CC BY 4.0 (levels adjusted)")
+                .font(Typo.label()).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private static func soundIcon(_ event: EventSound) -> String {
+        switch event {
+        case .needsInput: return "hand.raised.fill"
+        case .finished: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.octagon.fill"
+        case .contextFull: return "gauge.with.dots.needle.100percent"
+        case .prodAlert: return "bolt.horizontal.fill"
+        case .buildFailed: return "xmark.circle.fill"
+        case .buildPassed: return "hammer.fill"
+        case .prNews: return "arrow.triangle.pull"
+        case .trouble: return "wifi.exclamationmark"
+        }
+    }
+
+    private static func soundTint(_ event: EventSound) -> Color {
+        switch event {
+        case .needsInput, .contextFull: return Color(red: 0.96, green: 0.62, blue: 0.14)
+        case .finished, .buildPassed: return Color(red: 0.30, green: 0.76, blue: 0.54)
+        case .failed, .buildFailed, .prodAlert: return Color(red: 0.90, green: 0.30, blue: 0.27)
+        case .prNews: return Color(red: 0.25, green: 0.52, blue: 0.93)
+        case .trouble: return Color(red: 0.42, green: 0.45, blue: 0.52)
+        }
+    }
+
+    private static func soundHelp(_ event: EventSound) -> String {
+        switch event {
+        case .needsInput: return "A session starts waiting on you: a permission or a question."
+        case .finished: return "An agent finishes a turn that took 20 s or more."
+        case .failed: return "A Claude Code turn ends on an API error."
+        case .contextFull: return "A session's context window is nearly full (the Context alerts level)."
+        case .prodAlert: return "Datadog news that notifies: a monitor alerting or warning, an incident, a number over its limit, a Watchdog story; and a deploy that looks worse. Recoveries stay silent."
+        case .buildFailed: return "One of your Bitbucket pipelines or EAS builds fails, seen live."
+        case .buildPassed: return "One of your Bitbucket pipelines or EAS builds passes, seen live."
+        case .prNews: return "Pull request news you have ticked above: approved, changes, comments, review requested, merged and so on."
+        case .trouble: return "A VPN connection drops by itself, or the Mac's memory stays critical for 30 s."
+        }
+    }
+
     /// The light effects around the closed notch (NotchEffects): the style and when it plays.
     private var effectsSection: some View {
         section("Effects") {
             row("Keyboard shortcuts", icon: "keyboard", tint: Color(red: 0.35, green: 0.38, blue: 0.45), info: Self.hotkeysHelp) {
-                Toggle("", isOn: Binding(get: { model.hotkeysOn }, set: { model.setHotkeys($0) }))
+                Toggle("Keyboard shortcuts", isOn: Binding(get: { model.hotkeysOn }, set: { model.setHotkeys($0) }))
                     .toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Style", icon: "sparkles", tint: Color(red: 0.93, green: 0.36, blue: 0.62),
                 info: "Light around the closed notch. Scanner: a light running to and fro along its edge, in the working agent's colour. Neon: its edge in a turning rainbow. Lights: coloured bulbs under it, twinkling. Aurora: green, teal and violet light drifting under it. A session waiting on you shows the amber glow instead. Drawn by Core Animation at 30 fps at most, like the spinner.") {
-                Picker("", selection: $effects.style) {
+                Picker("Style", selection: $effects.style) {
                     ForEach(EffectsPrefs.Style.allCases) { style in Text(style.title).tag(style) }
                 }
                 .labelsHidden().pickerStyle(.menu).fixedSize()
             }
             divider
             row("Only while working", icon: "bolt.fill", tint: Color(red: 0.96, green: 0.62, blue: 0.14),
-                info: "On: the style plays while an agent works, a subagent runs or a pipeline runs. Off: whenever the notch is closed.") {
-                Toggle("", isOn: $effects.onlyWhileWorking).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                info: "On: the style shows only while an agent works, a subagent runs or a pipeline runs. Off: whenever the notch is closed. With \"Calm until needed\" on, the style moves only as a cue (see below); this decides when its resting picture shows.") {
+                Toggle("Only while working", isOn: $effects.onlyWhileWorking).toggleStyle(.switch).controlSize(.small).labelsHidden()
                     .disabled(effects.style == .off)
+            }
+            divider
+            row("Calm until needed", icon: "moon.stars.fill", tint: Color(red: 0.40, green: 0.45, blue: 0.80),
+                info: "On: the closed notch is still unless something needs you. The session dots and the pet hold still while an agent works, and the edge style rests (Neon and Lights as a dimmed still picture; Scanner and Aurora hidden) until a session waits, a build fails or prod alerts. Then the amber glow pulses, or the style loops. Off: the style loops while an agent works, as before. With Reduce Motion on, nothing loops either way: the cue is a still, bright state.") {
+                Toggle("Calm until needed", isOn: $effects.calmUntilNeeded).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
+            row("Pet", icon: "pawprint.fill", tint: Color(red: 0.85, green: 0.47, blue: 0.34),
+                info: "A small critter beside the session dots that shows the mood of the closed notch: it waves when a session waits for you, looks alarmed when something failed or prod alerts, celebrates when a turn or build finishes, looks focused while an agent works and sleeps when nothing does.") {
+                Toggle("Pet", isOn: $effects.petOn).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Pointer glow", icon: "cursorarrow.motionlines", tint: Color(red: 0.40, green: 0.55, blue: 0.95),
                 info: "A soft light under the closed notch where the pointer is, brighter as it comes nearer (within 100 points).") {
-                Toggle("", isOn: $effects.pointerGlow).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                Toggle("Pointer glow", isOn: $effects.pointerGlow).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Sparkles when done", icon: "party.popper.fill", tint: Color(red: 0.30, green: 0.76, blue: 0.54),
                 info: "A burst of coloured sparks from the notch when an agent finishes a turn.") {
-                Toggle("", isOn: $effects.sparkles).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                Toggle("Sparkles when done", isOn: $effects.sparkles).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Compact rows", icon: "rectangle.compress.vertical", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
                 info: "Denser session rows: the project and model line goes and the agent's name moves up beside the title, so eight rows fit before the list scrolls instead of six.") {
-                Toggle("", isOn: $effects.compactRows).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                Toggle("Compact rows", isOn: $effects.compactRows).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Glass", icon: "drop.halffull", tint: Color(red: 0.25, green: 0.62, blue: 0.90),
                 info: "The open notch as frosted glass: the desktop behind it shows through, blurred, instead of a solid body. Liquid Glass on macOS 26, the menus' blur on earlier versions. The strip on the notch stays black, to blend with the hardware.") {
-                Toggle("", isOn: $effects.glass).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                Toggle("Glass", isOn: $effects.glass).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Keep the Mac awake while an agent works", icon: "moon.zzz.fill", tint: Color(red: 0.36, green: 0.40, blue: 0.80),
                 info: "Stops the Mac sleeping on its own while an agent works and for 2 minutes after the last one stops, so a turn goes on with the screen locked. The display may still sleep. Shown as \"AI Notch: an agent is working\" in pmset -g assertions. Closing the lid still sleeps the Mac unless a display is attached.") {
-                Toggle("", isOn: $effects.keepAwake).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                Toggle("Keep the Mac awake while an agent works", isOn: $effects.keepAwake).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Also on battery", icon: "battery.50percent", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
                 info: "Keeps the Mac awake on battery too, but lets go below 20% charge.") {
-                Toggle("", isOn: $effects.keepAwakeOnBattery).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                Toggle("Also on battery", isOn: $effects.keepAwakeOnBattery).toggleStyle(.switch).controlSize(.small).labelsHidden()
                     .disabled(!effects.keepAwake)
+            }
+            divider
+            row("Stay awake, lid closed", icon: "laptopcomputer", tint: Color(red: 0.36, green: 0.40, blue: 0.80),
+                info: "Keeps the Mac awake with the lid closed, only while an agent or a build works and for 2 minutes after. It asks AI Notch's helper to hold the system's sleep-disable flag for 90 seconds at a time and renews it every 30; if the app quits or dies, the helper clears the flag itself. On battery it stops at 20% (back above 25%) and when the Mac runs hot. The Mac gets warm shut in a bag: do not carry it like that.") {
+                lidControl
+            }
+            Text("While an agent works. Works on battery down to 20%, stops if the Mac runs hot, needs the helper.")
+                .font(Typo.label()).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.bottom, 8)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The lid switch; or, while the helper is missing or old, what to do about it.
+    @ViewBuilder private var lidControl: some View {
+        let helper = LidAwake.shared.helperOverride ?? vpn.leaseHelper
+        if let working = vpn.working {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(working).font(Typo.subtitle()).foregroundStyle(.secondary)
+            }
+        } else {
+            switch helper {
+            case .ok:
+                Toggle("Stay awake with the lid closed", isOn: $effects.lidAwake).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            case .old:
+                Button("Helper update needed…") { vpn.install() }.controlSize(.small).fixedSize()
+                    .help("Installs the newer helper: asks for your password.")
+            case .missing:
+                if VPNStore.hasBundledEngine || LidAwake.shared.helperOverride != nil {
+                    Button("Install helper…") { vpn.install() }.controlSize(.small).fixedSize()
+                        .help("Installs AI Notch's helper: asks for your password.")
+                } else {
+                    Text("Not in this build").font(Typo.subtitle()).foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -1349,14 +1517,14 @@ struct SetupView: View {
             divider
             row("Show in the notch", icon: "rectangle.topthird.inset.filled", tint: Color(red: 0.36, green: 0.42, blue: 0.52),
                 info: "The VPN chip in the footer and the VPN panel. Off, both are hidden; a connection keeps running.") {
-                Toggle("", isOn: Binding(get: { vpn.isOn }, set: { vpn.setEnabled($0) }))
+                Toggle("Show in the notch", isOn: Binding(get: { vpn.isOn }, set: { vpn.setEnabled($0) }))
                     .toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
             row("Notify", icon: "bell.badge.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
                 info: "When a connection that was up ends without Disconnect (the network went away, the server ended it). Also while the screen is unlocked: traffic has stopped going through the VPN. Its one action opens the VPN panel.") {
                 Toggle("Connection dropped", isOn: Binding(get: { vpn.notifyDrop }, set: { vpn.setNotify($0) }))
-                    .toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
+                    .toggleStyle(.checkbox).font(Typo.subtitle()).fixedSize()
             }
             if vpn.helper == .running {
                 ForEach(vpn.profiles) { profile in
@@ -1372,7 +1540,7 @@ struct SetupView: View {
                 divider
                 HStack {
                     Text(vpn.profiles.isEmpty ? "No profiles yet." : "\(vpn.profiles.count) profile\(vpn.profiles.count == 1 ? "" : "s")")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .font(Typo.subtitle()).foregroundStyle(.secondary)
                     Spacer()
                     Button("Import Profile…") { vpn.importProfile() }.controlSize(.small)
                 }
@@ -1380,7 +1548,7 @@ struct SetupView: View {
                 .frame(minHeight: 36)
             }
             if let note = vpn.note {
-                Text(note).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(note).font(Typo.body()).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12).padding(.bottom, 8)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1392,17 +1560,17 @@ struct SetupView: View {
         if let working = vpn.working {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text(working).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(working).font(Typo.subtitle()).foregroundStyle(.secondary)
             }
         } else {
             switch vpn.helper {
             case .unknown:
-                Text("—").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("—").font(Typo.subtitle()).foregroundStyle(.secondary)
             case .notInstalled:
                 if VPNStore.hasBundledEngine {
                     Button("Install…") { vpn.install() }.controlSize(.small)
                 } else {
-                    Text("Not in this build").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("Not in this build").font(Typo.subtitle()).foregroundStyle(.secondary)
                         .help("This copy of AI Notch was built without OpenVPN. Run scripts/build-openvpn.sh, then assemble the app again (see the README).")
                 }
             case .notRunning:
@@ -1446,22 +1614,23 @@ struct SetupView: View {
 
     private func section<Content: View>(_ title: String, highlighted: Bool = false, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(highlighted ? Color.accentColor : .secondary).padding(.leading, 4)
+            Text(title).font(Typo.body(.semibold)).foregroundStyle(highlighted ? Color.accentColor : .secondary).padding(.leading, 4)
             VStack(spacing: 0) { content() }
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.04)))
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(highlighted ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: highlighted ? 2 : 1))
-                .animation(.easeOut(duration: 0.3), value: highlighted)
+                .animation(Motion.ease(0.3), value: highlighted)
         }
     }
 
     private func row<Trailing: View>(_ title: String, icon: String, tint: Color, info: String, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+                .font(Typo.body(.semibold)).foregroundStyle(.white)
                 .frame(width: 22, height: 22)
                 .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(tint.gradient))
-            Text(title).font(.system(size: 13))
+                .decorative()
+            Text(title).font(Typo.title())
             InfoMark(text: info)
             Spacer(minLength: 8)
             trailing()
@@ -1489,26 +1658,26 @@ struct SetupView: View {
 
     private func badge(_ text: String, symbol: String, color: Color) -> some View {
         HStack(spacing: 5) {
-            Image(systemName: symbol).foregroundStyle(color)
+            Image(systemName: symbol).foregroundStyle(color).decorative()
             Text(text).foregroundStyle(color == .secondary ? Color.secondary : Color.primary)
         }
-        .font(.system(size: 12))
+        .font(Typo.subtitle())
     }
 
     /// An optional item: on once granted; before Set Up a checkbox for whether to ask; after,
     /// a button that asks.
     @ViewBuilder
-    private func optional(granted: Bool, unavailable: Bool, denied: Bool, wants: Binding<Bool>, ask: @escaping () -> Void) -> some View {
+    private func optional(_ name: String, granted: Bool, unavailable: Bool, denied: Bool, wants: Binding<Bool>, ask: @escaping () -> Void) -> some View {
         if granted {
             badge("On", symbol: "checkmark.circle.fill", color: .green)
         } else if unavailable {
-            Text("Needs the app").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Needs the app").font(Typo.subtitle()).foregroundStyle(.secondary)
         } else if denied {
             Button("Open Settings", action: ask).controlSize(.small)
         } else if isDone {
             Button("Turn On", action: ask).controlSize(.small)
         } else {
-            Toggle("", isOn: wants).toggleStyle(.checkbox).labelsHidden()
+            Toggle(name, isOn: wants).toggleStyle(.checkbox).labelsHidden()
                 .help(wants.wrappedValue ? "Set Up asks for this." : "Set Up skips this.")
         }
     }

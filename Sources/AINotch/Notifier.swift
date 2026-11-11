@@ -22,8 +22,6 @@ final class Notifier: NSObject {
     /// A Datadog notification's Snooze 1 h.
     var onProdSnooze: (() -> Void)?
 
-    private let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/notch/notch.log")
-
     /// Notifications need an app bundle; a bare binary (a build run from `.build`) has none.
     private var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
 
@@ -88,7 +86,7 @@ final class Notifier: NSObject {
         content.body = body
         content.categoryIdentifier = "session"
         content.userInfo = ["session": session]
-        content.sound = .default
+        content.sound = systemSound
         let request = UNNotificationRequest(identifier: "session-\(session)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             Task { @MainActor in self.note("posted “\(subtitle)”\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
@@ -105,7 +103,7 @@ final class Notifier: NSObject {
         content.body = flat.count > 160 ? String(flat.prefix(159)) + "…" : flat
         content.categoryIdentifier = failed ? "build-failed" : "build"
         content.userInfo = ["build": id]
-        content.sound = .default
+        content.sound = systemSound
         let request = UNNotificationRequest(identifier: "build-\(id)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             Task { @MainActor in self.note("posted “\(title)”\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
@@ -128,7 +126,7 @@ final class Notifier: NSObject {
         var info: [String: String] = ["prod": "1"]
         if let url = notice.url { info["url"] = url.absoluteString }
         content.userInfo = info
-        content.sound = .default
+        content.sound = systemSound
         prodCount += 1
         let request = UNNotificationRequest(identifier: "prod-\(Int(Date().timeIntervalSince1970))-\(prodCount)", content: content, trigger: nil)
         let what = "\(notice.kinds) [\(notice.keys.joined(separator: ","))]"
@@ -138,6 +136,10 @@ final class Notifier: NSObject {
     }
 
     private var prodCount = 0
+
+    /// The notification's own sound: none while AI Notch plays its event sounds (they replace it;
+    /// one sound per event, and a switch turned off silences that event's notification too).
+    private var systemSound: UNNotificationSound? { SoundPlayer.shared.replacesSystemSound ? nil : .default }
 
     /// A VPN connection dropped. Unlike the other status news it notifies while unlocked too:
     /// traffic has stopped going through the VPN. Its one action opens the VPN panel.
@@ -149,7 +151,7 @@ final class Notifier: NSObject {
         content.body = body
         content.categoryIdentifier = "alert"
         content.userInfo = ["vpn": "1"]
-        content.sound = .default
+        content.sound = systemSound
         let request = UNNotificationRequest(identifier: "vpn-dropped", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             Task { @MainActor in self.note("posted “\(title)”\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
@@ -167,7 +169,7 @@ final class Notifier: NSObject {
         content.body = body
         content.categoryIdentifier = "alert"
         content.userInfo = ["machine": "1"]
-        content.sound = .default
+        content.sound = systemSound
         let request = UNNotificationRequest(identifier: "machine-critical", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             Task { @MainActor in self.note("posted “\(title)”\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
@@ -204,7 +206,7 @@ final class Notifier: NSObject {
         }
         content.categoryIdentifier = "pullrequest"
         if let url = event.url { content.userInfo = ["url": url.absoluteString] }
-        content.sound = .default
+        content.sound = systemSound
         let request = UNNotificationRequest(identifier: "pr-\(event.pr.key)-\(event.tag)", content: content, trigger: nil)
         let tag = event.tag
         UNUserNotificationCenter.current().add(request) { error in
@@ -229,15 +231,7 @@ final class Notifier: NSObject {
     nonisolated static func markResponse() { responseClock.set(Date()) }
 
     func note(_ line: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        guard let data = "\(stamp) \(line)\n".data(using: .utf8) else { return }
-        if let handle = try? FileHandle(forWritingTo: log) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            try? handle.close()
-        } else {
-            try? data.write(to: log)
-        }
+        NotchLog.append(line)
     }
 }
 
@@ -277,12 +271,12 @@ extension Notifier: UNUserNotificationCenterDelegate {
                 if action == "snooze" {
                     Notifier.shared.onProdSnooze?()
                 } else if action != UNNotificationDismissActionIdentifier, let url {
-                    NSWorkspace.shared.open(url)
+                    SafeLink.open(url, for: .datadog)
                 }
                 completionHandler()
                 return
             }
-            if let url { NSWorkspace.shared.open(url) }
+            SafeLink.open(url, for: .anyKnown)
             if machine, action != UNNotificationDismissActionIdentifier { Notifier.shared.onMachine?() }
             if vpn, action != UNNotificationDismissActionIdentifier { Notifier.shared.onVPN?() }
             if let session { Notifier.shared.onOpen?(session) }
@@ -306,6 +300,15 @@ extension Notifier {
             Task { @MainActor in self.note("posted limit \(id)\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
         }
     }
+}
+
+/// Which session alerts are on (Setup): a context window nearly full, and a turn that ended on an
+/// API error. Both default on; like every session notification they post only while the screen is locked.
+enum SessionAlerts {
+    static let contextKey = "alerts.contextFull"
+    static let failureKey = "alerts.sessionFailed"
+    static var contextOn: Bool { UserDefaults.standard.object(forKey: contextKey) as? Bool ?? true }
+    static var failureOn: Bool { UserDefaults.standard.object(forKey: failureKey) as? Bool ?? true }
 }
 
 /// Watches Claude's usage limits for the 80% and 95% marks, with the time to the reset and, when
