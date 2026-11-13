@@ -133,6 +133,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   </dict></array>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>AI Notch records your voice while you hold the dictation key, turns it into text on this Mac and types it where you are. Nothing is saved.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>AI Notch turns your dictation into text with Apple's on-device speech engine.</string>
   <key>NSAppleEventsUsageDescription</key><string>AI Notch selects the Terminal or iTerm2 tab a session runs in when you click its row.</string>
 </dict>
 </plist>

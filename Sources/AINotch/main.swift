@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setup.quitsOnClose = true
             // `--focus prod|vpn`: opened at a section, as the grey Prod chip's click does.
             let focus = args.firstIndex(of: "--focus").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
-            setup.show(focus: focus == "prod" ? .prod : focus == "vpn" ? .vpn : focus == "sounds" ? .sounds : nil)
+            setup.show(focus: focus == "prod" ? .prod : focus == "vpn" ? .vpn : focus == "sounds" ? .sounds : focus == "dictation" ? .dictation : nil)
             // Its number and frame once SwiftUI has laid it out, for `screencapture -l` and clicks.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 guard let info = setup.windowInfo else { return }
@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SetupWindowController.shared.reviews = reviews
         controller = NotchController(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews)
         if let controller, !args.contains("--preview") { Hotkeys.shared.start(controller: controller, store: store) }
+        if !args.contains("--preview") { Dictation.shared.start() }
         // Another copy opened while this one runs asks this one to show the window (see below).
         DistributedNotificationCenter.default().addObserver(forName: showSetupNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { SetupWindowController.shared.show() }
@@ -308,6 +309,9 @@ if let index = CommandLine.arguments.firstIndex(of: "--setup-cli") {
     let command = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : ""
     exit(MainActor.assumeIsolated { Setup.runCLI(command) })
 }
+
+// Dictation's dev entry points (see DictationDebug.swift).
+DictationDebug.runIfAsked(CommandLine.arguments)
 
 // One copy at a time: a second launch (from a disk image, another folder, or a login item beside
 // a copy started by hand) asks the running one to show its setup window, then leaves. A clean

@@ -287,6 +287,8 @@ enum SetupFocus: Equatable {
     case vpn
     /// Dev only: `--setup-preview --focus sounds`.
     case sounds
+    /// Dev only: `--setup-preview --focus dictation`.
+    case dictation
 }
 
 /// builds.json in Setup: whether it is there and what it sets up.
@@ -655,6 +657,9 @@ struct SetupView: View {
     @ObservedObject private var auth = DatadogAuthModel.shared
     @ObservedObject private var effects = EffectsPrefs.shared
     @ObservedObject private var soundPrefs = SoundPrefs.shared
+    @ObservedObject var dictation = Dictation.shared
+    @ObservedObject var dictationPrefs = DictationPrefs.shared
+    @ObservedObject var dictationPermissions = DictationPermissions.shared
     /// The running notch's VPN (a placeholder that asks nothing in a setup preview).
     @ObservedObject private var vpn = SetupWindowController.shared.vpn ?? VPNStore()
     /// A team-signed build carries the widget and the app group it reads; an ad-hoc one neither.
@@ -812,6 +817,9 @@ struct SetupView: View {
 
             soundsSection
                 .id(SetupFocus.sounds)
+
+            dictationSection
+                .id(SetupFocus.dictation)
 
             buildsSection
 
@@ -1610,9 +1618,9 @@ struct SetupView: View {
     The helper's log: \(VPNPaths.log). Remove takes the helper, OpenVPN and (unless kept) the profiles away.
     """
 
-    private var divider: some View { Divider().padding(.leading, 44) }
+    var divider: some View { Divider().padding(.leading, 44) }
 
-    private func section<Content: View>(_ title: String, highlighted: Bool = false, @ViewBuilder _ content: () -> Content) -> some View {
+    func section<Content: View>(_ title: String, highlighted: Bool = false, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(Typo.body(.semibold)).foregroundStyle(highlighted ? Color.accentColor : .secondary).padding(.leading, 4)
             VStack(spacing: 0) { content() }
@@ -1623,7 +1631,7 @@ struct SetupView: View {
         }
     }
 
-    private func row<Trailing: View>(_ title: String, icon: String, tint: Color, info: String, @ViewBuilder trailing: () -> Trailing) -> some View {
+    func row<Trailing: View>(_ title: String, icon: String, tint: Color, info: String, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
                 .font(Typo.body(.semibold)).foregroundStyle(.white)
@@ -1656,7 +1664,7 @@ struct SetupView: View {
         }
     }
 
-    private func badge(_ text: String, symbol: String, color: Color) -> some View {
+    func badge(_ text: String, symbol: String, color: Color) -> some View {
         HStack(spacing: 5) {
             Image(systemName: symbol).foregroundStyle(color).decorative()
             Text(text).foregroundStyle(color == .secondary ? Color.secondary : Color.primary)
