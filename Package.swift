@@ -13,8 +13,12 @@ let package = Package(
         .target(name: "VPNCore"),
         // The VPN helper: runs as root (a launch daemon), checks profiles and runs OpenVPN for the app.
         .executableTarget(name: "ai-notch-vpnd", dependencies: ["VPNCore"]),
+        // Dictation's logic without the UI: the clean-up rules, the Claude request and reply, the
+        // hotkey gestures, the pasteboard round trip. Unit-tested (`swift test`).
+        .target(name: "DictationCore"),
+        .testTarget(name: "DictationCoreTests", dependencies: ["DictationCore"]),
         // The notch app: reads the state files and draws them under the notch.
-        .executableTarget(name: "AINotch", dependencies: ["NotchCore", "VPNCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
+        .executableTarget(name: "AINotch", dependencies: ["NotchCore", "VPNCore", "DictationCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
     ],
     swiftLanguageModes: [.v5]
 )
