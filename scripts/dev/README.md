@@ -203,3 +203,17 @@
   (a health number's timeseries, by a word in its query), and `triggeredMinutesAgo` / `createdMinutesAgo` /
   `resolvedMinutesAgo` on monitors and incidents. `AINotch --preview --panel Prod` with it shows the page.
 - `AINotch --preview --chips-fixture calm|one|three|six` draws the footer from made-up chips.
+
+## Dictation
+
+- `swift test` — the `DictationCore` unit tests (rules, prompt, reply parsing, stub-server round trip,
+  hotkey gestures, pasteboard).
+- `AINotch --dictation-transcribe <audio> [--locale en-IN]` — a file (`say -v Rishi -o x.aiff "…"`)
+  through the same pump and SpeechAnalyzer the microphone uses; prints the raw and rule-cleaned text.
+- `python3 anthropic-stub.py 8787 [ok|refusal|401|slow|answer|maxtokens]` and
+  `AINotch --dictation-clean "um hello" --endpoint http://127.0.0.1:8787/v1/messages [--style english] [--app Slack]`
+  — the Claude request against a stub (made-up key); the stub checks headers and body.
+- `AINotch --dictation-inject "raw words" [--after 3] [--endpoint <url>]` — everything after the
+  speech step (rules, Claude if a key is saved, paste, pill) into the app in front after a delay.
+- `AINotch --dictation-pill` — the pill in each state, for screenshots.
+- `AINotch --setup-preview --focus dictation` — Setup at the Dictation section.

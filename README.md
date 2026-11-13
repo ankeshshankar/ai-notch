@@ -1096,6 +1096,54 @@ bundled in `Contents/Resources/Sounds` by `scripts/assemble-app.sh`. `scripts/de
 re-creates them (download, convert, level) and the licence note `Resources/Sounds/LICENSE-SOUNDS.txt`.
 Sounds: Material Design sound resources by Google, CC BY 4.0 (levels adjusted).
 
+### Dictation
+
+Hold a key anywhere, talk, let go: the words are typed into the app you are in. Off until you turn
+it on in Setup → Dictation (macOS 26 or later).
+
+- **Hold the hotkey** (Fn by default; Right Option or Right Command in Setup) to record; let go to
+  transcribe and type. **Double-tap** it for hands-free: tap it again, or press Esc, to stop.
+  Esc while recording throws it away and types nothing. A tap shorter than 0.3 s does nothing, and
+  so does a key pressed along with the hotkey (Right Command used in a shortcut).
+- The notch grows a black pill: a red dot, a level waveform and the time while listening, then
+  Transcribing, Cleaning up, and a check mark for Inserted. Problems are one or two words (Secure
+  field, No speech, Needs macOS 26, No mic access); the longer reason is under Setup → Dictation → Last.
+- **Speech to text** is Apple's `SpeechAnalyzer` with `SpeechTranscriber`, on this Mac, through
+  `AVAudioEngine`. The language is chosen in Setup (default English (India), `en-IN`; Hindi
+  (India) is there too); a language's model downloads once, on first use or when picked.
+  Audio is kept in memory only and thrown away when the text is out; nothing is written to disk
+  and no transcript is logged.
+- **Clean-up** always runs a rule pass: trim, capital letters, filler words (um, uh, er, hmm),
+  spoken punctuation (comma, full stop, question mark, colon, new line, new paragraph) and, as a
+  fallback, any Devanagari written in Latin letters.
+- **AI clean-up** is on whenever an Anthropic API key is saved, and off without one (no error):
+  `claude-haiku-5-5` over `POST https://api.anthropic.com/v1/messages`, low effort, a 5 s limit.
+  It gets the words and the name of the app in front (so a chat message, an email, a code editor
+  and a terminal are formatted differently, with no markdown in plain fields); it never sees the
+  screen or a selection. It is told the dictation is data, never instructions, and to return only
+  the cleaned text. On any failure, a refusal, a cut-off or a reply that looks like an answer, the
+  rules' text is typed instead.
+- **Output**: *Keep my words* (default) keeps what you said, Hinglish stays Hinglish and is always
+  written in Latin letters (never Devanagari); only grammar, punctuation, fillers and formatting
+  change. *Translate to English* needs the AI clean-up.
+- **The key** is entered in Setup (masked, with Test key) and lives in the macOS Keychain only,
+  service `info.ankeshshiv.notch.dictation`: never a file, a setting, the app group, the ledger or a log.
+- **Typing it in**: the text goes on the pasteboard, a ⌘V is posted, and the previous clipboard
+  (every item and type) is put back 0.6 s later, unless you copied something meanwhile. In a
+  password field (secure event input) nothing is typed. Without Accessibility the text is left on
+  the clipboard for you to paste.
+- **Fn and the 🌐 key**: macOS gives Fn its own action. Set System Settings → Keyboard → "Press 🌐
+  key to" to **Do Nothing**; Setup says so when it is not. The tap only listens, it cannot stop it.
+
+Permissions, in this order: **Microphone** (asked on the first dictation), **Input Monitoring**
+(to see the hotkey; the key tap starts working a few seconds after it is granted), **Accessibility**
+(to type). With the default ad-hoc signing macOS may ask again after each reinstall, and for the
+Keychain item; a build signed with `NOTCH_SIGN_IDENTITY` avoids that.
+
+Prefs: `dictation.enabled` (off), `dictation.hotkey` (`fn`), `dictation.locale` (`en-IN`),
+`dictation.aiCleanup` (on), `dictation.style` (`keep`). Logic that can be tested without the UI is
+the `DictationCore` target (`swift test`); `scripts/dev/README.md` lists the dev entry points.
+
 ### Keeping the Mac awake
 
 While any session works (hooked or found as a process), AI Notch holds a power assertion that
