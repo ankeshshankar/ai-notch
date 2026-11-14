@@ -110,6 +110,53 @@ final class CleanupPromptTests: XCTestCase {
         let same = reply(blocks: [["type": "text", "text": "Sure, I can do that."]])
         XCTAssertEqual(CleanupPrompt.parse(same, original: "sure i can do that"), .text("Sure, I can do that."))
     }
+
+    // MARK: Structured reply and commentary guard
+
+    private func json(_ text: String) -> Data {
+        let inner = try! JSONSerialization.data(withJSONObject: ["text": text])
+        return reply(blocks: [["type": "text", "text": String(data: inner, encoding: .utf8)!]])
+    }
+    private let garbled = "it's working but can't we have a it is covered to my tip but can't it be possible to add where i am being typing"
+
+    func testRequestAsksForJSONSchema() throws {
+        let body = try CleanupPrompt.requestBody(transcript: "hi", style: .keepMyWords, context: .chat, appName: nil)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let format = try XCTUnwrap((json["output_config"] as? [String: Any])?["format"] as? [String: Any])
+        XCTAssertEqual(format["type"] as? String, "json_schema")
+        let schema = try XCTUnwrap(format["schema"] as? [String: Any])
+        XCTAssertEqual(schema["required"] as? [String], ["text"])
+        XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
+    }
+
+    func testParsesJSONText() {
+        XCTAssertEqual(CleanupPrompt.parse(json("Hello, world."), original: "hello world"), .text("Hello, world."))
+    }
+
+    func testMalformedJSONFallsBack() {
+        let bad = reply(blocks: [["type": "text", "text": "{\"text\": \"Hel"]])
+        XCTAssertEqual(CleanupPrompt.parse(bad, original: "hello"), .unusable("malformed JSON reply"))
+        let noField = reply(blocks: [["type": "text", "text": "{\"other\": \"x\"}"]])
+        XCTAssertEqual(CleanupPrompt.parse(noField, original: "hello"), .unusable("malformed JSON reply"))
+    }
+
+    func testTrailingCommentaryIsStripped() {
+        let bad = "It's working, but can't we have a, it is covered to my tip, but can't it be possible to add where I am being typing?\n\nCleaned up: \"It's working, but can't we have a... \" \u{2014} the middle phrase is garbled, so I can't reliably reconstruct it."
+        XCTAssertEqual(CleanupPrompt.parse(json(bad), original: garbled),
+                       .text("It's working, but can't we have a, it is covered to my tip, but can't it be possible to add where I am being typing?"))
+        XCTAssertEqual(CleanupPrompt.parse(reply(blocks: [["type": "text", "text": bad]]), original: garbled),
+                       .text("It's working, but can't we have a, it is covered to my tip, but can't it be possible to add where I am being typing?"))
+    }
+
+    func testAllCommentaryFallsBack() {
+        let bad = "Note: the audio was unclear audio and I couldn't reconstruct it."
+        XCTAssertEqual(CleanupPrompt.parse(json(bad), original: garbled), .unusable("reply is commentary"))
+    }
+
+    func testSpokenNoteIsKept() {
+        XCTAssertEqual(CleanupPrompt.parse(json("Note: the transcript is ready."), original: "note the transcript is ready"), .text("Note: the transcript is ready."))
+        XCTAssertEqual(CleanupPrompt.parse(json("Fix it.\nNote: call me."), original: "fix it note call me"), .text("Fix it.\nNote: call me."))
+    }
 }
 
 /// A canned URL protocol: the stub the cleanup call talks to.
