@@ -1266,8 +1266,13 @@ starts it. It does not touch the hooks; Set Up does. `scripts/make-dmg.sh` lays 
 image's window with Finder AppleScript, so its first run may ask to let your terminal control
 Finder.
 
-Both sign ad hoc (`codesign -s -`) by default. For a build with the desktop widget, sign with your
-own Apple developer team:
+`scripts/make-dmg.sh` signs ad hoc (`codesign -s -`) by default. `scripts/install.sh` instead signs
+with an "Apple Development" identity it finds in the keychain (never an INNCIRCLES one, preferring
+team 8JGNJ474W4; the team id comes from the certificate), because macOS keys the Microphone, Input
+Monitoring and Accessibility grants to the app's designated requirement: an ad-hoc build's is its
+cdhash, which changes on every build, so every ad-hoc install loses the grants. With no identity it
+signs ad hoc and warns; `NOTCH_SIGN_IDENTITY=-` asks for ad hoc on purpose. To choose the identity
+(and get the desktop widget), sign with your own Apple developer team:
 
 ```sh
 NOTCH_SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" NOTCH_TEAM_ID=YOURTEAMID scripts/install.sh
