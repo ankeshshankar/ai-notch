@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Speech
+import os
 
 /// Audio on its way to the analyzer: buffers in the microphone's (or a file's) format are turned
 /// into the analyzer's format and yielded; until the analyzer is ready they wait here. The same
@@ -97,14 +98,20 @@ final class AudioPump: @unchecked Sendable {
 
 enum DictationError: Error, Equatable {
     case unsupportedLocale(String)
-    case assetsUnavailable
+    case modelNotReady
+    case modelDownloading
+    case downloadFailed
+    case noAudioFormat
     case engine(String)
     case needsMacOS26
 
     var short: String {
         switch self {
         case .unsupportedLocale: return "Language not supported"
-        case .assetsUnavailable: return "Language not installed"
+        case .modelNotReady: return "Language model not ready"
+        case .modelDownloading: return "Model downloading"
+        case .downloadFailed: return "Download failed"
+        case .noAudioFormat: return "No audio format"
         case .engine: return "Mic error"
         case .needsMacOS26: return "Needs macOS 26"
         }
@@ -141,10 +148,36 @@ final class SpeechDictation: @unchecked Sendable {
     /// Downloads a language's model when it is not installed. `progress` is told 0…1.
     static func ensureAssets(for locale: Locale, progress: (@Sendable (Double) -> Void)? = nil) async throws {
         let module = SpeechTranscriber(locale: locale, preset: .transcription)
-        let status = await AssetInventory.status(forModules: [module])
+        var status = await AssetInventory.status(forModules: [module])
+        DictationLog.log.info("asset status \(String(describing: status), privacy: .public) for \(locale.identifier, privacy: .public)")
         if CommandLine.arguments.contains("--dictation-trace") { FileHandle.standardError.write(Data("asset status \(status) for \(locale.identifier)\n".utf8)) }
         if status == .installed { return }
-        guard let request = try await AssetInventory.assetInstallationRequest(supporting: [module]) else { throw DictationError.assetsUnavailable }
+        // A model another app (or an earlier run) installed still shows "supported" until this app
+        // reserves the language; reserving is what makes it usable here, and needs no download.
+        do {
+            let reserved = try await AssetInventory.reserve(locale: locale)
+            status = await AssetInventory.status(forModules: [module])
+            DictationLog.log.info("reserved \(locale.identifier, privacy: .public): \(reserved, privacy: .public); status now \(String(describing: status), privacy: .public)")
+        } catch {
+            DictationLog.log.error("reserve failed for \(locale.identifier, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+        if status == .installed { return }
+        let request: AssetInstallationRequest?
+        do { request = try await AssetInventory.assetInstallationRequest(supporting: [module]) } catch {
+            DictationLog.log.error("install request failed: \(String(describing: error), privacy: .public)")
+            throw DictationError.downloadFailed
+        }
+        guard let request else {
+            // No request: either it is installed after all, or another download is running (wait for it).
+            for _ in 0..<240 {
+                status = await AssetInventory.status(forModules: [module])
+                if status == .installed { return }
+                if status != .downloading { break }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            DictationLog.log.error("no install request for \(locale.identifier, privacy: .public), status \(String(describing: status), privacy: .public)")
+            throw status == .downloading ? DictationError.modelDownloading : DictationError.modelNotReady
+        }
         if let progress {
             let watcher = Task { @Sendable in
                 while !Task.isCancelled {
@@ -153,9 +186,16 @@ final class SpeechDictation: @unchecked Sendable {
                 }
             }
             defer { watcher.cancel() }
-            try await request.downloadAndInstall()
+            try await download(request)
         } else {
-            try await request.downloadAndInstall()
+            try await download(request)
+        }
+    }
+
+    private static func download(_ request: AssetInstallationRequest) async throws {
+        do { try await request.downloadAndInstall() } catch {
+            DictationLog.log.error("download failed: \(String(describing: error), privacy: .public)")
+            throw DictationError.downloadFailed
         }
     }
 
@@ -171,8 +211,10 @@ final class SpeechDictation: @unchecked Sendable {
         let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
         let session = SpeechDictation(transcriber: transcriber, locale: locale, pump: pump)
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: source) else {
-            throw DictationError.assetsUnavailable
+            DictationLog.log.error("no audio format for \(locale.identifier, privacy: .public) from \(source.sampleRate, privacy: .public) Hz \(source.channelCount, privacy: .public) ch")
+            throw DictationError.noAudioFormat
         }
+        DictationLog.log.info("analyzer format \(format.sampleRate, privacy: .public) Hz \(format.channelCount, privacy: .public) ch")
         try await session.analyzer.prepareToAnalyze(in: format)
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         session.continuation = continuation

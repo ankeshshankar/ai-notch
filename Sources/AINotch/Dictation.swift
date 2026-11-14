@@ -4,6 +4,7 @@ import Combine
 import DictationCore
 import Foundation
 import Speech
+import os
 
 /// Dictation: hold the hotkey anywhere to record, let go to have it typed into the focused app.
 /// Speech-to-text is Apple's on-device SpeechAnalyzer (macOS 26); the text goes through the rule
@@ -34,6 +35,8 @@ final class Dictation: ObservableObject {
     private var maxLength: DispatchWorkItem?
     private var front: (name: String?, bundle: String?) = (nil, nil)
     private var askedInputMonitoring = false
+    /// Set by a live test: gets the raw transcript instead of inserting it.
+    var liveTestCapture: ((String) -> Void)?
     /// Set by a debug run: where the Claude call goes, in place of the API.
     var endpointOverride: URL?
 
@@ -60,11 +63,10 @@ final class Dictation: ObservableObject {
         }
         tap.uninstall()
         installTap()
-        if !tapInstalled {
-            // Input Monitoring is granted in System Settings while the app runs: try again until it is.
-            retry = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.installTap() }
-            }
+        // Input Monitoring is granted in System Settings while the app runs: keep checking, so the
+        // tap is made as soon as it is, and made again if it dies (access taken away).
+        retry = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.installTap() }
         }
         refreshLocale()
     }
@@ -74,9 +76,10 @@ final class Dictation: ObservableObject {
             askedInputMonitoring = true
             _ = CGRequestListenEventAccess()
         }
+        let was = tapInstalled
         tapInstalled = tap.install(hotkey: prefs.hotkey)
+        if tapInstalled != was { DictationLog.log.info("tap installed \(self.tapInstalled, privacy: .public)") }
         permissions.refresh()
-        if tapInstalled { retry?.invalidate(); retry = nil }
     }
 
     // MARK: Language models
@@ -91,22 +94,26 @@ final class Dictation: ObservableObject {
                 return
             }
             let installed = await SpeechDictation.isInstalled(locale)
+            DictationLog.log.info("locale \(id, privacy: .public) -> \(locale.identifier, privacy: .public); installedLocales has it: \(installed, privacy: .public)")
             await MainActor.run { self?.localeInstalled = installed }
-            guard !installed, self?.prefs.enabled == true else { return }
-            await self?.downloadLocale(locale)
+            guard self?.prefs.enabled == true else { return }
+            // Even an installed model must be reserved for this app (no download then).
+            await self?.downloadLocale(locale, show: !installed)
         }
     }
 
     @available(macOS 26.0, *)
-    private func downloadLocale(_ locale: Locale) async {
-        downloadProgress = 0
+    private func downloadLocale(_ locale: Locale, show: Bool) async {
+        if show { downloadProgress = 0 }
         do {
             try await SpeechDictation.ensureAssets(for: locale) { fraction in
+                guard show else { return }
                 Task { @MainActor in Dictation.shared.downloadProgress = fraction }
             }
             localeInstalled = true
         } catch {
-            lastNote = "Language download failed"
+            DictationLog.log.error("language download failed: \(String(describing: error), privacy: .public)")
+            lastNote = (error as? DictationError)?.short ?? "Download failed"
         }
         downloadProgress = nil
     }
@@ -138,8 +145,9 @@ final class Dictation: ObservableObject {
 
     // MARK: Recording
 
-    private func beginRecording() {
+    func beginRecording() {
         guard #available(macOS 26.0, *) else { fail("Needs macOS 26"); return }
+        DictationLog.log.info("begin recording; mic \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue, privacy: .public), locale \(self.prefs.locale, privacy: .public)")
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized: break
         case .notDetermined:
@@ -166,6 +174,7 @@ final class Dictation: ObservableObject {
         do {
             recorder = try MicRecorder(pump: pump)
         } catch {
+            DictationLog.log.error("mic start failed: \(String(describing: error), privacy: .public)")
             fail((error as? DictationError)?.short ?? "Mic error")
             return
         }
@@ -190,7 +199,7 @@ final class Dictation: ObservableObject {
         pill.model.push(level: level)
     }
 
-    private func finishRecording() {
+    func finishRecording() {
         guard case .listening = phase, #available(macOS 26.0, *) else { return }
         maxLength?.cancel()
         recorder?.stop()
@@ -236,12 +245,15 @@ final class Dictation: ObservableObject {
             guard let box, let session = try await box.value.value as? SpeechDictation else { return fail("Mic error") }
             raw = try await session.finish()
         } catch let error as DictationError {
+            DictationLog.log.error("transcribe failed: \(String(describing: error), privacy: .public)")
             lastNote = error.short
             return fail(error.short)
         } catch {
+            DictationLog.log.error("transcribe failed: \(String(describing: error), privacy: .public)")
             return fail("Couldn't transcribe")
         }
         if Task.isCancelled { return }
+        if let capture = liveTestCapture { capture(raw); phase = .idle; pill.hide(); return }
         let text = await finalText(raw: raw, app: app)
         if Task.isCancelled { return }
         guard !text.isEmpty else { return fail("No speech") }
@@ -284,6 +296,7 @@ final class Dictation: ObservableObject {
     }
 
     private func fail(_ message: String) {
+        DictationLog.log.notice("fail: \(message, privacy: .public)")
         recorder?.stop()
         recorder = nil
         gesture.reset()

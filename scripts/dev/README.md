@@ -215,5 +215,9 @@
   — the Claude request against a stub (made-up key); the stub checks headers and body.
 - `AINotch --dictation-inject "raw words" [--after 3] [--endpoint <url>]` — everything after the
   speech step (rules, Claude if a key is saved, paste, pill) into the app in front after a delay.
+- `open -W -n AINotch.app --stdout out.txt --args --dictation-live-test 6` — what a Fn press does, in the app's own
+  process: real mic, real controller, phases and raw transcript printed, nothing inserted (play `say` meanwhile).
+  `--dictation-assets [--release]` prints/clears this app's reserved languages. Diagnostics:
+  `/usr/bin/log show --last 5m --info --predicate 'subsystem == "info.ankeshshiv.notch"'`.
 - `AINotch --dictation-pill` — the pill in each state, for screenshots.
 - `AINotch --setup-preview --focus dictation` — Setup at the Dictation section.

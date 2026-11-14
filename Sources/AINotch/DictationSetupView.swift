@@ -77,7 +77,7 @@ extension SetupView {
             divider
             row("Input Monitoring", icon: "keyboard", tint: Color(red: 0.42, green: 0.45, blue: 0.52),
                 info: "To notice the hotkey while you are in another app. AI Notch only watches for that key and Esc; it reads no other typing.") {
-                permission(granted: dictation.tapInstalled || dictationPermissions.inputMonitoring, pane: .inputMonitoring)
+                permission(granted: dictationPermissions.inputMonitoring && (dictation.tapInstalled || !dictationPrefs.enabled), pane: .inputMonitoring)
             }
             divider
             row("Accessibility", icon: "hand.point.up.left.fill", tint: Color(red: 0.42, green: 0.45, blue: 0.52),

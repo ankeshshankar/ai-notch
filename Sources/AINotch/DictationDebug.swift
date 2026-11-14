@@ -13,6 +13,11 @@ import Speech
 //   AINotch --dictation-inject "<raw text>" [--after <s>] [--endpoint <url>]
 //       the whole path after speech-to-text (rules, Claude when a key is saved, paste, pill) into
 //       the app in front after a delay, then exits; prints the final text's length, not the text.
+//   AINotch --dictation-live-test <seconds>
+//       what a Fn press does, in this process: the real microphone, the real controller (beginRecording,
+//       finishRecording, the speech session, the pill), nothing inserted. Prints each phase and the raw
+//       transcript. Start it as `open -W -n -a AINotch.app --stdout out.txt --args --dictation-live-test 6`
+//       so the Microphone permission is the app's own; play `say` through the speakers meanwhile.
 //   AINotch --dictation-pill
 //       the pill in each state, three seconds each, with a made-up level.
 enum DictationDebug {
@@ -70,6 +75,26 @@ enum DictationDebug {
                 app.run()
             }
         }
+        if args.contains("--dictation-assets") {
+            // Asset state in this app's identity; `--release` gives the reserved languages back first.
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                if #available(macOS 26.0, *) {
+                    if args.contains("--release") { for l in await AssetInventory.reservedLocales { _ = await AssetInventory.release(reservedLocale: l) } }
+                    let l = Locale(identifier: value("--locale") ?? "en-IN")
+                    let m = SpeechTranscriber(locale: l, preset: .transcription)
+                    print("reserved: \(await AssetInventory.reservedLocales.map { $0.identifier(.bcp47) })")
+                    print("status:   \(await AssetInventory.status(forModules: [m]))")
+                    print("installedLocales has it: \(await SpeechDictation.isInstalled(l))")
+                }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            exit(0)
+        }
+        if let seconds = value("--dictation-live-test").flatMap(Double.init) {
+            MainActor.assumeIsolated { runLiveTest(seconds: seconds) }
+        }
         if args.contains("--dictation-pill") {
             MainActor.assumeIsolated {
                 let app = NSApplication.shared
@@ -93,6 +118,40 @@ enum DictationDebug {
                 app.run()
             }
         }
+    }
+
+    @MainActor
+    static func runLiveTest(seconds: Double) {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let dictation = Dictation.shared
+        func say(_ line: String) { print(line); fflush(stdout) }
+        var finished = false
+        var raw: String?
+        dictation.liveTestCapture = { raw = $0 }
+        let phases = dictation.$phase.sink { say("phase: \($0)") }
+        say("locale: \(dictation.prefs.locale); mic status: \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
+        Task { @MainActor in
+            _ = await DictationPermissions.shared.requestMicrophone()
+            dictation.beginRecording()
+            try? await Task.sleep(for: .seconds(seconds))
+            dictation.finishRecording()
+            // Until the controller is back to idle (or a message has shown), at most 60 seconds.
+            for _ in 0..<600 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if case .listening = dictation.phase { continue }
+                if case .transcribing = dictation.phase { continue }
+                if case .cleaning = dictation.phase { continue }
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+            say("raw: \(raw ?? "(none)")")
+            say("note: \(dictation.lastNote ?? "none")")
+            finished = true
+            _ = phases
+            exit(finished ? 0 : 1)
+        }
+        app.run()
     }
 
     static func transcribeFile(_ path: String, locale: String) async {
