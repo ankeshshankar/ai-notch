@@ -60,6 +60,12 @@ extension SetupView {
                 Toggle("AI clean-up", isOn: $dictationPrefs.aiCleanup).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
             divider
+            row("Type as I speak", icon: "keyboard.fill", tint: Color(red: 0.2, green: 0.62, blue: 0.5),
+                info: "Off: the words show in the pill while you talk, and the whole text is pasted when you let go. On: each phrase is typed into the focused box as soon as it is final, with the keyboard (the clipboard is not used, nothing is ever deleted). AI clean-up is skipped; only the built-in rules run. If you switch app, hit a password field or lose Accessibility, typing stops and the rest is copied. Esc stops it; typed text stays.") {
+                if dictationPrefs.typeLive { Text("No AI clean-up").font(Typo.subtitle()).foregroundStyle(.secondary) }
+                Toggle("Type as I speak", isOn: $dictationPrefs.typeLive).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            divider
             row("Output", icon: "character.book.closed.fill", tint: Color(red: 0.25, green: 0.52, blue: 0.93),
                 info: "Keep my words: what you said stays as you said it. Hinglish stays Hinglish, always written in Latin letters (never Devanagari); only grammar, punctuation, filler words and formatting are fixed. Translate to English needs AI clean-up on and a key.") {
                 Picker("Output", selection: $dictationPrefs.style) {

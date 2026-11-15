@@ -35,6 +35,10 @@ final class Dictation: ObservableObject {
     private var maxLength: DispatchWorkItem?
     private var front: (name: String?, bundle: String?) = (nil, nil)
     private var askedInputMonitoring = false
+    /// Type-as-I-speak's typer for the dictation in progress, and which dictation that is (late
+    /// results of an ended one are ignored).
+    private var typer: LiveTyper?
+    private var liveSession = 0
     /// Set by a live test: gets the raw transcript instead of inserting it.
     var liveTestCapture: ((String) -> Void)?
     /// Set by a debug run: where the Claude call goes, in place of the API.
@@ -164,8 +168,21 @@ final class Dictation: ObservableObject {
         front = (app?.localizedName, app?.bundleIdentifier)
         phase = .listening(since: Date())
         pill.model.wave?.clear()
+        pill.model.resetLive()
         pill.show(phase)
         lastNote = nil
+        liveSession += 1
+        let session = liveSession
+        typer = nil
+        if prefs.typeLive {
+            let live = LiveTyper(style: prefs.style)
+            live.onStop = { [weak self] reason in
+                DictationLog.log.notice("live typing stopped: \(String(describing: reason), privacy: .public)")
+                self?.pill.model.notice = reason.notice
+            }
+            typer = live
+        }
+        let typing = typer != nil
 
         let pump = AudioPump()
         pump.onLevel = { [weak self] level in
@@ -180,14 +197,42 @@ final class Dictation: ObservableObject {
         }
         let source = recorder!.format
         let id = prefs.locale
+        var phraseHandler: (@Sendable (String) -> Void)?
+        if typing { phraseHandler = { phrase in Dictation.deliver(phrase: phrase, session: session) } }
+        let updateHandler: @Sendable (String, String) -> Void = { final, volatile in
+            Dictation.deliver(final: final, volatile: volatile, session: session)
+        }
         speech = Task {
-            let session = try await SpeechDictation.start(localeIdentifier: id, source: source, pump: pump)
-            return SpeechSessionBox(session)
+            let started = try await SpeechDictation.start(
+                localeIdentifier: id, source: source, pump: pump,
+                onUpdate: updateHandler, onPhrase: phraseHandler)
+            return SpeechSessionBox(started)
         }
         // A forgotten hands-free recording ends after five minutes.
         let limit = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.gesture.reset(); self?.finishRecording() } }
         maxLength = limit
         DispatchQueue.main.asyncAfter(deadline: .now() + 300, execute: limit)
+    }
+
+    /// From the results task to the main thread, in order.
+    nonisolated static func deliver(final: String, volatile: String, session: Int) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { Dictation.shared.liveUpdate(final, volatile, session: session) } }
+    }
+
+    nonisolated static func deliver(phrase: String, session: Int) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { Dictation.shared.livePhrase(phrase, session: session) } }
+    }
+
+    /// New words from the speech engine: the pill's caption, while listening.
+    func liveUpdate(_ final: String, _ volatile: String, session: Int) {
+        guard session == liveSession, case .listening = phase else { return }
+        pill.model.setCaption(final: final, volatile: volatile, limit: DictationPillView.captionLimit(notchWidth: NotchGeometry.current().notchWidth))
+    }
+
+    /// A phrase Apple marked final, for type-as-I-speak.
+    func livePhrase(_ phrase: String, session: Int) {
+        guard session == liveSession else { return }
+        typer?.accept(phrase)
     }
 
     /// Mic level for the waveform, about 20 times a second.
@@ -209,9 +254,11 @@ final class Dictation: ObservableObject {
         let box = speech
         speech = nil
         let app = front
+        let live = typer
         processing = Task { [weak self] in
-            await self?.transcribeAndInsert(session: box, app: app)
+            await self?.transcribeAndInsert(session: box, app: app, typer: live)
             self?.processing = nil
+            if self?.typer === live { self?.typer = nil }
         }
     }
 
@@ -221,6 +268,9 @@ final class Dictation: ObservableObject {
         recorder = nil
         let box = speech
         speech = nil
+        typer?.cancel()
+        typer = nil
+        liveSession += 1
         gesture.reset()
         if case .listening = phase { phase = .idle; pill.hide() }
         if #available(macOS 26.0, *), let box {
@@ -229,6 +279,7 @@ final class Dictation: ObservableObject {
     }
 
     private func cancelProcessing() {
+        typer?.cancel()
         processing?.cancel()
         processing = nil
         gesture.reset()
@@ -239,7 +290,7 @@ final class Dictation: ObservableObject {
     // MARK: After the recording
 
     @available(macOS 26.0, *)
-    private func transcribeAndInsert(session box: Task<SpeechSessionBox, Error>?, app: (name: String?, bundle: String?)) async {
+    private func transcribeAndInsert(session box: Task<SpeechSessionBox, Error>?, app: (name: String?, bundle: String?), typer: LiveTyper?) async {
         let raw: String
         do {
             guard let box, let session = try await box.value.value as? SpeechDictation else { return fail("Mic error") }
@@ -254,10 +305,38 @@ final class Dictation: ObservableObject {
         }
         if Task.isCancelled { return }
         if let capture = liveTestCapture { capture(raw); phase = .idle; pill.hide(); return }
+        if let typer { return await finishTyping(typer, raw: raw) }
         let text = await finalText(raw: raw, app: app)
         if Task.isCancelled { return }
         guard !text.isEmpty else { return fail("No speech") }
         await insertAndReport(text)
+    }
+
+    /// Type-as-I-speak, after the release: the phrases Apple finalised on the way were typed as
+    /// they came; whatever is left (the last words, or what a stop held back) goes out now.
+    private func finishTyping(_ typer: LiveTyper, raw: String) async {
+        // Phrases queued from the results task reach the main queue before this hop returns.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in DispatchQueue.main.async { done.resume() } }
+        if typer.stopped == .cancelled || Task.isCancelled { return }
+        // Nothing arrived phrase by phrase (a very short utterance): the whole text is the one phrase.
+        if typer.phrases == 0, !raw.isEmpty { typer.accept(raw) }
+        if let reason = typer.stopped, !typer.rest.isEmpty {
+            let board = NSPasteboard.general
+            board.clearContents()
+            board.setString(typer.rest, forType: .string)
+            phase = .message(reason.copiedMessage)
+            lastNote = reason.copiedMessage
+            pill.show(phase, autoHide: 2.5)
+            gesture.reset()
+            Task { try? await Task.sleep(for: .seconds(2.6)); if case .message = self.phase { self.phase = .idle } }
+        } else if !typer.typed.isEmpty {
+            phase = .inserted
+            pill.show(phase, autoHide: 1.0)
+            gesture.reset()
+            Task { try? await Task.sleep(for: .seconds(1.2)); if self.phase == .inserted { self.phase = .idle } }
+        } else {
+            if typer.stopped == .secureField { fail("Secure field") } else { fail("No speech") }
+        }
     }
 
     /// The rules' text, or Claude's version of it when a key is saved and the switch is on.

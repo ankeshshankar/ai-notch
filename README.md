@@ -1140,8 +1140,15 @@ Permissions, in this order: **Microphone** (asked on the first dictation), **Inp
 (to type). With the default ad-hoc signing macOS may ask again after each reinstall, and for the
 Keychain item; a build signed with `NOTCH_SIGN_IDENTITY` avoids that.
 
+Live words: while you speak the pill shows what was heard (settled words bright, the tail Apple
+may still change dimmer; the newest words stay visible, cut from the left). Setup → "Type as I
+speak" (off by default) instead types each final phrase into the focused box with keyboard events
+(`LiveTyper`; the clipboard is never touched, nothing is deleted, rules only, no AI clean-up). It
+stops, copying the rest, if the app in front changes, a secure field is focused or Accessibility is
+off; Esc stops it and typed text stays.
+
 Prefs: `dictation.enabled` (off), `dictation.hotkey` (`fn`), `dictation.locale` (`en-IN`),
-`dictation.aiCleanup` (on), `dictation.style` (`keep`). Logic that can be tested without the UI is
+`dictation.aiCleanup` (on), `dictation.typeLive` (off), `dictation.style` (`keep`). Logic that can be tested without the UI is
 the `DictationCore` target (`swift test`); `scripts/dev/README.md` lists the dev entry points.
 
 ### Keeping the Mac awake

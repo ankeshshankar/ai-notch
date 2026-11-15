@@ -35,13 +35,13 @@ public enum RuleCleaner {
         ("period", ".", false),
     ]
 
-    public static func clean(_ text: String, style: DictationStyle = .keepMyWords) -> String {
+    public static func clean(_ text: String, style: DictationStyle = .keepMyWords, startsSentence: Bool = true) -> String {
         var s = text.replacingOccurrences(of: "\r", with: "\n")
         s = LatinScript.transliterateDevanagari(s)
         s = replaceSpokenPunctuation(s)
         s = dropFillers(s)
         s = tidySpacing(s)
-        s = capitalise(s)
+        s = capitalise(s, startsSentence: startsSentence)
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -87,9 +87,9 @@ public enum RuleCleaner {
         return s
     }
 
-    static func capitalise(_ text: String) -> String {
+    static func capitalise(_ text: String, startsSentence: Bool = true) -> String {
         var out = ""
-        var upNext = true
+        var upNext = startsSentence
         let chars = Array(text)
         for (i, ch) in chars.enumerated() {
             if upNext, ch.isLetter {

@@ -18,6 +18,8 @@ final class DictationPrefs: ObservableObject {
     @Published var hotkey: DictationHotkey { didSet { defaults.set(hotkey.rawValue, forKey: "dictation.hotkey"); changed() } }
     @Published var locale: String { didSet { defaults.set(locale, forKey: "dictation.locale"); changed() } }
     @Published var aiCleanup: Bool { didSet { defaults.set(aiCleanup, forKey: "dictation.aiCleanup") } }
+    /// Type each phrase into the focused box as it is heard, instead of one paste at the end.
+    @Published var typeLive: Bool { didSet { defaults.set(typeLive, forKey: "dictation.typeLive") } }
     @Published var style: DictationStyle { didSet { defaults.set(style.rawValue, forKey: "dictation.style") } }
     /// Whether a key is saved (the key itself is never held here).
     @Published private(set) var hasKey: Bool
@@ -32,6 +34,7 @@ final class DictationPrefs: ObservableObject {
         hotkey = DictationHotkey(rawValue: defaults.string(forKey: "dictation.hotkey") ?? "") ?? .fn
         locale = defaults.string(forKey: "dictation.locale") ?? Self.defaultLocale
         aiCleanup = defaults.object(forKey: "dictation.aiCleanup") as? Bool ?? true
+        typeLive = defaults.bool(forKey: "dictation.typeLive")
         style = DictationStyle(rawValue: defaults.string(forKey: "dictation.style") ?? "") ?? .keepMyWords
         hasKey = DictationKey.exists()
     }

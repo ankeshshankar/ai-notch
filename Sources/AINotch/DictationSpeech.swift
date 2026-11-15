@@ -202,13 +202,17 @@ final class SpeechDictation: @unchecked Sendable {
     /// Makes the analyzer for `locale`: finds the supported spelling, installs the model when
     /// missing, and starts it listening on a stream the pump feeds.
     /// `source` is the format of the audio the pump will be given.
+    /// `onUpdate` hears the text settled so far and the volatile tail still changing, on every
+    /// result; `onPhrase` hears each phrase the moment Apple marks it final. Both run off the main thread.
     static func start(localeIdentifier: String, source: AVAudioFormat, pump: AudioPump,
-                      progress: (@Sendable (Double) -> Void)? = nil) async throws -> SpeechDictation {
+                      progress: (@Sendable (Double) -> Void)? = nil,
+                      onUpdate: (@Sendable (_ final: String, _ volatile: String) -> Void)? = nil,
+                      onPhrase: (@Sendable (String) -> Void)? = nil) async throws -> SpeechDictation {
         guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: localeIdentifier)) else {
             throw DictationError.unsupportedLocale(localeIdentifier)
         }
         try await ensureAssets(for: locale, progress: progress)
-        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
         let session = SpeechDictation(transcriber: transcriber, locale: locale, pump: pump)
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: source) else {
             DictationLog.log.error("no audio format for \(locale.identifier, privacy: .public) from \(source.sampleRate, privacy: .public) Hz \(source.channelCount, privacy: .public) ch")
@@ -218,11 +222,24 @@ final class SpeechDictation: @unchecked Sendable {
         try await session.analyzer.prepareToAnalyze(in: format)
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         session.continuation = continuation
+        let trace = CommandLine.arguments.contains("--dictation-trace")
         session.results = Task {
             var text = ""
-            for try await result in transcriber.results where result.isFinal {
+            var partials = 0
+            let began = Date()
+            for try await result in transcriber.results {
                 let piece = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !piece.isEmpty { text += (text.isEmpty ? "" : " ") + piece }
+                if result.isFinal {
+                    if !piece.isEmpty { text += (text.isEmpty ? "" : " ") + piece; onPhrase?(piece) }
+                    onUpdate?(text, "")
+                } else {
+                    onUpdate?(text, piece)
+                }
+                if trace {
+                    // Sizes only, never the words.
+                    if !result.isFinal { partials += 1 }
+                    FileHandle.standardError.write(Data(String(format: "t=%.2fs %@ result: %d chars; settled %d chars (partials so far %d)\n", Date().timeIntervalSince(began), result.isFinal ? "FINAL  " : "partial", piece.count, text.count, partials).utf8))
+                }
             }
             return text
         }

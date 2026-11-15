@@ -1,4 +1,5 @@
 import AppKit
+import DictationCore
 import QuartzCore
 import SwiftUI
 
@@ -88,21 +89,59 @@ struct WaveformView: NSViewRepresentable {
 final class DictationPillModel: ObservableObject {
     @Published var phase: DictationPhase = .idle
     weak var wave: WaveView?
+    /// The words heard so far while listening: settled text and the tail still changing.
+    @Published var caption = LiveText.Caption.empty
+    /// A line under the pill while listening (typing stopped), never the words themselves.
+    @Published var notice: String?
     func push(level: Float) { wave?.push(level) }
+
+    func setCaption(final: String, volatile: String, limit: Int) {
+        let next = LiveText.caption(final: final, volatile: volatile, limit: limit)
+        if next != caption { caption = next }
+    }
+
+    func resetLive() {
+        caption = LiveText.Caption.empty
+        notice = nil
+    }
 }
 
 struct DictationPillView: View {
     @ObservedObject var model: DictationPillModel
     var geometry: NotchGeometry
     static let wing: CGFloat = 132
+    /// Room under the notch row for two lines of words; the window is this much taller, the
+    /// width is unchanged.
+    static let captionHeight: CGFloat = 34
+    static let captionPadding: CGFloat = 14
+
+    /// How many characters of caption fit on its two lines, with room to spare.
+    static func captionLimit(notchWidth: CGFloat) -> Int {
+        let width = notchWidth + wing * 2 - captionPadding * 2
+        return max(20, Int(width / 7) * 2 - 8)
+    }
+
+    private var showsCaption: Bool {
+        guard case .listening = model.phase else { return false }
+        return model.notice != nil || !model.caption.isEmpty
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            left.frame(width: Self.wing, alignment: .leading)
-            Color.clear.frame(width: geometry.notchWidth)
-            right.frame(width: Self.wing, alignment: .trailing)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                left.frame(width: Self.wing, alignment: .leading)
+                Color.clear.frame(width: geometry.notchWidth)
+                right.frame(width: Self.wing, alignment: .trailing)
+            }
+            .frame(height: geometry.notchHeight)
+            if showsCaption {
+                captionRow
+                    .padding(.horizontal, Self.captionPadding)
+                    .frame(height: Self.captionHeight, alignment: .top)
+                    .transition(.opacity)
+            }
         }
-        .frame(height: geometry.notchHeight)
+        .animation(.easeOut(duration: 0.12), value: showsCaption)
         .background(Color.black)
         .clipShape(NotchShape(radius: 11))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -146,6 +185,21 @@ struct DictationPillView: View {
         .padding(.trailing, 14)
     }
 
+    @ViewBuilder private var captionRow: some View {
+        if let notice = model.notice {
+            Text(notice).font(Typo.subtitle(.medium)).foregroundColor(Strip.waiting).lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            let c = model.caption
+            let lead = c.cut ? "…" : ""
+            let gap = (c.final.isEmpty || c.volatile.isEmpty) ? "" : " "
+            (Text(lead + c.final).foregroundColor(Strip.ink) + Text(gap + c.volatile).foregroundColor(Strip.ink.opacity(0.5)))
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func label(_ text: String) -> some View {
         Text(text).font(Typo.body(.medium)).foregroundStyle(Strip.ink).lineLimit(1).minimumScaleFactor(0.75)
     }
@@ -175,6 +229,7 @@ final class DictationPill {
         hideWork?.cancel()
         if phase == .idle { hide(); return }
         if panel.alphaValue == 0 || panel.contentView == nil { place() }
+        if case .listening = phase {} else { model.notice = nil }
         model.phase = phase
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { context in
@@ -203,7 +258,8 @@ final class DictationPill {
     private func place() {
         geometry = NotchGeometry.current()
         let width = geometry.notchWidth + DictationPillView.wing * 2
-        let frame = NSRect(x: geometry.screen.midX - width / 2, y: geometry.screen.maxY - geometry.notchHeight, width: width, height: geometry.notchHeight)
+        let height = geometry.notchHeight + DictationPillView.captionHeight
+        let frame = NSRect(x: geometry.screen.midX - width / 2, y: geometry.screen.maxY - height, width: width, height: height)
         panel.contentView = NSHostingView(rootView: DictationPillView(model: model, geometry: geometry))
         panel.setFrame(frame, display: true)
     }

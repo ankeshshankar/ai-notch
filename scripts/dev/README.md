@@ -219,5 +219,8 @@
   process: real mic, real controller, phases and raw transcript printed, nothing inserted (play `say` meanwhile).
   `--dictation-assets [--release]` prints/clears this app's reserved languages. Diagnostics:
   `/usr/bin/log show --last 5m --info --predicate 'subsystem == "info.ankeshshiv.notch"'`.
-- `AINotch --dictation-pill` — the pill in each state, for screenshots.
+- `AINotch --dictation-pill` — the pill in each state (with made-up live words), for screenshots.
+- `AINotch --dictation-type-live-test <audio> [--after 3] [--no-type]` — type-as-I-speak end to end: the file is
+  played in real time, the pill shows the words, each final phrase is typed into the app in front (TextEdit).
+  `--dictation-trace` on `--dictation-transcribe` prints each partial/final result's size and time.
 - `AINotch --setup-preview --focus dictation` — Setup at the Dictation section.

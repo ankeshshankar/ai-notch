@@ -35,6 +35,36 @@ enum DictationInsert {
         return .inserted
     }
 
+    static var accessibilityOn: Bool { AXIsProcessTrusted() }
+
+    /// Types `text` with the keyboard: unicode key events in small chunks, so the clipboard is
+    /// never touched. A line break is Shift+Return (a new line, not "send", in chat boxes).
+    /// Nothing is ever deleted.
+    static func typeUnicode(_ text: String) {
+        let source = CGEventSource(stateID: .privateState)
+        let lines = text.components(separatedBy: "\n")
+        for (i, line) in lines.enumerated() {
+            if i > 0 { postKey(CGKeyCode(kVK_Return), flags: .maskShift, source: source) }
+            for chunk in LiveText.chunks(line) {
+                let units = Array(chunk.utf16)
+                for down in [true, false] {
+                    guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { continue }
+                    event.flags = []
+                    event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+                    event.post(tap: .cghidEventTap)
+                }
+            }
+        }
+    }
+
+    private static func postKey(_ key: CGKeyCode, flags: CGEventFlags, source: CGEventSource?) {
+        for down in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down) else { continue }
+            event.flags = flags
+            event.post(tap: .cghidEventTap)
+        }
+    }
+
     /// ⌘V as a pair of synthetic key events.
     static func postCommandV() {
         let source = CGEventSource(stateID: .privateState)
