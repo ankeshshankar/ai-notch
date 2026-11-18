@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-AI Notch is a macOS 15+ app that sits under the notch and shows coding-agent sessions (Claude Code, Cursor, Codex, Gemini CLI, OpenCode, other agents found as processes), with permission prompts, usage and cost, and other panels (builds, pull requests, Datadog health, machine guard, VPN). It is a SwiftPM package with no Xcode project. The README is the user-facing spec, so update it when behaviour changes.
+AI Notch is a macOS 15+ app that sits under the notch and shows coding-agent sessions (Claude Code, Cursor, Codex, Gemini CLI, OpenCode, other agents found as processes), with permission prompts, usage and cost, and other panels (builds, pull requests, Datadog health, machine guard, VPN). It is a SwiftPM package with no Xcode project. docs/GUIDE.md is the user-facing spec, so update it when behaviour changes; keep README.md a short front page that links into it.
 
 ## Agents
 
