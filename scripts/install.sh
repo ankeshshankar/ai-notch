@@ -29,9 +29,14 @@ fi
 # make-dmg.sh are not affected: they keep reading NOTCH_SIGN_IDENTITY as before).
 #   NOTCH_SIGN_IDENTITY=-   explicit ad hoc (grants reset on each install)
 #   NOTCH_SIGN_IDENTITY, NOTCH_TEAM_ID   use these
-# Otherwise: the valid "Apple Development" identities, never an INNCIRCLES one, preferring team
-# $PREFERRED_TEAM, the first else; the team id is the certificate's OU.
-PREFERRED_TEAM="8JGNJ474W4"
+# Otherwise: the valid "Apple Development" identities, preferring team $PREFERRED_TEAM, the first
+# else; the team id is the certificate's OU. Certificates whose subject contains $SKIP_ORG are left
+# out. Both come from the environment or a local ~/.config/ai-notch/signing (KEY=value lines).
+SIGNING_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ai-notch/signing"
+# shellcheck disable=SC1090
+[ -f "$SIGNING_CONF" ] && . "$SIGNING_CONF"
+PREFERRED_TEAM="${PREFERRED_TEAM:-}"
+SKIP_ORG="${SKIP_ORG:-}"
 if [ "${NOTCH_SIGN_IDENTITY:-}" = "-" ]; then
   unset NOTCH_SIGN_IDENTITY NOTCH_TEAM_ID
   echo "Signing ad hoc (NOTCH_SIGN_IDENTITY=-): macOS will forget the app's permissions on each install." >&2
@@ -42,7 +47,7 @@ elif [ -z "${NOTCH_SIGN_IDENTITY:-}" ] && [ -z "${NOTCH_TEAM_ID:-}" ]; then
     NAME="$(printf '%s' "$LINE" | sed -n 's/^[^"]*"\(Apple Development: .*\)"$/\1/p')"
     [ -n "$NAME" ] || continue
     SUBJ="$(security find-certificate -c "$NAME" -Z -p 2>/dev/null | awk -v h="$HASH" '/^SHA-1 hash:/{m=($3==h)} m&&/BEGIN CERT/{f=1} m&&f{print} m&&/END CERT/{f=0}' | openssl x509 -noout -subject -nameopt multiline 2>/dev/null || true)"
-    case "$SUBJ" in *INNCIRCLES*) continue ;; esac
+    if [ -n "$SKIP_ORG" ]; then case "$SUBJ" in *"$SKIP_ORG"*) continue ;; esac; fi
     OU="$(printf '%s\n' "$SUBJ" | sed -n 's/^ *organizationalUnitName *= *//p' | head -1)"
     [ -n "$OU" ] || continue
     if [ -z "$FOUND" ] || [ "$OU" = "$PREFERRED_TEAM" -a "${FOUND##*|}" != "$PREFERRED_TEAM" ]; then

@@ -1274,8 +1274,8 @@ image's window with Finder AppleScript, so its first run may ask to let your ter
 Finder.
 
 `scripts/make-dmg.sh` signs ad hoc (`codesign -s -`) by default. `scripts/install.sh` instead signs
-with an "Apple Development" identity it finds in the keychain (never an INNCIRCLES one, preferring
-team 8JGNJ474W4; the team id comes from the certificate), because macOS keys the Microphone, Input
+with an "Apple Development" identity it finds in the keychain (set `PREFERRED_TEAM` and `SKIP_ORG`
+in `~/.config/ai-notch/signing` to choose among several; the team id comes from the certificate), because macOS keys the Microphone, Input
 Monitoring and Accessibility grants to the app's designated requirement: an ad-hoc build's is its
 cdhash, which changes on every build, so every ad-hoc install loses the grants. With no identity it
 signs ad hoc and warns; `NOTCH_SIGN_IDENTITY=-` asks for ad hoc on purpose. To choose the identity
