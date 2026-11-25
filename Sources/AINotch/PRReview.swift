@@ -235,7 +235,7 @@ final class PRReviewStore: ObservableObject {
     }
 
     /// The clone from builds.json, `~` expanded.
-    static func repoPath(_ ref: PullRequestRef) -> String? {
+    nonisolated static func repoPath(_ ref: PullRequestRef) -> String? {
         let repos = BitbucketConfig.loadRepos(scan: false)
         guard let path = repos.first(where: { $0.key == ref.repoKey })?.path else { return nil }
         let expanded = (path as NSString).expandingTildeInPath

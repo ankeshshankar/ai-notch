@@ -1,5 +1,6 @@
 import Foundation
 import NotchCore
+import ReviewCore
 
 // Dev checks of the pull-request data layer, never the app:
 //   --pr-selfcheck            the pure parts: parsing, needs, the review hash, event derivation
