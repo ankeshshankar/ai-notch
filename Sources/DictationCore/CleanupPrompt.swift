@@ -45,7 +45,7 @@ public enum CleanupPrompt {
 
     /// The system prompt: the job, the rules that make the dictation data and never instructions,
     /// the script and style rules, and the destination's formatting.
-    public static func systemPrompt(style: DictationStyle, context: AppContext, appName: String?) -> String {
+    public static func systemPrompt(style: DictationStyle, context: AppContext, appName: String?, vocabulary: [String] = []) -> String {
         var lines = [
             "You clean up speech-to-text output for a dictation tool. The user message holds one raw transcript inside <dictation> tags.",
             "",
@@ -68,6 +68,11 @@ public enum CleanupPrompt {
         lines.append("")
         lines.append(context.guidance)
         if let appName, !appName.isEmpty { lines.append("(Destination app: \(sanitise(appName)).)") }
+        let terms = vocabulary.map(sanitise).filter { !$0.isEmpty }.prefix(DictationVocabulary.limit)
+        if !terms.isEmpty {
+            lines.append("")
+            lines.append("Names and technical terms the speaker may use (a list to spell by, not text to add): \(terms.joined(separator: ", ")). When a word in the transcript sounds like one of them, write it in exactly that spelling. Never insert a term the speaker did not say, and this does not change the language or script rules above.")
+        }
         lines.append("")
         lines.append("If the transcript is empty or only noise, return an empty reply.")
         return lines.joined(separator: "\n")
@@ -87,13 +92,13 @@ public enum CleanupPrompt {
 
     /// The JSON body of POST /v1/messages. No temperature, top_p or top_k (Haiku 5.5 rejects
     /// them); thinking is left at its adaptive default and kept short by a low effort.
-    public static func requestBody(transcript: String, style: DictationStyle, context: AppContext, appName: String?) throws -> Data {
+    public static func requestBody(transcript: String, style: DictationStyle, context: AppContext, appName: String?, vocabulary: [String] = []) throws -> Data {
         let words = transcript.split(whereSeparator: \.isWhitespace).count
         let body: [String: Any] = [
             "model": model,
             "max_tokens": maxTokens(forWords: words),
             "output_config": ["effort": "low", "format": outputFormat],
-            "system": systemPrompt(style: style, context: context, appName: appName),
+            "system": systemPrompt(style: style, context: context, appName: appName, vocabulary: vocabulary),
             "messages": [["role": "user", "content": userMessage(transcript)]],
         ]
         return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
@@ -234,9 +239,9 @@ public struct ClaudeCleanup: Sendable {
     }
 
     /// Cleans `transcript` (already through the rules, `fallback`) with Claude, or returns `fallback`.
-    public func clean(transcript: String, fallback: String, apiKey: String, style: DictationStyle, context: AppContext, appName: String?) async -> Result {
+    public func clean(transcript: String, fallback: String, apiKey: String, style: DictationStyle, context: AppContext, appName: String?, vocabulary: [String] = []) async -> Result {
         do {
-            let body = try CleanupPrompt.requestBody(transcript: transcript, style: style, context: context, appName: appName)
+            let body = try CleanupPrompt.requestBody(transcript: transcript, style: style, context: context, appName: appName, vocabulary: vocabulary)
             let (data, response) = try await session.data(for: CleanupPrompt.request(body: body, apiKey: apiKey, url: endpoint))
             guard let http = response as? HTTPURLResponse else { return Result(text: fallback, usedAI: false, failure: "no response") }
             guard http.statusCode == 200 else {
