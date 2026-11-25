@@ -157,6 +157,37 @@ struct PRMarkdownView: View {
 
 // MARK: Cards
 
+/// Add / Skip on a comment card: the side that is on is filled (Add green with a tick, Skip grey),
+/// so the choice reads at a glance.
+private struct AddSkipSwitch: View {
+    var include: Bool
+    var set: (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            side("Add", symbol: "checkmark", on: include, fill: Palette.done, ink: Palette.onDone) { set(true) }
+            side("Skip", symbol: "xmark", on: !include, fill: Palette.ink3.opacity(0.35), ink: Palette.ink) { set(false) }
+        }
+        .padding(2)
+        .background(Capsule().fill(Palette.chip))
+        .fixedSize()
+    }
+
+    private func side(_ title: String, symbol: String, on: Bool, fill: Color, ink: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                if on { Image(systemName: symbol).font(Typo.micro(.bold)).decorative() }
+                Text(title).font(Typo.label(on ? .semibold : .medium))
+            }
+            .foregroundStyle(on ? ink : Palette.ink3)
+            .padding(.horizontal, 9).padding(.vertical, 3)
+            .background(Capsule().fill(on ? fill : Color.clear))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct PRCommentCard: View {
     var card: SuggestedComment
     @ObservedObject var session: PRChatSession
@@ -183,12 +214,8 @@ struct PRCommentCard: View {
                 if card.isPosted {
                     Label("Posted", systemImage: "checkmark.circle.fill").font(Typo.label(.semibold)).foregroundStyle(Palette.done).labelStyle(.titleAndIcon)
                 } else {
-                    Picker("", selection: Binding(get: { card.include }, set: { session.setInclude(card.id, $0) })) {
-                        Text("Add").tag(true)
-                        Text("Skip").tag(false)
-                    }
-                    .pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(width: 96)
-                    .ax("Add or skip this comment", value: card.include ? "Add" : "Skip")
+                    AddSkipSwitch(include: card.include) { session.setInclude(card.id, $0) }
+                        .ax("Add or skip this comment", value: card.include ? "Add" : "Skip")
                 }
             }
             if let title = card.title, !title.isEmpty, !card.isPosted {
