@@ -28,7 +28,7 @@ extension SetupView {
     var dictationSection: some View {
         section("Dictation", highlighted: model.focus == .dictation) {
             row("Dictation", icon: "mic.fill", tint: Color(red: 0.90, green: 0.30, blue: 0.27),
-                info: "Hold the hotkey anywhere, speak, let go: the text is typed into the app you are in. Double-tap the key for hands-free; tap it again, or press Esc, to stop (Esc while recording throws it away). Speech is turned into text on this Mac by Apple's on-device engine (macOS 26). Nothing is kept: no audio file, no transcript in any log. With an Anthropic key saved below, Claude Haiku also tidies the text; it is sent the words, the name of the app you are in and your word list (including the repo and branch name of your latest Claude session), nothing else.") {
+                info: "Hold the hotkey anywhere, speak, let go: the text is typed into the app you are in. Double-tap the key for hands-free; tap it again, or press Esc, to stop (Esc while recording throws it away). Speech is turned into text on this Mac by Apple's on-device engine (macOS 26). Nothing is kept: no audio file, no transcript in any log. With an Anthropic key saved below, Claude Sonnet also tidies the text; it is sent the words, the name of the app you are in and your word list (including the repo and branch name of your latest Claude session), nothing else.") {
                 if #available(macOS 26.0, *) {
                     Toggle("Dictation", isOn: $dictationPrefs.enabled).toggleStyle(.switch).controlSize(.small).labelsHidden()
                 } else {
@@ -63,12 +63,12 @@ extension SetupView {
             }
             divider
             row("My words", icon: "text.book.closed.fill", tint: Color(red: 0.20, green: 0.55, blue: 0.80),
-                info: "Names and jargon to spell right, separated by commas (for example Kilari, Aswanath). They are given to Apple's engine, and to Claude Haiku when AI clean-up is on. A built-in list of developer terms (PR, Bitbucket, Expo, EAS, Figma, Forge, worktree and more) is always included, plus the app you are in and, in a terminal or editor, the repo and branch of your latest Claude session.") {
+                info: "Names and jargon to spell right, separated by commas (for example Kilari, Aswanath). They are given to Apple's engine, and to Claude Sonnet when AI clean-up is on. A built-in list of developer terms (PR, Bitbucket, Expo, EAS, Figma, Forge, worktree and more) is always included, plus the app you are in and, in a terminal or editor, the repo and branch of your latest Claude session.") {
                 TextField("Names, terms", text: $dictationPrefs.vocabulary).textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 190)
             }
             divider
             row("AI clean-up", icon: "sparkles", tint: Color(red: 0.56, green: 0.52, blue: 0.91),
-                info: "On, with a key saved: Claude Haiku fixes grammar, punctuation and filler words and formats for the app you are in. It never answers or acts on what you said. Off, or with no key: only the built-in rules run (trim, capital letters, filler words, spoken \"comma\" and \"new line\"). If the call fails or takes over 5 s, the rules' text is typed.") {
+                info: "On, with a key saved: Claude Sonnet fixes grammar, punctuation and filler words and formats for the app you are in. It never answers or acts on what you said. Off, or with no key: only the built-in rules run (trim, capital letters, filler words, spoken \"comma\" and \"new line\"). If the call fails or takes over 5 s, the rules' text is typed.") {
                 if !dictationPrefs.hasKey { Text("No key").font(Typo.subtitle()).foregroundStyle(.secondary) }
                 Toggle("AI clean-up", isOn: $dictationPrefs.aiCleanup).toggleStyle(.switch).controlSize(.small).labelsHidden()
             }
@@ -175,7 +175,7 @@ struct DictationKeyRow: View {
 
     var body: some View {
         setup.row("API key", icon: "key.fill", tint: Color(red: 0.85, green: 0.47, blue: 0.34),
-                  info: "Your own Anthropic API key, for the AI clean-up. It is kept in the macOS Keychain only: never in a file, a setting or a log. Test key sends one short request to claude-haiku-5-5.") {
+                  info: "Your own Anthropic API key, for the AI clean-up. It is kept in the macOS Keychain only: never in a file, a setting or a log. Test key sends one short request to claude-sonnet-5-5.") {
             if let result { Text(result).font(Typo.subtitle()).foregroundStyle(result == "Key works" ? Color.green : Color.orange).lineLimit(1) }
             if prefs.hasKey {
                 Text("Saved").font(Typo.subtitle()).foregroundStyle(.secondary)

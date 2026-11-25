@@ -8,7 +8,7 @@ import os
 
 /// Dictation: hold the hotkey anywhere to record, let go to have it typed into the focused app.
 /// Speech-to-text is Apple's on-device SpeechAnalyzer (macOS 26); the text goes through the rule
-/// clean-up and, with an API key saved, Claude Haiku; then it is pasted. Off until switched on
+/// clean-up and, with an API key saved, Claude Sonnet; then it is pasted. Off until switched on
 /// in Setup. Nothing is written to disk and no transcript is logged.
 @MainActor
 final class Dictation: ObservableObject {

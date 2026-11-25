@@ -38,7 +38,7 @@ public enum AppContext: String, Sendable {
 
 /// The Claude request for the optional AI clean-up, and the reading of its reply.
 public enum CleanupPrompt {
-    public static let model = "claude-haiku-5-5"
+    public static let model = "claude-sonnet-5-5"
     public static let apiVersion = "2026-10-21"
     public static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     public static let timeout: TimeInterval = 5
@@ -85,12 +85,12 @@ public enum CleanupPrompt {
     }
 
     /// The most the reply may take: the clean-up is about as long as the input, and a translation
-    /// may run longer. Thinking counts toward it on Haiku 5.5, so there is room beyond the text.
+    /// may run longer. Thinking counts toward it on Sonnet 5.5, so there is room beyond the text.
     public static func maxTokens(forWords words: Int) -> Int {
         min(2048, max(512, words * 6 + 256))
     }
 
-    /// The JSON body of POST /v1/messages. No temperature, top_p or top_k (Haiku 5.5 rejects
+    /// The JSON body of POST /v1/messages. No temperature, top_p or top_k (Sonnet 5.5 rejects
     /// them); thinking is left at its adaptive default and kept short by a low effort.
     public static func requestBody(transcript: String, style: DictationStyle, context: AppContext, appName: String?, vocabulary: [String] = []) throws -> Data {
         let words = transcript.split(whereSeparator: \.isWhitespace).count

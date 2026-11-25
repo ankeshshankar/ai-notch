@@ -48,7 +48,7 @@ final class CleanupPromptTests: XCTestCase {
     func testRequestBodyShape() throws {
         let body = try CleanupPrompt.requestBody(transcript: "um hello world", style: .keepMyWords, context: .chat, appName: "Slack")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(json["model"] as? String, "claude-haiku-5-5")
+        XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertEqual((json["output_config"] as? [String: Any])?["effort"] as? String, "low")
         XCTAssertNil(json["temperature"]); XCTAssertNil(json["top_p"]); XCTAssertNil(json["top_k"])
         XCTAssertNil(json["thinking"])
@@ -205,7 +205,7 @@ final class ClaudeCleanupTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "sk-test-fake")
         XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-version"), "2026-10-21")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: StubProtocol.bodies[0]) as? [String: Any])
-        XCTAssertEqual(json["model"] as? String, "claude-haiku-5-5")
+        XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
     }
 
     func testEveryFailureFallsBackToTheRulesText() async {
