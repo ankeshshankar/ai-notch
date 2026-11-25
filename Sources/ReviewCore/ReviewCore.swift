@@ -166,6 +166,8 @@ public struct ReviewRecord: Codable, Sendable, Equatable {
     public var posted: String?
     /// Tools the run asked for and was refused: its verdict stands, but it was partly blind, so Approve stays off.
     public var denied: [String]?
+    /// This run is the one automatic retry of an interrupted run: if it is interrupted too, it stays failed.
+    public var resumed: Bool?
 
     public init(key: String, head: String, phase: ReviewPhase, auto: Bool, queuedAt: Double) {
         self.key = key
@@ -204,7 +206,7 @@ public struct ReviewLedger: Codable, Sendable, Equatable {
             switch record.phase {
             case .reviewing:
                 record.phase = .failed
-                record.error = "interrupted (the notch quit)"
+                record.error = Self.interruptedMessage
                 record.finishedAt = now
                 records[id] = record
             case .queued:
@@ -212,6 +214,17 @@ public struct ReviewLedger: Codable, Sendable, Equatable {
             default: break
             }
         }
+    }
+
+    public static let interruptedMessage = "interrupted (the notch quit)"
+
+    /// Whether an interrupted run (the notch quit mid-review) is started again: once only, for
+    /// the same head, with auto review on, on a pull request I review that is still open (the
+    /// poll lists it), not a draft and not reviewed by me.
+    public static func shouldResume(_ record: ReviewRecord?, head: String?, isDraft: Bool, iReview: Bool, myReviewDone: Bool, autoOn: Bool) -> Bool {
+        guard autoOn, iReview, !isDraft, !myReviewDone, let record, record.phase == .failed else { return false }
+        guard record.error == interruptedMessage, record.resumed != true else { return false }
+        return ReviewGate.sameCommit(record.head, head)
     }
 
     /// Closed pull requests and old records go (30 days after the last news).
@@ -289,7 +302,7 @@ public enum ReviewCommand {
     /// no `curl` of its own (see `bbGetScript`), no editing of the code under review.
     public static func allowedTools(scratch: String) -> [String] {
         let gitRead = ["log", "diff", "show", "merge-base", "rev-parse", "status", "ls-files", "ls-tree", "cat-file", "grep",
-                       "blame", "branch --show-current", "remote get-url", "shortlog", "describe", "name-rev", "for-each-ref"]
+                       "blame", "branch --show-current", "branch -r", "branch -a", "branch --list", "branch --contains", "remote get-url", "shortlog", "describe", "name-rev", "for-each-ref"]
         // `//path` is an absolute path in a permission rule (a single `/` is relative to the project).
         var tools = ["Read", "Grep", "Glob", "Agent", "TodoWrite",
                      "Write(/\(scratch)/**)", "Edit(/\(scratch)/**)"]
@@ -310,6 +323,15 @@ public enum ReviewCommand {
         }
         return tools
     }
+
+    /// Forms of `git branch` that change something; a deny rule beats the allowed listing forms
+    /// (`branch -r -d x` would otherwise match `branch -r *`).
+    public static let deniedTools: [String] = {
+        let flags = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to*", "--unset-upstream*",
+                     "--edit-description*", "--track*", "--no-track*"]
+        return flags.flatMap { ["Bash(git branch \($0):*)", "Bash(git branch * \($0) *)", "Bash(git branch * \($0))",
+                                         "Bash(git -C * branch \($0) *)", "Bash(git -C * branch \($0))", "Bash(git -C * branch * \($0) *)", "Bash(git -C * branch * \($0))"] }
+    }()
 
     /// A permission rule refuses `$VAR` in a command, so the Bitbucket token cannot be put on a
     /// `curl` line. This wrapper, written into the review's scratch folder, reads it from the
@@ -338,13 +360,13 @@ public enum ReviewCommand {
 
         ---
         INPUT: PR number \(prNumber).
-        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(scratch)/bbget <url> [output-file]`, which sends the token itself. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
+        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(scratch)/bbget <url> [output-file]`, which sends the token itself. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
         """
     }
 
     /// Folders outside the repository the review reads or writes: its scratch folder and the skill's files.
-    public static func extraDirectories(scratch: String, home: String) -> [String] {
-        [scratch, home + "/.claude/skills/homes-pr-review"]
+    public static func extraDirectories(scratch: String, home: String, skill: String = ReviewNames.defaultSkill) -> [String] {
+        [scratch, home + "/.claude/skills/" + skill]
     }
 
     /// The notch's hook on the events that only report (the notch folds them into the session's
@@ -367,14 +389,15 @@ public enum ReviewCommand {
     /// own allow rules (git commit, checkout, MCP writes, Edit on skill files) must not widen a
     /// review that reads other people's code. `--agents` supplies the lens and verifier
     /// subagents, which user-level discovery would otherwise have provided.
-    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory()) -> [String] {
+    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory(), skillName: String = ReviewNames.defaultSkill) -> [String] {
         ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill),
          "--setting-sources", ""] + (hookCommand.map { ["--settings", observeHooksJSON(command: $0)] } ?? []) + [
          "--agents", agentsJSON,
-         "--add-dir"] + extraDirectories(scratch: scratch, home: home) + [
+         "--add-dir"] + extraDirectories(scratch: scratch, home: home, skill: skillName) + [
          "--output-format", "json",
          "--permission-mode", "dontAsk",
-         "--allowedTools", allowedTools(scratch: scratch).joined(separator: ",")]
+         "--allowedTools", allowedTools(scratch: scratch).joined(separator: ","),
+         "--disallowedTools", deniedTools.joined(separator: ",")]
     }
 }
 
@@ -414,5 +437,44 @@ public enum ReviewAgents {
         }
         let data = (try? JSONSerialization.data(withJSONObject: agents, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+
+/// The names of the review skill and its two subagents, in the user's own Claude setup
+/// (`~/.claude/skills/<skill>/SKILL.md`, `~/.claude/agents/<lens>.md` and `<verifier>.md`). Kept
+/// in this app's local preferences, never in the repository.
+public struct ReviewNames: Equatable, Sendable {
+    public static let defaultSkill = "pr-review"
+    public static let defaultLens = "pr-lens"
+    public static let defaultVerifier = "pr-verifier"
+    public static let skillKey = "review.skillName", lensKey = "review.lensName", verifierKey = "review.verifierName"
+
+    public var skill: String
+    public var lens: String
+    public var verifier: String
+
+    public init(skill: String = defaultSkill, lens: String = defaultLens, verifier: String = defaultVerifier) {
+        self.skill = Self.clean(skill, fallback: Self.defaultSkill)
+        self.lens = Self.clean(lens, fallback: Self.defaultLens)
+        self.verifier = Self.clean(verifier, fallback: Self.defaultVerifier)
+    }
+
+    /// A file-safe name: letters, digits, `-`, `_`, `.`; anything else (a path, spaces) falls back to the default.
+    public static func clean(_ raw: String, fallback: String) -> String {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ok = !name.isEmpty && !name.hasPrefix(".") && name.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || "-_.".unicodeScalars.contains($0) }
+        return ok ? name : fallback
+    }
+
+    public static func load(_ defaults: UserDefaults = .standard) -> ReviewNames {
+        ReviewNames(skill: defaults.string(forKey: skillKey) ?? defaultSkill, lens: defaults.string(forKey: lensKey) ?? defaultLens,
+                    verifier: defaults.string(forKey: verifierKey) ?? defaultVerifier)
+    }
+
+    public func save(_ defaults: UserDefaults = .standard) {
+        defaults.set(skill, forKey: Self.skillKey)
+        defaults.set(lens, forKey: Self.lensKey)
+        defaults.set(verifier, forKey: Self.verifierKey)
     }
 }

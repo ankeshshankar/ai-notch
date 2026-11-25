@@ -1,7 +1,7 @@
 import Foundation
 import ReviewCore
 
-/// One headless review: `claude -p "/homes-pr-review <n>"` in the repository's clone, through
+/// One headless review: `claude -p` with the review skill's text in the repository's clone, through
 /// the user's own Claude login (the subscription CLI; an API key in the environment is removed,
 /// so it never bills the API). The Bitbucket READ token reaches the child through its
 /// environment only (`BB_API_TOKEN`, what the skill's curl calls use): it is never in the
@@ -73,12 +73,13 @@ final class PRReviewRunner: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: claude)
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        guard let skill = try? String(contentsOfFile: home + "/.claude/skills/homes-pr-review/SKILL.md", encoding: .utf8) else {
-            return .failed("the homes-pr-review skill is not installed")
+        let names = ReviewNames.load()
+        guard let skill = try? String(contentsOfFile: home + "/.claude/skills/\(names.skill)/SKILL.md", encoding: .utf8) else {
+            return .failed("the \(names.skill) skill is not installed (Setup, Pull requests)")
         }
-        let agents = ["homes-pr-lens", "homes-pr-verifier"].compactMap { try? String(contentsOfFile: home + "/.claude/agents/\($0).md", encoding: .utf8) }
-        guard agents.count == 2 else { return .failed("the homes-pr-lens or homes-pr-verifier agent is missing") }
-        process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents), hookCommand: Self.hookCommand())
+        let agents = [names.lens, names.verifier].compactMap { try? String(contentsOfFile: home + "/.claude/agents/\($0).md", encoding: .utf8) }
+        guard agents.count == 2 else { return .failed("the \(names.lens) or \(names.verifier) agent is missing (Setup, Pull requests)") }
+        process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents), hookCommand: Self.hookCommand(), skillName: names.skill)
         process.currentDirectoryURL = URL(fileURLWithPath: job.repoPath, isDirectory: true)
         process.environment = Self.environment(token: job.token, title: "PR review #\(job.ref.id) · \(job.ref.repo)")
         process.standardInput = FileHandle.nullDevice

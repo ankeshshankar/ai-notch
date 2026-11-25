@@ -5,14 +5,14 @@ import ReviewCore
 /// request that newly shows in "to review" (or has new commits) is queued, reviewed one at a
 /// time by `PRReviewRunner`, and the verdict is kept next to it. Dedupe is by pull request and
 /// commit (ReviewLedger, `~/.claude/notch/pr-reviews.json`, next to pr-seen.json); each report is
-/// a file in `~/.claude/notch/reviews/<repo>-<id>-<commit>/report.md`.
+/// a file in `~/Library/Application Support/AINotch/reviews/<repo>-<id>-<commit>/report.md` (outside
+/// `~/.claude`, where Claude Code refuses writes; older ones stay readable in `~/.claude/notch/reviews`).
 ///
 /// Nothing is posted, commented or committed on a pull request from here. Approve and
 /// request-changes are only ever made by `perform`, after a click and a confirm, on fresh data.
 @MainActor
 final class PRReviewStore: ObservableObject {
     /// Repositories the review skill knows.
-    static let supportedRepos: Set<String> = ["homes-api-app", "homes-ecosystem"]
     static let autoKey = "prs.autoReview"
 
     @Published private(set) var ledger = ReviewLedger()
@@ -43,7 +43,12 @@ final class PRReviewStore: ObservableObject {
 
     nonisolated static var baseURL: URL {
         if let dir = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_REVIEWS"], !dir.isEmpty { return URL(fileURLWithPath: dir, isDirectory: true) }
-        return BitbucketConfig.home.appendingPathComponent(".claude/notch/reviews", isDirectory: true)
+        return BitbucketConfig.home.appendingPathComponent("Library/Application Support/AINotch/reviews", isDirectory: true)
+    }
+
+    /// Where reviews were kept before they moved out of `~/.claude` (read only: reports there still open).
+    nonisolated static var legacyBaseURL: URL {
+        BitbucketConfig.home.appendingPathComponent(".claude/notch/reviews", isDirectory: true)
     }
 
     static var ledgerURL: URL {
@@ -58,8 +63,10 @@ final class PRReviewStore: ObservableObject {
 
     func reportURL(_ record: ReviewRecord) -> URL? {
         guard record.reportFile != nil, let ref = PullRequestRef(key: record.key) else { return nil }
-        let url = Self.folder(ref, head: record.head).appendingPathComponent("report.md")
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        let name = "\(ref.repo)-\(ref.id)-\(record.head.prefix(12))"
+        let bases = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_REVIEWS"] == nil ? [Self.baseURL, Self.legacyBaseURL] : [Self.baseURL]
+        return bases.map { $0.appendingPathComponent(name, isDirectory: true).appendingPathComponent("report.md") }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     private static func load() -> ReviewLedger {
@@ -77,7 +84,8 @@ final class PRReviewStore: ObservableObject {
 
     // MARK: Reading
 
-    static func supports(_ pr: PullRequest) -> Bool { pr.role == .reviewing && supportedRepos.contains(pr.ref.repo) }
+    /// A pull request I review in a repository with a local clone in builds.json (or the stub's).
+    static func supports(_ pr: PullRequest) -> Bool { pr.role == .reviewing && (BitbucketConfig.isStubbed || repoPath(pr.ref) != nil) }
 
     /// The run that counts for a row: the one for its head now; else the newest older one,
     /// which shows as outdated.
@@ -105,6 +113,10 @@ final class PRReviewStore: ObservableObject {
             if ReviewPolicy.shouldAutoQueue(key: pr.ref.key, head: head, isDraft: pr.isDraft, iReview: true, myReviewDone: pr.myReview != .none,
                                             updatedAt: pr.updatedAt, now: now, ledger: ledger, autoOn: autoOn) {
                 enqueue(pr.ref, head: head, auto: true)
+            } else if ReviewLedger.shouldResume(ledger.record(pr.ref.key, head: head), head: head, isDraft: pr.isDraft, iReview: true,
+                                                myReviewDone: pr.myReview != .none, autoOn: autoOn) {
+                // The notch quit mid-review: once more, quietly (a second interruption stays failed).
+                enqueue(pr.ref, head: head, auto: true, resumed: true)
             }
         }
         var next = ledger
@@ -138,10 +150,11 @@ final class PRReviewStore: ObservableObject {
         }
     }
 
-    private func enqueue(_ ref: PullRequestRef, head: String, auto: Bool) {
+    private func enqueue(_ ref: PullRequestRef, head: String, auto: Bool, resumed: Bool = false) {
         if let existing = ledger.record(ref.key, head: head), existing.isActive { return }
         var record = ReviewRecord(key: ref.key, head: head, phase: .queued, auto: auto, queuedAt: Date().timeIntervalSince1970)
         record.posted = nil
+        if resumed { record.resumed = true }
         ledger.set(record)
         save()
         queue.append(Queued(ref: ref, head: head, auto: auto))

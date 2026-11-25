@@ -16,13 +16,20 @@ import ReviewCore
 //                             "Send to agent" brief of each of mine with something to fix.
 
 enum PullRequestDev {
+    /// "workspace/repo", or a bare repo name looked up in builds.json.
+    static func reviewRef(_ name: String, id: Int) -> PullRequestRef? {
+        if name.contains("/") { return PullRequestRef(fullName: name, id: id) }
+        guard let repo = BitbucketConfig.loadRepos(scan: false).first(where: { $0.repo == name }) else { return nil }
+        return PullRequestRef(workspace: repo.workspace, repo: repo.repo, id: id)
+    }
+
     /// `--review-run <repo> <number> <head>`: one real headless review of an open pull request
     /// (read-only, nothing is approved or posted), through the same runner and the same result
     /// handling as the app. Prints the state, verdict, findings, cost and report path; never the
     /// token. The ledger and reports go to CLAUDE_NOTCH_REVIEW_LEDGER / CLAUDE_NOTCH_REVIEWS.
     static func reviewRun(_ args: [String]) -> Int32 {
-        guard args.count >= 3, let number = Int(args[1]), let ref = PullRequestRef(fullName: "asbl-dev/" + args[0], id: number) else {
-            FileHandle.standardError.write(Data("usage: AINotch --review-run <repo> <number> <head>\n".utf8))
+        guard args.count >= 3, let number = Int(args[1]), let ref = reviewRef(args[0], id: number) else {
+            FileHandle.standardError.write(Data("usage: AINotch --review-run <repo or workspace/repo> <number> <head>\n".utf8))
             return 2
         }
         guard let path = PRReviewStore.repoPath(ref), let token = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else {

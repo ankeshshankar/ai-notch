@@ -3,6 +3,7 @@ import ApplicationServices
 import SwiftUI
 import UserNotifications
 import NotchCore
+import ReviewCore
 import VPNCore
 
 /// The setup window's state: each item's live status, re-read every second while it is open.
@@ -45,6 +46,7 @@ final class SetupModel: ObservableObject {
     /// Automatic reviews of the pull requests I review, and whether the write token (Approve) is stored.
     @Published private(set) var autoReviewOn = UserDefaults.standard.object(forKey: PRReviewStore.autoKey) as? Bool ?? true
     @Published private(set) var writeTokenSet = false
+    @Published var reviewNames = ReviewNames.load()
     /// Prod (Datadog): its state, and which of its news notifies.
     @Published private(set) var prod = ProdSetupInfo.make(nil)
     @Published private(set) var prodAlerts = ProdAlertPrefs.load()
@@ -1058,9 +1060,19 @@ struct SetupView: View {
             .padding(.vertical, 4)
             divider
             row("Auto review", icon: "checkmark.seal.fill", tint: Color(red: 0.15, green: 0.52, blue: 1.0),
-                info: "Pull requests where you are a reviewer are reviewed by Claude (your own login, the homes-pr-review skill, read only, one at a time, 30 minutes at most) when they appear or get new commits, in homes-api-app and homes-ecosystem. The verdict shows on the row, with the full report to open. Nothing is posted, commented or committed on its own. Approve appears only for an APPROVE verdict on the current commit with a green pipeline, and asks twice. A run needing anything beyond reading (git push, editing the repo, curl -X) is refused and the review is marked failed.") {
+                info: "Pull requests where you are a reviewer are reviewed by Claude (your own login, your review skill, read only, one at a time, 30 minutes at most) when they appear or get new commits, in the repositories with a local clone in builds.json. A review cut short because the notch quit is started once more on the next launch. The verdict shows on the row, with the full report to open. Nothing is posted, commented or committed on its own. Approve appears only for an APPROVE verdict on the current commit with a green pipeline, and asks twice. A run needing anything beyond reading (git push, editing the repo, curl -X) is refused and the review is marked failed.") {
                 Toggle("Auto review", isOn: Binding(get: { model.autoReviewOn }, set: { model.setAutoReview($0) }))
                     .toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            .padding(.vertical, 4)
+            row("Review skill", icon: "text.book.closed.fill", tint: Color(red: 0.15, green: 0.52, blue: 1.0),
+                info: "The names, in your own Claude setup, of the review skill (~/.claude/skills/<name>/SKILL.md) and its two subagents (~/.claude/agents/<name>.md): the one that reviews through a lens and the one that checks the findings. Stored on this Mac only. Letters, digits, - _ . only.") {
+                TextField("Skill", text: Binding(get: { model.reviewNames.skill }, set: { model.reviewNames.skill = $0; model.reviewNames.save() }))
+                    .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 90)
+                TextField("Lens", text: Binding(get: { model.reviewNames.lens }, set: { model.reviewNames.lens = $0; model.reviewNames.save() }))
+                    .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 80)
+                TextField("Verifier", text: Binding(get: { model.reviewNames.verifier }, set: { model.reviewNames.verifier = $0; model.reviewNames.save() }))
+                    .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 80)
             }
             .padding(.vertical, 4)
             row("Approve token", icon: "key.fill", tint: Color(red: 0.15, green: 0.52, blue: 1.0),

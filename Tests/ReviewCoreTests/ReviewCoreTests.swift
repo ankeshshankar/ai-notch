@@ -3,7 +3,7 @@ import XCTest
 
 final class ReviewParseTests: XCTestCase {
     let approve = """
-    PR #3403 Add thing — Rudra — feat/x → master — CI green
+    PR #3403 Add thing — Arjun — feat/x → master — CI green
     VERDICT: APPROVE
     BLOCKING  none
     SHOULD-FIX  src/a.ts:10 — rule — a thing
@@ -96,6 +96,90 @@ final class ReviewLedgerTests: XCTestCase {
     }
 }
 
+final class ReviewResumeTests: XCTestCase {
+    func interrupted(resumed: Bool? = nil) -> ReviewRecord {
+        var r = ReviewRecord(key: "a#1", head: "abcdef123456", phase: .reviewing, auto: true, queuedAt: 1)
+        var ledger = ReviewLedger()
+        ledger.set(r)
+        ledger.settleAfterRestart(now: 2)
+        r = ledger.record("a#1", head: "abcdef123456")!
+        r.resumed = resumed
+        return r
+    }
+
+    func testInterruptedRunResumesOnceOnTheSameHead() {
+        func go(_ r: ReviewRecord?, head: String? = "abcdef123456", draft: Bool = false, mine: Bool = false, auto: Bool = true) -> Bool {
+            ReviewLedger.shouldResume(r, head: head, isDraft: draft, iReview: true, myReviewDone: mine, autoOn: auto)
+        }
+        XCTAssertEqual(interrupted().error, ReviewLedger.interruptedMessage)
+        XCTAssertTrue(go(interrupted()))
+        XCTAssertTrue(go(interrupted(), head: "abcdef1234567890"), "12 or 40 characters")
+        XCTAssertFalse(go(interrupted(resumed: true)), "interrupted again: stays failed, no loop")
+        XCTAssertFalse(go(interrupted(), head: "ffffffffffff"), "new commits: the normal flow handles it")
+        XCTAssertFalse(go(interrupted(), auto: false))
+        XCTAssertFalse(go(interrupted(), draft: true))
+        XCTAssertFalse(go(interrupted(), mine: true))
+        XCTAssertFalse(go(nil))
+        var other = interrupted(); other.error = "no Bitbucket read token"
+        XCTAssertFalse(go(other), "only an interruption")
+        var done = interrupted(); done.phase = .done
+        XCTAssertFalse(go(done))
+    }
+
+    func testResumedFlagRoundTrips() {
+        let r = interrupted(resumed: true)
+        XCTAssertEqual(try! JSONDecoder().decode(ReviewRecord.self, from: try! JSONEncoder().encode(r)).resumed, true)
+        let old = #"{"key":"a#1","head":"h","phase":"failed","auto":true,"queuedAt":1}"#
+        XCTAssertNil(try! JSONDecoder().decode(ReviewRecord.self, from: Data(old.utf8)).resumed, "old ledgers still read")
+    }
+}
+
+final class ReviewToolsTests: XCTestCase {
+    let scratch = "/Users/x/Library/Application Support/AINotch/reviews/r-1-abc"
+
+    func testBranchListingAllowedMutationsDenied() {
+        let tools = ReviewCommand.allowedTools(scratch: scratch)
+        for form in ["-r", "-a", "--list", "--contains"] {
+            XCTAssertTrue(tools.contains("Bash(git -C * branch \(form) *)"), form)
+            XCTAssertTrue(tools.contains("Bash(git branch \(form):*)"), form)
+        }
+        for banned in ["-D", "-d", "-m", "-M", "-c", "-C"] {
+            XCTAssertFalse(tools.contains { $0.hasPrefix("Bash(git branch \(banned)") || $0.hasPrefix("Bash(git -C * branch \(banned)") }, banned)
+            XCTAssertTrue(ReviewCommand.deniedTools.contains("Bash(git -C * branch \(banned) *)"), banned)
+            XCTAssertTrue(ReviewCommand.deniedTools.contains("Bash(git -C * branch * \(banned) *)"), "branch -r \(banned) x")
+        }
+        XCTAssertFalse(tools.contains("Bash(git branch:*)"), "bare branch (creates) is not allowed")
+        let args = ReviewCommand.arguments(prNumber: 1, scratch: scratch, skill: "x", agentsJSON: "{}")
+        XCTAssertEqual(args[args.firstIndex(of: "--disallowedTools")! + 1], ReviewCommand.deniedTools.joined(separator: ","))
+    }
+
+    func testScratchIsOutsideDotClaude() {
+        let tools = ReviewCommand.allowedTools(scratch: scratch)
+        XCTAssertTrue(tools.contains("Write(//Users/x/Library/Application Support/AINotch/reviews/r-1-abc/**)"))
+        XCTAssertTrue(tools.contains("Edit(//Users/x/Library/Application Support/AINotch/reviews/r-1-abc/**)"))
+    }
+
+    func testPromptSaysToQuoteAndStayInside() {
+        let p = ReviewCommand.prompt(prNumber: 3, scratch: scratch, skill: "body")
+        XCTAssertTrue(p.contains("single quotes"))
+        XCTAssertTrue(p.contains("(tabs)"))
+        XCTAssertTrue(p.contains("Stay inside the worktree"))
+    }
+
+    func testNamesAreSettingsWithNeutralDefaults() {
+        let defaults = UserDefaults(suiteName: "review-names-test")!
+        defaults.removePersistentDomain(forName: "review-names-test")
+        XCTAssertEqual(ReviewNames.load(defaults), ReviewNames(skill: "pr-review", lens: "pr-lens", verifier: "pr-verifier"))
+        ReviewNames(skill: "my-review", lens: "my-lens", verifier: "my-check").save(defaults)
+        XCTAssertEqual(ReviewNames.load(defaults).lens, "my-lens")
+        XCTAssertEqual(ReviewNames(skill: "../x", lens: "a b", verifier: "").skill, "pr-review", "no path in a name")
+        XCTAssertEqual(ReviewNames(skill: "ok", lens: "a b", verifier: "").lens, "pr-lens")
+        let args = ReviewCommand.arguments(prNumber: 1, scratch: "/s", skill: "x", agentsJSON: "{}", home: "/h", skillName: "my-review")
+        XCTAssertEqual(args[args.firstIndex(of: "--add-dir")! + 2], "/h/.claude/skills/my-review")
+        defaults.removePersistentDomain(forName: "review-names-test")
+    }
+}
+
 final class ReviewGateTests: XCTestCase {
     func record(_ verdict: ReviewVerdict = .approve, blocking: Int = 0, phase: ReviewPhase = .done, head: String = "abcdef123456") -> ReviewRecord {
         var r = ReviewRecord(key: "ws/r#1", head: head, phase: phase, auto: true, queuedAt: 0)
@@ -153,7 +237,7 @@ final class ReviewCommandTests: XCTestCase {
         XCTAssertEqual(args[args.firstIndex(of: "--permission-mode")! + 1], "dontAsk")
         XCTAssertEqual(args[args.firstIndex(of: "--output-format")! + 1], "json")
         let add = args.firstIndex(of: "--add-dir")!
-        XCTAssertEqual(Array(args[(add + 1)...(add + 2)]), ["/s/r1", NSHomeDirectory() + "/.claude/skills/homes-pr-review"])
+        XCTAssertEqual(Array(args[(add + 1)...(add + 2)]), ["/s/r1", NSHomeDirectory() + "/.claude/skills/pr-review"])
         XCTAssertTrue(args[(add + 3)].hasPrefix("--"), "the variadic --add-dir ends before the next flag")
     }
 }

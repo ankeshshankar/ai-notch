@@ -626,19 +626,20 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
   end). The branch is read with `git` every 30 seconds and when the session
   changes, off the main thread.
 - **Automatic review** (Setup → Builds → Pull requests → Auto review, on by default). A pull
-  request you review in `homes-api-app` or `homes-ecosystem` is reviewed by the `homes-pr-review`
-  skill when it appears or gets new commits: `claude -p` with the skill's text and the PR number, in that repo's
+  request you review in a repository with a local clone in builds.json is reviewed by your review
+  skill (named in Setup, default `pr-review`) when it appears or gets new commits: `claude -p` with the skill's text and the PR number, in that repo's
   clone, through your own Claude login (an API key in the environment is removed), one review at a
   time, stopped after 30 minutes (Cancel review stops it sooner). Drafts, ones you already
-  reviewed and ones idle for 7 days are left alone; a failed or cancelled run is started again
+  reviewed and ones idle for 7 days are left alone; a run cut short because the notch quit is started once more on the next launch (same commit, auto review on, never twice); a failed or cancelled run is started again
   only by **Review now / Re-review** (row bar or right-click). Each pull request is reviewed once
   per commit (`~/.claude/notch/pr-reviews.json`); the full report is
-  `~/.claude/notch/reviews/<repo>-<id>-<commit>/report.md` (**View report**). The row shows
+  `~/Library/Application Support/AINotch/reviews/<repo>-<id>-<commit>/report.md` (**View report**;
+  outside `~/.claude`, because Claude Code refuses writes there; older reports still open). The row shows
   `Review queued`, `Reviewing…`, `APPROVE · 1 should-fix`, `REQUEST CHANGES · 2 blocking` or
   `Review failed` (hover for why). Its tokens count in usage like any session.
   - *Permissions.* The run loads none of your settings (`--setting-sources ""`), so your own allow
-    rules (commit, checkout, MCP writes) do not apply; the skill's text and the `homes-pr-lens` and
-    `homes-pr-verifier` agents are read from `~/.claude` and passed in directly. It uses
+    rules (commit, checkout, MCP writes) do not apply; the skill's text and the lens and
+    verifier agents (names in Setup, default `pr-lens` and `pr-verifier`) are read from `~/.claude` and passed in directly. It uses
     `--permission-mode dontAsk` with a fixed allow-list: Read, Grep, Glob, subagents, read-only git
     (`log diff show merge-base …`), `git fetch` and `git worktree add/remove` (the skill reviews in
     a scratch worktree), `curl -s` against `api.bitbucket.org/2.0` without `-X`, a few read-only
