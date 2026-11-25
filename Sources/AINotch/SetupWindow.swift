@@ -47,6 +47,7 @@ final class SetupModel: ObservableObject {
     @Published private(set) var autoReviewOn = UserDefaults.standard.object(forKey: PRReviewStore.autoKey) as? Bool ?? true
     @Published private(set) var writeTokenSet = false
     @Published var reviewNames = ReviewNames.load()
+    @Published var autoRepos = ReviewRepos.load().text
     /// Prod (Datadog): its state, and which of its news notifies.
     @Published private(set) var prod = ProdSetupInfo.make(nil)
     @Published private(set) var prodAlerts = ProdAlertPrefs.load()
@@ -1060,9 +1061,15 @@ struct SetupView: View {
             .padding(.vertical, 4)
             divider
             row("Auto review", icon: "checkmark.seal.fill", tint: Color(red: 0.15, green: 0.52, blue: 1.0),
-                info: "Pull requests where you are a reviewer are reviewed by Claude (your own login, your review skill, read only, one at a time, 30 minutes at most) when they appear or get new commits, in the repositories with a local clone in builds.json. A review cut short because the notch quit is started once more on the next launch. The verdict shows on the row, with the full report to open. Nothing is posted, commented or committed on its own. Approve appears only for an APPROVE verdict on the current commit with a green pipeline, and asks twice. A run needing anything beyond reading (git push, editing the repo, curl -X) is refused and the review is marked failed.") {
+                info: "Pull requests where you are a reviewer are reviewed by Claude (your own login, your review skill, read only, one at a time, 30 minutes at most) when they appear or get new commits, in the repositories listed under Auto-review repos (none by default). A review cut short because the notch quit is started once more on the next launch. The verdict shows on the row, with the full report to open. Nothing is posted, commented or committed on its own. Approve appears only for an APPROVE verdict on the current commit with a green pipeline, and asks twice. A run needing anything beyond reading (git push, editing the repo, curl -X) is refused and the review is marked failed.") {
                 Toggle("Auto review", isOn: Binding(get: { model.autoReviewOn }, set: { model.setAutoReview($0) }))
                     .toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            .padding(.vertical, 4)
+            row("Auto-review repos", icon: "list.bullet.rectangle", tint: Color(red: 0.15, green: 0.52, blue: 1.0),
+                info: "Only pull requests in these repositories are reviewed automatically, separated by commas (a repo name or workspace/repo). Empty: no automatic review. Review now works on any repository that has a local clone in builds.json. Stored on this Mac only.") {
+                TextField("Repos", text: Binding(get: { model.autoRepos }, set: { model.autoRepos = $0; ReviewRepos(text: $0).save() }))
+                    .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 190)
             }
             .padding(.vertical, 4)
             row("Review skill", icon: "text.book.closed.fill", tint: Color(red: 0.15, green: 0.52, blue: 1.0),

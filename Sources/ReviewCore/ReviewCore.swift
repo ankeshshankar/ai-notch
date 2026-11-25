@@ -221,8 +221,8 @@ public struct ReviewLedger: Codable, Sendable, Equatable {
     /// Whether an interrupted run (the notch quit mid-review) is started again: once only, for
     /// the same head, with auto review on, on a pull request I review that is still open (the
     /// poll lists it), not a draft and not reviewed by me.
-    public static func shouldResume(_ record: ReviewRecord?, head: String?, isDraft: Bool, iReview: Bool, myReviewDone: Bool, autoOn: Bool) -> Bool {
-        guard autoOn, iReview, !isDraft, !myReviewDone, let record, record.phase == .failed else { return false }
+    public static func shouldResume(_ record: ReviewRecord?, head: String?, isDraft: Bool, iReview: Bool, myReviewDone: Bool, autoOn: Bool, repos: ReviewRepos = ReviewRepos()) -> Bool {
+        guard autoOn, let record, repos.allows(key: record.key), iReview, !isDraft, !myReviewDone, record.phase == .failed else { return false }
         guard record.error == interruptedMessage, record.resumed != true else { return false }
         return ReviewGate.sameCommit(record.head, head)
     }
@@ -243,8 +243,8 @@ public enum ReviewPolicy {
     /// draft, that I have not reviewed myself, with a known head, recently active, and never
     /// run for this commit (a failed or cancelled run is started again by hand only).
     public static func shouldAutoQueue(key: String, head: String?, isDraft: Bool, iReview: Bool, myReviewDone: Bool,
-                                       updatedAt: Double, now: Double, ledger: ReviewLedger, autoOn: Bool) -> Bool {
-        guard autoOn, iReview, !isDraft, !myReviewDone, let head, !head.isEmpty else { return false }
+                                       updatedAt: Double, now: Double, ledger: ReviewLedger, autoOn: Bool, repos: ReviewRepos = ReviewRepos()) -> Bool {
+        guard autoOn, repos.allows(key: key), iReview, !isDraft, !myReviewDone, let head, !head.isEmpty else { return false }
         guard updatedAt == 0 || now - updatedAt < autoMaxAge else { return false }
         return ledger.record(key, head: head) == nil
     }
@@ -488,4 +488,32 @@ public struct ReviewNames: Equatable, Sendable {
         defaults.set(lens, forKey: Self.lensKey)
         defaults.set(verifier, forKey: Self.verifierKey)
     }
+}
+
+
+/// The repositories reviewed automatically: a local setting, empty by default (no automatic
+/// review until the user picks some). "Review now" is not limited by it. An entry is a repository
+/// name (`api-service`) or `workspace/name`; matching ignores case.
+public struct ReviewRepos: Equatable, Sendable {
+    public static let key = "review.autoRepos"
+    public var entries: [String]
+
+    public init(entries: [String] = []) { self.entries = entries }
+
+    /// "a, b" or one per line.
+    public init(text: String) {
+        entries = text.split(whereSeparator: { ",;\n".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    public var text: String { entries.joined(separator: ", ") }
+
+    /// `key` is "<workspace>/<repo>#<id>" (or "<workspace>/<repo>").
+    public func allows(key: String) -> Bool {
+        let repo = key.split(separator: "#", maxSplits: 1).first.map(String.init) ?? key
+        let name = repo.split(separator: "/").last.map(String.init) ?? repo
+        return entries.contains { $0.caseInsensitiveCompare(repo) == .orderedSame || $0.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    public static func load(_ defaults: UserDefaults = .standard) -> ReviewRepos { ReviewRepos(text: defaults.string(forKey: key) ?? "") }
+    public func save(_ defaults: UserDefaults = .standard) { defaults.set(text, forKey: Self.key) }
 }

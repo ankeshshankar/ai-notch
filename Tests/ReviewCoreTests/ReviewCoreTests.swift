@@ -63,7 +63,7 @@ final class ReviewLedgerTests: XCTestCase {
         var ledger = ReviewLedger()
         func should(_ head: String?, auto: Bool = true, draft: Bool = false, mine: Bool = false, age: Double = 100) -> Bool {
             ReviewPolicy.shouldAutoQueue(key: "ws/r#1", head: head, isDraft: draft, iReview: true, myReviewDone: mine,
-                                         updatedAt: now - age, now: now, ledger: ledger, autoOn: auto)
+                                         updatedAt: now - age, now: now, ledger: ledger, autoOn: auto, repos: ReviewRepos(text: "r"))
         }
         XCTAssertTrue(should("aaaaaaaaaaaa"))
         ledger.set(ReviewRecord(key: "ws/r#1", head: "aaaaaaaaaaaa", phase: .done, auto: true, queuedAt: now))
@@ -93,6 +93,45 @@ final class ReviewLedgerTests: XCTestCase {
         // It round-trips through JSON.
         let data = try! JSONEncoder().encode(ledger)
         XCTAssertEqual(try! JSONDecoder().decode(ReviewLedger.self, from: data), ledger)
+    }
+}
+
+final class ReviewReposTests: XCTestCase {
+    func testAllowListGatesAutoQueueAndResume() {
+        func queue(_ repos: ReviewRepos, key: String = "ws/api-service#7") -> Bool {
+            ReviewPolicy.shouldAutoQueue(key: key, head: "abcdef123456", isDraft: false, iReview: true, myReviewDone: false,
+                                         updatedAt: 0, now: 0, ledger: ReviewLedger(), autoOn: true, repos: repos)
+        }
+        XCTAssertFalse(queue(ReviewRepos()), "public default: empty list, no auto review")
+        XCTAssertTrue(queue(ReviewRepos(text: "api-service, mobile-app")))
+        XCTAssertTrue(queue(ReviewRepos(text: "WS/API-Service")), "workspace/repo, any case")
+        XCTAssertFalse(queue(ReviewRepos(text: "api-service"), key: "ws/other#7"))
+        XCTAssertFalse(queue(ReviewRepos(text: "other-ws/api-service")), "another workspace")
+        var r = ReviewRecord(key: "ws/api-service#7", head: "abcdef123456", phase: .reviewing, auto: true, queuedAt: 1)
+        var ledger = ReviewLedger(); ledger.set(r); ledger.settleAfterRestart(now: 2)
+        r = ledger.record("ws/api-service#7", head: "abcdef123456")!
+        func resume(_ repos: ReviewRepos) -> Bool {
+            ReviewLedger.shouldResume(r, head: "abcdef123456", isDraft: false, iReview: true, myReviewDone: false, autoOn: true, repos: repos)
+        }
+        XCTAssertFalse(resume(ReviewRepos()))
+        XCTAssertTrue(resume(ReviewRepos(text: "api-service")))
+    }
+
+    func testParseAndStore() {
+        XCTAssertEqual(ReviewRepos(text: " a ,b;\nc,, ").entries, ["a", "b", "c"])
+        let d = UserDefaults(suiteName: "review-repos-test")!
+        d.removePersistentDomain(forName: "review-repos-test")
+        XCTAssertEqual(ReviewRepos.load(d), ReviewRepos())
+        ReviewRepos(text: "x, y").save(d)
+        XCTAssertEqual(ReviewRepos.load(d).entries, ["x", "y"])
+        d.removePersistentDomain(forName: "review-repos-test")
+    }
+
+    func testQueuedRecordsAreDroppedOnLaunch() {
+        var ledger = ReviewLedger()
+        ledger.set(ReviewRecord(key: "ws/other#1", head: "h1", phase: .queued, auto: true, queuedAt: 1))
+        ledger.settleAfterRestart(now: 2)
+        XCTAssertNil(ledger.record("ws/other#1", head: "h1"))
     }
 }
 

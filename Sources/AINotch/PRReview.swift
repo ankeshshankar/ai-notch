@@ -111,10 +111,10 @@ final class PRReviewStore: ObservableObject {
         for pr in toReview where Self.supports(pr) {
             guard let head = pr.head else { continue }
             if ReviewPolicy.shouldAutoQueue(key: pr.ref.key, head: head, isDraft: pr.isDraft, iReview: true, myReviewDone: pr.myReview != .none,
-                                            updatedAt: pr.updatedAt, now: now, ledger: ledger, autoOn: autoOn) {
+                                            updatedAt: pr.updatedAt, now: now, ledger: ledger, autoOn: autoOn, repos: ReviewRepos.load()) {
                 enqueue(pr.ref, head: head, auto: true)
             } else if ReviewLedger.shouldResume(ledger.record(pr.ref.key, head: head), head: head, isDraft: pr.isDraft, iReview: true,
-                                                myReviewDone: pr.myReview != .none, autoOn: autoOn) {
+                                                myReviewDone: pr.myReview != .none, autoOn: autoOn, repos: ReviewRepos.load()) {
                 // The notch quit mid-review: once more, quietly (a second interruption stays failed).
                 enqueue(pr.ref, head: head, auto: true, resumed: true)
             }
