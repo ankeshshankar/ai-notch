@@ -3,12 +3,12 @@ import XCTest
 
 final class VocabularyTests: XCTestCase {
     func testParseSplitsLinesAndCommas() {
-        XCTAssertEqual(DictationVocabulary.parse("Kilari, Aswanath\n  homes-api-app ;\n\n"), ["Kilari", "Aswanath", "homes-api-app"])
+        XCTAssertEqual(DictationVocabulary.parse("Priya, Arjun\n  api-service ;\n\n"), ["Priya", "Arjun", "api-service"])
     }
 
     func testMergedOrderDedupeAndCap() {
-        let m = DictationVocabulary.merged(dynamic: ["feat/x", "Figma"], user: ["figma", "Rudra"], builtIn: ["PR", "FIGMA", "Expo"])
-        XCTAssertEqual(m, ["feat/x", "Figma", "Rudra", "PR", "Expo"])
+        let m = DictationVocabulary.merged(dynamic: ["feat/x", "Figma"], user: ["figma", "Arjun"], builtIn: ["PR", "FIGMA", "Expo"])
+        XCTAssertEqual(m, ["feat/x", "Figma", "Arjun", "PR", "Expo"])
         let many = (0..<500).map { "term\($0)" }
         XCTAssertEqual(DictationVocabulary.merged(user: many).count, DictationVocabulary.limit)
     }

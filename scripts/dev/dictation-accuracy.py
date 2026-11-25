@@ -3,7 +3,7 @@
 jargon. Runs `AINotch --dictation-transcribe` per sentence for each configuration and scores
 (a) jargon-term recall and (b) word error rate against the spoken text, on the rule-cleaned output.
 Needs a release build: swift build -c release. The audio is synthetic and made in a temp folder.
-  python3 scripts/dev/dictation-accuracy.py [--voices Rishi,Lekha] [--vocab "Kilari,Aswanath"]
+  python3 scripts/dev/dictation-accuracy.py [--voices Rishi,Lekha] [--vocab "Priya,Arjun"]
 """
 import argparse, os, re, subprocess, sys, tempfile
 
@@ -14,7 +14,7 @@ SENTENCES = [
     ("worktree banao aur commit karke branch push kar do", ["worktree", "commit", "branch"]),
     ("Datadog aur PostHog dono mein error dikh raha hai", ["Datadog", "PostHog"]),
     ("Linear ticket mein TypeScript ka type error likh do", ["Linear", "TypeScript"]),
-    ("homes ka staging endpoint webhook ko call nahi kar raha", ["homes", "staging", "endpoint", "webhook"]),
+    ("billing ka staging endpoint webhook ko call nahi kar raha", ["billing", "staging", "endpoint", "webhook"]),
     ("Claude Code ne refactor kiya aur Haiku se cleanup chala", ["Claude Code", "refactor", "Haiku"]),
 ]
 CONFIGS = [  # (label, locale, engine, vocab)

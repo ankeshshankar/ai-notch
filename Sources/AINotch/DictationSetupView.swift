@@ -63,7 +63,7 @@ extension SetupView {
             }
             divider
             row("My words", icon: "text.book.closed.fill", tint: Color(red: 0.20, green: 0.55, blue: 0.80),
-                info: "Names and jargon to spell right, separated by commas (for example Kilari, Aswanath). They are given to Apple's engine, and to Claude Sonnet when AI clean-up is on. A built-in list of developer terms (PR, Bitbucket, Expo, EAS, Figma, Forge, worktree and more) is always included, plus the app you are in and, in a terminal or editor, the repo and branch of your latest Claude session.") {
+                info: "Names and jargon to spell right, separated by commas (for example Priya, Arjun). They are given to Apple's engine, and to Claude Sonnet when AI clean-up is on. A built-in list of developer terms (PR, Bitbucket, Expo, EAS, Figma, Forge, worktree and more) is always included, plus the app you are in and, in a terminal or editor, the repo and branch of your latest Claude session.") {
                 TextField("Names, terms", text: $dictationPrefs.vocabulary).textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 190)
             }
             divider

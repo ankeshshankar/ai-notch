@@ -5,7 +5,7 @@ import Foundation
 /// Names only, never what is on screen.
 public enum DictationVocabulary {
     public static let builtIn: [String] = [
-        "PR", "pull request", "Bitbucket", "GitHub", "Expo", "EAS", "Figma", "Forge", "homes", "worktree", "commit", "pipeline",
+        "PR", "pull request", "Bitbucket", "GitHub", "Expo", "EAS", "Figma", "Forge", "worktree", "commit", "pipeline",
         "Datadog", "PostHog", "Linear", "TypeScript", "JavaScript", "React Native", "Next.js", "Node", "npm", "pnpm", "Swift", "SwiftUI",
         "Xcode", "Claude", "Claude Code", "Cursor", "Anthropic", "Haiku", "Sonnet", "Opus", "API", "SDK", "OTA", "TestFlight",
         "Kubernetes", "Docker", "Redis", "MongoDB", "Postgres", "GraphQL", "webhook", "endpoint", "middleware", "refactor",
