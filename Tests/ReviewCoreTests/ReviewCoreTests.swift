@@ -166,6 +166,35 @@ final class ReviewToolsTests: XCTestCase {
         XCTAssertTrue(p.contains("Stay inside the worktree"))
     }
 
+    func testBbgetHasNoSpaceInItsPathEvenWithASpacedScratch() {
+        let args = ReviewCommand.arguments(prNumber: 1, scratch: scratch, skill: "x", agentsJSON: "{}", home: "/Users/x")
+        let allowed = args[args.firstIndex(of: "--allowedTools")! + 1]
+        XCTAssertTrue(allowed.contains("Bash(/Users/x/.claude/notch/bin/bbget *)"))
+        XCTAssertFalse(allowed.contains("reviews/r-1-abc/bbget"))
+        XCTAssertTrue(args[1].contains("/Users/x/.claude/notch/bin/bbget <url>"))
+    }
+
+    func testBbgetScriptRejectsFolders() throws {
+        let dir = NSTemporaryDirectory() + "bbget-test"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let file = dir + "/bbget"
+        try ReviewCommand.bbGetScript.write(toFile: file, atomically: true, encoding: .utf8)
+        func status(_ args: [String]) -> Int32 {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = [file] + args
+            p.environment = ["BB_API_TOKEN": "t", "AI_NOTCH_REVIEW_DIR": dir]
+            p.standardError = FileHandle.nullDevice
+            try? p.run(); p.waitUntilExit()
+            return p.terminationStatus
+        }
+        XCTAssertEqual(status(["https://example.com/x"]), 2, "only the Bitbucket API")
+        XCTAssertEqual(status(["https://api.bitbucket.org/2.0/user", "../x.json"]), 2, "no folder in the output name")
+        XCTAssertEqual(status(["https://api.bitbucket.org/2.0/user", "/tmp/x.json"]), 2)
+        XCTAssertEqual(status(["https://api.bitbucket.org/2.0/user", ".hidden"]), 2)
+        try? FileManager.default.removeItem(atPath: dir)
+    }
+
     func testNamesAreSettingsWithNeutralDefaults() {
         let defaults = UserDefaults(suiteName: "review-names-test")!
         defaults.removePersistentDomain(forName: "review-names-test")

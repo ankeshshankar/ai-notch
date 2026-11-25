@@ -300,7 +300,7 @@ public enum ReviewCommand {
     /// flags only, plain file tools. Writes: only the review's own scratch folder, and the
     /// scratch worktree git adds and removes. No push, commit, checkout, reset, merge, rebase,
     /// no `curl` of its own (see `bbGetScript`), no editing of the code under review.
-    public static func allowedTools(scratch: String) -> [String] {
+    public static func allowedTools(scratch: String, bbget: String? = nil) -> [String] {
         let gitRead = ["log", "diff", "show", "merge-base", "rev-parse", "status", "ls-files", "ls-tree", "cat-file", "grep",
                        "blame", "branch --show-current", "branch -r", "branch -a", "branch --list", "branch --contains", "remote get-url", "shortlog", "describe", "name-rev", "for-each-ref"]
         // `//path` is an absolute path in a permission rule (a single `/` is relative to the project).
@@ -316,7 +316,7 @@ public enum ReviewCommand {
                   "Bash(git worktree add:*)", "Bash(git -C * worktree add *)",
                   "Bash(git worktree remove:*)", "Bash(git -C * worktree remove *)",
                   "Bash(git worktree list:*)", "Bash(git worktree prune:*)", "Bash(cd:*)",
-                  "Bash(\(scratch)/bbget *)",
+                  "Bash(\(bbget ?? scratch + "/bbget") *)",
                   "Bash(mkdir -p \(scratch)/*)", "Bash(mkdir -p \(scratch))"]
         for tool in ["ls", "wc", "head", "tail", "cat", "rg", "grep", "jq", "sort", "uniq", "cut", "tr", "sed -n", "awk", "diff", "stat", "date", "pwd", "echo", "basename", "dirname"] {
             tools.append("Bash(\(tool):*)")
@@ -333,6 +333,11 @@ public enum ReviewCommand {
                                          "Bash(git -C * branch \($0) *)", "Bash(git -C * branch \($0))", "Bash(git -C * branch * \($0) *)", "Bash(git -C * branch * \($0))"] }
     }()
 
+    /// Where the helper lives: a path with no space (a permission rule for a command cannot match
+    /// a quoted path with spaces, and the scratch folder is under "Application Support"), outside
+    /// the scratch folder; it is the same file for every run.
+    public static func bbGetPath(home: String) -> String { home + "/.claude/notch/bin/bbget" }
+
     /// A permission rule refuses `$VAR` in a command, so the Bitbucket token cannot be put on a
     /// `curl` line. This wrapper, written into the review's scratch folder, reads it from the
     /// environment itself (the token is never in the file), does GET only and only against the
@@ -345,7 +350,12 @@ public enum ReviewCommand {
     esac
     [ -n "$BB_API_TOKEN" ] || { echo "bbget: no token" >&2; exit 2; }
     if [ -n "$2" ]; then
-      exec curl -s -H "Authorization: Bearer $BB_API_TOKEN" -o "$2" "$1"
+      # A bare file name: saved in the review's scratch folder, never anywhere else.
+      case "$2" in
+        */*|.*) echo "bbget: the output is a plain file name" >&2; exit 2 ;;
+      esac
+      [ -d "$AI_NOTCH_REVIEW_DIR" ] || { echo "bbget: no scratch folder" >&2; exit 2; }
+      exec curl -s -H "Authorization: Bearer $BB_API_TOKEN" -o "$AI_NOTCH_REVIEW_DIR/$2" "$1"
     fi
     exec curl -s -H "Authorization: Bearer $BB_API_TOKEN" "$1"
 
@@ -354,13 +364,13 @@ public enum ReviewCommand {
     /// The prompt: the skill's own text (read from its file at run time), its input, and the
     /// limits of a headless run. The skill is passed as text, not by name, because the run loads
     /// no user settings (see `arguments`) and with them goes user-level skill discovery.
-    public static func prompt(prNumber: Int, scratch: String, skill: String) -> String {
+    public static func prompt(prNumber: Int, scratch: String, skill: String, bbget: String? = nil) -> String {
         """
         \(ReviewAgents.body(of: skill))
 
         ---
         INPUT: PR number \(prNumber).
-        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(scratch)/bbget <url> [output-file]`, which sends the token itself. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
+        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(bbget ?? scratch + "/bbget") <url> [file-name]`, which sends the token itself; with a plain file name (no folder) the response is saved in \(scratch) under that name, to Read. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
         """
     }
 
@@ -390,13 +400,14 @@ public enum ReviewCommand {
     /// review that reads other people's code. `--agents` supplies the lens and verifier
     /// subagents, which user-level discovery would otherwise have provided.
     public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory(), skillName: String = ReviewNames.defaultSkill) -> [String] {
-        ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill),
+        let bbget = bbGetPath(home: home)
+        return ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill, bbget: bbget),
          "--setting-sources", ""] + (hookCommand.map { ["--settings", observeHooksJSON(command: $0)] } ?? []) + [
          "--agents", agentsJSON,
          "--add-dir"] + extraDirectories(scratch: scratch, home: home, skill: skillName) + [
          "--output-format", "json",
          "--permission-mode", "dontAsk",
-         "--allowedTools", allowedTools(scratch: scratch).joined(separator: ","),
+         "--allowedTools", allowedTools(scratch: scratch, bbget: bbget).joined(separator: ","),
          "--disallowedTools", deniedTools.joined(separator: ",")]
     }
 }

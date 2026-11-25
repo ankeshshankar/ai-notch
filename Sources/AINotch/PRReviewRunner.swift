@@ -59,7 +59,8 @@ final class PRReviewRunner: @unchecked Sendable {
         guard let claude = UsageProbe.executable else { return .failed("claude is not installed") }
         let fm = FileManager.default
         try? fm.createDirectory(at: job.dir, withIntermediateDirectories: true)
-        let helper = job.dir.appendingPathComponent("bbget")
+        let helper = URL(fileURLWithPath: ReviewCommand.bbGetPath(home: NSHomeDirectory()))
+        try? fm.createDirectory(at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? ReviewCommand.bbGetScript.write(to: helper, atomically: true, encoding: .utf8)
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
         let out = job.dir.appendingPathComponent("out.json"), err = job.dir.appendingPathComponent("err.log")
@@ -81,7 +82,7 @@ final class PRReviewRunner: @unchecked Sendable {
         guard agents.count == 2 else { return .failed("the \(names.lens) or \(names.verifier) agent is missing (Setup, Pull requests)") }
         process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents), hookCommand: Self.hookCommand(), skillName: names.skill)
         process.currentDirectoryURL = URL(fileURLWithPath: job.repoPath, isDirectory: true)
-        process.environment = Self.environment(token: job.token, title: "PR review #\(job.ref.id) · \(job.ref.repo)")
+        process.environment = Self.environment(token: job.token, dir: job.dir.path, title: "PR review #\(job.ref.id) · \(job.ref.repo)")
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = outHandle
         process.standardError = errHandle
@@ -124,12 +125,13 @@ final class PRReviewRunner: @unchecked Sendable {
         return [beside, installed].compactMap { $0 }.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    static func environment(token: String, title: String = "PR review") -> [String: String] {
+    static func environment(token: String, dir: String = "", title: String = "PR review") -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] { env[key] = nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         env["PATH"] = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
         env["BB_API_TOKEN"] = token
+        env["AI_NOTCH_REVIEW_DIR"] = dir
         env["AI_NOTCH_NO_APPROVALS"] = "1"
         env["AI_NOTCH_REVIEW"] = "1"
         env["AI_NOTCH_REVIEW_TITLE"] = title
