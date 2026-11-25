@@ -256,6 +256,37 @@ struct PRReviewWindowView: View {
     }
 }
 
+extension PullRequest {
+    /// Every reviewer with where they stand, for the header avatars and the sidebar count.
+    var reviewerRows: [ReviewerRow] {
+        reviewers.map { ReviewerRow(name: $0.person.name, state: $0.review == .approved ? .approved : $0.review == .changesRequested ? .changesRequested : .notYet) }
+    }
+}
+
+/// A round initial with the reviewer's name and state, in the header.
+struct PRReviewReviewerChip: View {
+    var row: ReviewerRow
+
+    private var color: Color {
+        switch row.state {
+        case .approved: return Palette.done
+        case .changesRequested: return Palette.waiting
+        case .notYet: return Palette.ink3
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(row.initial).font(Typo.micro(.bold)).foregroundStyle(Palette.onDone)
+                .frame(width: 16, height: 16).background(Circle().fill(color)).decorative()
+            Text(row.name).font(Typo.label()).foregroundStyle(Palette.ink2).lineLimit(1)
+            Text(row.state.label).font(Typo.label(.medium)).foregroundStyle(color).lineLimit(1)
+        }
+        .fixedSize()
+        .ax("Reviewer \(row.name)", value: row.state.label)
+    }
+}
+
 /// The review's state in a few words, for the sidebar.
 enum PRReviewBadge {
     static func short(_ record: ReviewRecord?, outdated: Bool) -> (text: String, color: Color, symbol: String) {
@@ -292,6 +323,7 @@ private struct PRReviewSidebarRow: View {
         let found = store.record(for: pr)
         let badge = PRReviewBadge.short(found?.record, outdated: found?.outdated ?? false)
         let pipeline = PRReviewBadge.pipeline(pr)
+        let reviewers = ReviewerSummary(pr.reviewerRows)
         VStack(alignment: .leading, spacing: 3) {
             Text("\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
             Text(pr.title).font(Typo.body(.medium)).foregroundStyle(Palette.ink).lineLimit(2).multilineTextAlignment(.leading)
@@ -303,6 +335,15 @@ private struct PRReviewSidebarRow: View {
                 }
                 .foregroundStyle(badge.color)
                 Text(pipeline.text).font(Typo.label()).foregroundStyle(pipeline.color).lineLimit(1)
+            }
+            if !reviewers.text.isEmpty {
+                HStack(spacing: 4) {
+                    Text(reviewers.text).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
+                    if reviewers.hasChanges {
+                        Image(systemName: "xmark.circle.fill").font(Typo.micro(.bold)).foregroundStyle(Palette.waiting)
+                            .help("A reviewer asked for changes").decorative()
+                    }
+                }
             }
         }
         .padding(8)
@@ -407,6 +448,12 @@ struct PRReviewDetail: View {
                 Text(pipeline.text).font(Typo.label(.medium)).foregroundStyle(pipeline.color)
                 if let head = pr.head { Text(String(head.prefix(7))).font(Typo.label(mono: true)).foregroundStyle(Palette.ink3).help("Head commit") }
                 if let found { PRReviewChip(pr: pr, store: store).fixedSize(horizontal: false, vertical: true).id(found.record.phase) }
+            }
+            let reviewerRows = pr.reviewerRows
+            if !reviewerRows.isEmpty {
+                PRReviewFlow(spacing: 10, rowSpacing: 3) {
+                    ForEach(Array(reviewerRows.enumerated()), id: \.offset) { _, row in PRReviewReviewerChip(row: row) }
+                }
             }
             if let text = model.behind[id], found?.outdated == true {
                 HStack(spacing: 4) {
