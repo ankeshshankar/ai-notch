@@ -208,7 +208,7 @@
 
 - `swift test` — the `DictationCore` unit tests (rules, prompt, reply parsing, stub-server round trip,
   hotkey gestures, pasteboard).
-- `AINotch --dictation-transcribe <audio> [--locale en-IN]` — a file (`say -v Rishi -o x.aiff "…"`)
+- `AINotch --dictation-transcribe <audio> [--locale en-IN] [--engine dictation|speech] [--vocab builtin]` — a file (`say -v Rishi -o x.aiff "…"`)
   through the same pump and SpeechAnalyzer the microphone uses; prints the raw and rule-cleaned text.
 - `python3 anthropic-stub.py 8787 [ok|refusal|401|slow|answer|maxtokens]` and
   `AINotch --dictation-clean "um hello" --endpoint http://127.0.0.1:8787/v1/messages [--style english] [--app Slack]`
@@ -231,3 +231,6 @@
   files; `CLAUDE_NOTCH_REVIEW_TIMEOUT=<s>` shortens the 30 minute limit. For a preview of the row
   actions: `--preview --board-fixtures --panel PRs` with a ledger for the fixture heads
   (`aaaaaaaaaaaa`, `bbbbbbbbbbbb`, `cccccccccccc`). Unit tests: `swift test --filter ReviewCoreTests`.
+
+- `python3 scripts/dev/dictation-accuracy.py` — before/after jargon recall and word error rate of the speech
+  engines on `say` audio (needs a release build).

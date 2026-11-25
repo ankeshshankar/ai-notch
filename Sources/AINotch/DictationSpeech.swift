@@ -118,39 +118,94 @@ enum DictationError: Error, Equatable {
     }
 }
 
-/// One dictation's speech-to-text on macOS 26's on-device SpeechAnalyzer.
+/// Which on-device recogniser runs. Dictation honours custom vocabulary; the speech one does not.
+enum SpeechEngine: String, Sendable { case dictation, speech }
+
+/// One dictation's speech-to-text on macOS 26's on-device SpeechAnalyzer. Uses `DictationTranscriber`
+/// (it takes contextual vocabulary) and falls back to `SpeechTranscriber` when the dictation
+/// engine lacks the language or its assets.
 @available(macOS 26.0, *)
 final class SpeechDictation: @unchecked Sendable {
     let pump: AudioPump
-    private let transcriber: SpeechTranscriber
+    let engine: SpeechEngine
     private let analyzer: SpeechAnalyzer
-    private let localeIdentifier: String
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     private var results: Task<String, Error>?
     private var started = false
 
-    private init(transcriber: SpeechTranscriber, locale: Locale, pump: AudioPump) {
+    private init(engine: SpeechEngine, module: any SpeechModule, pump: AudioPump) {
         self.pump = pump
-        self.transcriber = transcriber
-        self.localeIdentifier = locale.identifier
-        analyzer = SpeechAnalyzer(modules: [transcriber])
+        self.engine = engine
+        analyzer = SpeechAnalyzer(modules: [module])
+    }
+
+    private static func module(_ engine: SpeechEngine, _ locale: Locale, live: Bool = false) -> any SpeechModule {
+        switch engine {
+        case .dictation:
+            return DictationTranscriber(locale: locale, contentHints: [], transcriptionOptions: [.punctuation],
+                                        reportingOptions: live ? [.volatileResults] : [], attributeOptions: [])
+        case .speech:
+            return SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: live ? [.volatileResults] : [], attributeOptions: [])
+        }
+    }
+
+    /// The supported spelling of `identifier` for an engine, or nil.
+    static func supportedLocale(_ identifier: String, engine: SpeechEngine) async -> Locale? {
+        let wanted = Locale(identifier: identifier)
+        switch engine {
+        case .dictation: return await DictationTranscriber.supportedLocale(equivalentTo: wanted)
+        case .speech: return await SpeechTranscriber.supportedLocale(equivalentTo: wanted)
+        }
+    }
+
+    /// The engine that serves `identifier` and its locale: dictation first, speech as the fallback.
+    static func resolve(_ identifier: String, prefer: SpeechEngine? = nil) async -> (engine: SpeechEngine, locale: Locale)? {
+        let order: [SpeechEngine] = prefer.map { [$0] } ?? [.dictation, .speech]
+        for engine in order {
+            if let locale = await supportedLocale(identifier, engine: engine) { return (engine, locale) }
+        }
+        return nil
     }
 
     /// The installed languages and the ones the engine supports, as locale identifiers.
-    static func installed() async -> Set<String> { Set(await SpeechTranscriber.installedLocales.map { $0.identifier(.bcp47) }) }
-    static func supported() async -> [Locale] { await SpeechTranscriber.supportedLocales }
-
-    /// Whether `locale`'s on-device model is installed.
-    static func isInstalled(_ locale: Locale) async -> Bool {
-        await installed().contains(locale.identifier(.bcp47))
+    static func installed() async -> Set<String> {
+        Set(await DictationTranscriber.installedLocales.map { $0.identifier(.bcp47) })
+            .union(await SpeechTranscriber.installedLocales.map { $0.identifier(.bcp47) })
+    }
+    static func supported() async -> [Locale] {
+        let dictation = await DictationTranscriber.supportedLocales
+        return dictation.isEmpty ? await SpeechTranscriber.supportedLocales : dictation
     }
 
-    /// Downloads a language's model when it is not installed. `progress` is told 0…1.
-    static func ensureAssets(for locale: Locale, progress: (@Sendable (Double) -> Void)? = nil) async throws {
-        let module = SpeechTranscriber(locale: locale, preset: .transcription)
+    /// Whether `locale`'s on-device model is installed (for the dictation engine).
+    static func isInstalled(_ locale: Locale, engine: SpeechEngine = .dictation) async -> Bool {
+        let installed: [Locale] = engine == .dictation ? await DictationTranscriber.installedLocales : await SpeechTranscriber.installedLocales
+        return installed.map { $0.identifier(.bcp47) }.contains(locale.identifier(.bcp47))
+    }
+
+    /// Downloads a language's model when it is not installed, for the dictation engine and, failing
+    /// that, the speech one. Returns the engine that is ready. `progress` is told 0…1.
+    @discardableResult
+    static func ensureAssets(for locale: Locale, prefer: SpeechEngine? = nil, progress: (@Sendable (Double) -> Void)? = nil) async throws -> SpeechEngine {
+        var lastError: Error = DictationError.unsupportedLocale(locale.identifier)
+        for engine in prefer.map({ [$0] }) ?? [.dictation, .speech] {
+            guard let mine = await supportedLocale(locale.identifier(.bcp47), engine: engine) else { continue }
+            do {
+                try await ensureAssets(engine: engine, locale: mine, progress: progress)
+                return engine
+            } catch {
+                DictationLog.log.error("\(engine.rawValue, privacy: .public) assets unavailable for \(locale.identifier, privacy: .public): \(String(describing: error), privacy: .public)")
+                lastError = error
+            }
+        }
+        throw lastError
+    }
+
+    private static func ensureAssets(engine: SpeechEngine, locale: Locale, progress: (@Sendable (Double) -> Void)?) async throws {
+        let module = Self.module(engine, locale)
         var status = await AssetInventory.status(forModules: [module])
-        DictationLog.log.info("asset status \(String(describing: status), privacy: .public) for \(locale.identifier, privacy: .public)")
-        if CommandLine.arguments.contains("--dictation-trace") { FileHandle.standardError.write(Data("asset status \(status) for \(locale.identifier)\n".utf8)) }
+        DictationLog.log.info("\(engine.rawValue, privacy: .public) asset status \(String(describing: status), privacy: .public) for \(locale.identifier, privacy: .public)")
+        if CommandLine.arguments.contains("--dictation-trace") { FileHandle.standardError.write(Data("asset status \(status) for \(locale.identifier) (\(engine.rawValue))\n".utf8)) }
         if status == .installed { return }
         // A model another app (or an earlier run) installed still shows "supported" until this app
         // reserves the language; reserving is what makes it usable here, and needs no download.
@@ -200,48 +255,75 @@ final class SpeechDictation: @unchecked Sendable {
     }
 
     /// Makes the analyzer for `locale`: finds the supported spelling, installs the model when
-    /// missing, and starts it listening on a stream the pump feeds.
-    /// `source` is the format of the audio the pump will be given.
+    /// missing, hands the engine its vocabulary, and starts it listening on a stream the pump feeds.
+    /// `source` is the format of the audio the pump will be given. `prefer` names the first engine to try; without `fallback` it is the only one (tests).
     /// `onUpdate` hears the text settled so far and the volatile tail still changing, on every
     /// result; `onPhrase` hears each phrase the moment Apple marks it final. Both run off the main thread.
     static func start(localeIdentifier: String, source: AVAudioFormat, pump: AudioPump,
+                      vocabulary: [String] = [], prefer: SpeechEngine? = nil, fallback: Bool = true,
                       progress: (@Sendable (Double) -> Void)? = nil,
                       onUpdate: (@Sendable (_ final: String, _ volatile: String) -> Void)? = nil,
                       onPhrase: (@Sendable (String) -> Void)? = nil) async throws -> SpeechDictation {
-        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: localeIdentifier)) else {
-            throw DictationError.unsupportedLocale(localeIdentifier)
+        let order: [SpeechEngine] = prefer.map { fallback ? [$0, $0 == .dictation ? .speech : .dictation] : [$0] } ?? [.dictation, .speech]
+        var chosen: (engine: SpeechEngine, locale: Locale)?
+        var lastError: Error = DictationError.unsupportedLocale(localeIdentifier)
+        for engine in order {
+            guard let locale = await supportedLocale(localeIdentifier, engine: engine) else { continue }
+            do {
+                try await ensureAssets(engine: engine, locale: locale, progress: progress)
+                chosen = (engine, locale)
+                break
+            } catch {
+                DictationLog.log.error("\(engine.rawValue, privacy: .public) unavailable for \(localeIdentifier, privacy: .public): \(String(describing: error), privacy: .public)")
+                lastError = error
+            }
         }
-        try await ensureAssets(for: locale, progress: progress)
-        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
-        let session = SpeechDictation(transcriber: transcriber, locale: locale, pump: pump)
-        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: source) else {
+        guard let (engine, locale) = chosen else { throw lastError }
+        let module = Self.module(engine, locale, live: true)
+        let session = SpeechDictation(engine: engine, module: module, pump: pump)
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [module], considering: source) else {
             DictationLog.log.error("no audio format for \(locale.identifier, privacy: .public) from \(source.sampleRate, privacy: .public) Hz \(source.channelCount, privacy: .public) ch")
             throw DictationError.noAudioFormat
         }
-        DictationLog.log.info("analyzer format \(format.sampleRate, privacy: .public) Hz \(format.channelCount, privacy: .public) ch")
+        DictationLog.log.info("\(engine.rawValue, privacy: .public) analyzer format \(format.sampleRate, privacy: .public) Hz \(format.channelCount, privacy: .public) ch, \(vocabulary.count, privacy: .public) terms")
         try await session.analyzer.prepareToAnalyze(in: format)
+        if !vocabulary.isEmpty {
+            let context = AnalysisContext()
+            context.contextualStrings = [.general: vocabulary]
+            do { try await session.analyzer.setContext(context) } catch {
+                DictationLog.log.error("vocabulary not applied: \(String(describing: error), privacy: .public)")
+            }
+        }
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         session.continuation = continuation
         let trace = CommandLine.arguments.contains("--dictation-trace")
-        session.results = Task {
-            var text = ""
-            var partials = 0
-            let began = Date()
-            for try await result in transcriber.results {
-                let piece = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-                if result.isFinal {
-                    if !piece.isEmpty { text += (text.isEmpty ? "" : " ") + piece; onPhrase?(piece) }
-                    onUpdate?(text, "")
-                } else {
-                    onUpdate?(text, piece)
+        func consume<S: AsyncSequence>(_ sequence: S, _ read: @escaping @Sendable (S.Element) -> (String, Bool)) -> Task<String, Error> where S: Sendable, S.Element: Sendable {
+            Task {
+                var text = ""
+                var partials = 0
+                let began = Date()
+                for try await result in sequence {
+                    let (raw, isFinal) = read(result)
+                    let piece = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if isFinal {
+                        if !piece.isEmpty { text += (text.isEmpty ? "" : " ") + piece; onPhrase?(piece) }
+                        onUpdate?(text, "")
+                    } else {
+                        onUpdate?(text, piece)
+                    }
+                    if trace {
+                        // Sizes only, never the words.
+                        if !isFinal { partials += 1 }
+                        FileHandle.standardError.write(Data(String(format: "t=%.2fs %@ result: %d chars; settled %d chars (partials so far %d)\n", Date().timeIntervalSince(began), isFinal ? "FINAL  " : "partial", piece.count, text.count, partials).utf8))
+                    }
                 }
-                if trace {
-                    // Sizes only, never the words.
-                    if !result.isFinal { partials += 1 }
-                    FileHandle.standardError.write(Data(String(format: "t=%.2fs %@ result: %d chars; settled %d chars (partials so far %d)\n", Date().timeIntervalSince(began), result.isFinal ? "FINAL  " : "partial", piece.count, text.count, partials).utf8))
-                }
+                return text
             }
-            return text
+        }
+        if let module = module as? DictationTranscriber {
+            session.results = consume(module.results) { (String($0.text.characters), $0.isFinal) }
+        } else if let module = module as? SpeechTranscriber {
+            session.results = consume(module.results) { (String($0.text.characters), $0.isFinal) }
         }
         try await session.analyzer.start(inputSequence: stream)
         session.started = true

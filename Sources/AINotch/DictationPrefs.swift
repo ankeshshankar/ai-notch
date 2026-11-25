@@ -12,7 +12,8 @@ import Speech
 @MainActor
 final class DictationPrefs: ObservableObject {
     static let shared = DictationPrefs()
-    static let defaultLocale = "en-IN"
+    /// Hindi (India) hears Hinglish better than English (India); a saved choice always wins.
+    static let defaultLocale = "hi-IN"
 
     @Published var enabled: Bool { didSet { defaults.set(enabled, forKey: "dictation.enabled"); changed() } }
     @Published var hotkey: DictationHotkey { didSet { defaults.set(hotkey.rawValue, forKey: "dictation.hotkey"); changed() } }
@@ -20,6 +21,12 @@ final class DictationPrefs: ObservableObject {
     @Published var aiCleanup: Bool { didSet { defaults.set(aiCleanup, forKey: "dictation.aiCleanup") } }
     /// Type each phrase into the focused box as it is heard, instead of one paste at the end.
     @Published var typeLive: Bool { didSet { defaults.set(typeLive, forKey: "dictation.typeLive") } }
+    /// The user's own words (names, jargon) for the engine and the clean-up, one per line or comma-separated.
+    @Published var vocabulary: String { didSet { defaults.set(vocabulary, forKey: "dictation.vocabulary") } }
+    /// Which Apple recogniser: automatic picks the speech one for Hindi (it keeps English words in
+    /// Latin letters, the dictation one writes Devanagari and drops them) and the dictation one,
+    /// which takes custom vocabulary, for other languages.
+    @Published var engine: DictationEngineChoice { didSet { defaults.set(engine.rawValue, forKey: "dictation.engine"); changed() } }
     @Published var style: DictationStyle { didSet { defaults.set(style.rawValue, forKey: "dictation.style") } }
     /// Whether a key is saved (the key itself is never held here).
     @Published private(set) var hasKey: Bool
@@ -35,9 +42,22 @@ final class DictationPrefs: ObservableObject {
         locale = defaults.string(forKey: "dictation.locale") ?? Self.defaultLocale
         aiCleanup = defaults.object(forKey: "dictation.aiCleanup") as? Bool ?? true
         typeLive = defaults.bool(forKey: "dictation.typeLive")
+        vocabulary = defaults.string(forKey: "dictation.vocabulary") ?? ""
+        engine = DictationEngineChoice(rawValue: defaults.string(forKey: "dictation.engine") ?? "") ?? .auto
         style = DictationStyle(rawValue: defaults.string(forKey: "dictation.style") ?? "") ?? .keepMyWords
         hasKey = DictationKey.exists()
     }
+
+    /// The engine to ask for with `locale` (nil: dictation first, speech as the fallback).
+    func enginePreference(for locale: String) -> SpeechEngine? {
+        switch engine {
+        case .auto: return locale.lowercased().hasPrefix("hi") ? .speech : nil
+        case .dictation: return .dictation
+        case .speech: return .speech
+        }
+    }
+
+    var userTerms: [String] { DictationVocabulary.parse(vocabulary) }
 
     private func changed() { onChange() }
 
@@ -56,6 +76,17 @@ final class DictationPrefs: ObservableObject {
 
     /// AI clean-up runs when it is on and a key is saved.
     var aiActive: Bool { aiCleanup && hasKey }
+}
+
+enum DictationEngineChoice: String, CaseIterable {
+    case auto, dictation, speech
+    var title: String {
+        switch self {
+        case .auto: return "Automatic"
+        case .dictation: return "Apple Dictation"
+        case .speech: return "Apple Speech"
+        }
+    }
 }
 
 /// The Anthropic API key, in the macOS Keychain and nowhere else: never a file, UserDefaults, the
