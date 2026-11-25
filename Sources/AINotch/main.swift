@@ -2,7 +2,7 @@ import AppKit
 import Combine
 
 /// A preview window for screenshots, never the app: it skips the one-copy check and the first-launch setup.
-let isPreviewRun = CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview")
+let isPreviewRun = CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview") || CommandLine.arguments.contains("--review-window-preview")
 let showSetupNotification = Notification.Name("info.ankeshshiv.notch.show-setup")
 
 @MainActor
@@ -29,6 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             LidAwake.shared.applyFixture(i.flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? "off")
         }
         let setup = SetupWindowController.shared
+        // `--review-window-preview`: the review window alone, on fixtures (see PRReviewDev).
+        if args.contains("--review-window-preview") {
+            PRReviewDev.preview(args)
+            return
+        }
         // `--setup-preview`: the setup window alone (no notch, no socket), for screenshots; with
         // CLAUDE_NOTCH_SETUP_HOME it reads and writes a copy of a home folder.
         if args.contains("--setup-preview") {
@@ -77,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SetupWindowController.shared.machine = machine
         SetupWindowController.shared.vpn = vpn
         SetupWindowController.shared.reviews = reviews
+        PRReviewWindowController.shared.reviews = reviews
         controller = NotchController(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews)
         if let controller, !args.contains("--preview") { Hotkeys.shared.start(controller: controller, store: store) }
         if !args.contains("--preview") { Dictation.shared.start() }
@@ -151,6 +157,9 @@ if let index = CommandLine.arguments.firstIndex(of: "--chat-title") {
 
 // Dev checks of the pull-request data layer, never the app: `--pr-selfcheck`, `--pr-watch <s>`.
 PullRequestDev.runIfAsked(CommandLine.arguments)
+
+// Dev check of the review window's comment, chat and post logic (a dry run, nothing sent), never the app: `--review-selfcheck`.
+PRReviewDev.runIfAsked(CommandLine.arguments)
 
 // Dev check of Cursor's usage parsing and totals, never the app: `--cursor-usage-selfcheck`.
 CursorUsageSelfCheck.runIfAsked(CommandLine.arguments)

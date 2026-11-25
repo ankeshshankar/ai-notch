@@ -162,7 +162,7 @@ enum KeychainGuard {
     static var blocked: Bool {
         if let forceBlocked { return forceBlocked }
         if ProcessInfo.processInfo.environment["CLAUDE_NOTCH_ALLOW_KEYCHAIN"] == "1" { return false }
-        return CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview")
+        return ["--preview", "--setup-preview", "--review-window-preview", "--review-selfcheck"].contains { CommandLine.arguments.contains($0) }
     }
     /// True when the caller may go on to the real Keychain (and counts it).
     static func enter() -> Bool {

@@ -87,6 +87,7 @@ struct PRMenu: View {
         Button("Mark seen") { reviews.markRowSeen(pr) }
         if PRReviewStore.supports(pr) {
             Divider()
+            Button("Open review window") { PRReviewWindowController.shared.show(pr.id) }
             let auto = reviews.autoReview
             let phase = auto.record(for: pr)?.record.phase
             if phase == .queued || phase == .reviewing {
@@ -239,12 +240,19 @@ struct PullRequestsNeedYou: View {
                     controller.collapse()
                     SafeLink.open(url, for: .bitbucket)
                 }
-                Button(action: open) {
+                Button {
+                    if PRReviewStore.supports(pr) {
+                        controller.collapse()
+                        PRReviewWindowController.shared.show(pr.id)
+                    } else {
+                        open()
+                    }
+                } label: {
                     PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: false, merge: nil, review: reviews.autoReview)
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(RowButtonStyle())
-                .help("Open on bitbucket.org")
+                .help(PRReviewStore.supports(pr) ? "Open the review window" : "Open on bitbucket.org")
                 .contextMenu { PRMenu(pr: pr, reviews: reviews, open: open) }
             }
             if reviews.attention.count > shown.count {
@@ -260,7 +268,7 @@ struct PullRequestsNeedYou: View {
 }
 
 /// Every open pull request, Mine | To review, across the full width like Usage. A row opens on
-/// the web; Details shows its branches, reviews, tasks and build, and reads its merge checks once.
+/// the web (a pull request I review opens its review window); Details shows its branches, reviews, tasks and build, and reads its merge checks once.
 struct PullRequestsPanel: View {
     @ObservedObject var reviews: ReviewStore
     @ObservedObject var controller: NotchController
@@ -326,7 +334,7 @@ struct PullRequestsPanel: View {
     }
 
     private var about: String {
-        "Your open pull requests and the ones waiting for your review, in the repositories of bitbucket in \(BuildsConfig.displayPath). Mine every 2 minutes, review lists every 10 (20 while a pipeline of yours runs), details only for what changed, merge checks only when you open Details. \(reviews.requestSummary.isEmpty ? "" : reviews.requestSummary + ".") Right-click a row to mute it or mark it seen. Pull requests you review are reviewed automatically (Claude, read only); the verdict shows on the row and Approve appears only when it is safe, after a click and a confirm. Nothing is merged or commented from here."
+        "Your open pull requests and the ones waiting for your review, in the repositories of bitbucket in \(BuildsConfig.displayPath). Mine every 2 minutes, review lists every 10 (20 while a pipeline of yours runs), details only for what changed, merge checks only when you open Details. \(reviews.requestSummary.isEmpty ? "" : reviews.requestSummary + ".") Right-click a row to mute it or mark it seen. Pull requests you review are reviewed automatically (Claude, read only); the verdict shows on the row; click it to open the review window, with the findings as comments to pick from, a chat about the review and Approve (only when it is safe, after a click and a confirm). Nothing is merged, and nothing is commented without your click and confirm."
     }
 
     private func group(_ title: String, _ prs: [PullRequest]) -> some View {
@@ -348,14 +356,23 @@ struct PullRequestsPanel: View {
             controller.collapse()
             SafeLink.open(url, for: .bitbucket)
         }
+        // A pull request I review opens its review window; the others open on Bitbucket.
+        let click = {
+            if PRReviewStore.supports(pr) {
+                controller.collapse()
+                PRReviewWindowController.shared.show(pr.id)
+            } else {
+                open()
+            }
+        }
         return VStack(alignment: .leading, spacing: 4) {
         ZStack(alignment: .bottomTrailing) {
-            Button(action: open) {
+            Button(action: click) {
                 PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: isOpen, merge: merge[pr.id], review: reviews.autoReview)
                     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(RowButtonStyle())
-            .help("Open on bitbucket.org")
+            .help(PRReviewStore.supports(pr) ? "Open the review window" : "Open on bitbucket.org")
             .contextMenu { PRMenu(pr: pr, reviews: reviews, open: open) }
 
             Button {
@@ -376,7 +393,6 @@ struct PullRequestsPanel: View {
             .ax(isOpen ? "Hide details" : "Show details", value: pr.title)
         }
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.bitbucket, lineWidth: highlighted == pr.id ? 2 : 0).allowsHitTesting(false))
-        if PRReviewStore.supports(pr) { PRReviewBar(pr: pr, store: reviews.autoReview) }
         }
         .id(pr.id)
     }

@@ -61,6 +61,10 @@ final class PRReviewStore: ObservableObject {
         baseURL.appendingPathComponent("\(ref.repo)-\(ref.id)-\(head.prefix(12))", isDirectory: true)
     }
 
+    func folder(for record: ReviewRecord) -> URL? {
+        PullRequestRef(key: record.key).map { Self.folder($0, head: record.head) }
+    }
+
     func reportURL(_ record: ReviewRecord) -> URL? {
         guard record.reportFile != nil, let ref = PullRequestRef(key: record.key) else { return nil }
         let name = "\(ref.repo)-\(ref.id)-\(record.head.prefix(12))"
@@ -224,6 +228,7 @@ final class PRReviewStore: ObservableObject {
             record.error = message
         case .finished(let output):
             record.costUSD = output.costUSD
+            record.sessionID = output.sessionID
             let folder = Self.folder(ref, head: existing.head)
             if !output.text.isEmpty {
                 try? output.text.write(to: folder.appendingPathComponent("report.md"), atomically: true, encoding: .utf8)

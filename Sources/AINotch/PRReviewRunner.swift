@@ -59,10 +59,7 @@ final class PRReviewRunner: @unchecked Sendable {
         guard let claude = UsageProbe.executable else { return .failed("claude is not installed") }
         let fm = FileManager.default
         try? fm.createDirectory(at: job.dir, withIntermediateDirectories: true)
-        let helper = URL(fileURLWithPath: ReviewCommand.bbGetPath(home: NSHomeDirectory()))
-        try? fm.createDirectory(at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? ReviewCommand.bbGetScript.write(to: helper, atomically: true, encoding: .utf8)
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        Self.installHelper()
         let out = job.dir.appendingPathComponent("out.json"), err = job.dir.appendingPathComponent("err.log")
         fm.createFile(atPath: out.path, contents: nil)
         fm.createFile(atPath: err.path, contents: nil)
@@ -138,8 +135,17 @@ final class PRReviewRunner: @unchecked Sendable {
         return env
     }
 
+    /// The GET-only Bitbucket helper the review (and its chat) reads the API with.
+    static func installHelper() {
+        let fm = FileManager.default
+        let helper = URL(fileURLWithPath: ReviewCommand.bbGetPath(home: NSHomeDirectory()))
+        try? fm.createDirectory(at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? ReviewCommand.bbGetScript.write(to: helper, atomically: true, encoding: .utf8)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+    }
+
     /// The skill's scratch worktree, when a stop or a crash left it behind.
-    private static func removeWorktree(repo: String, dir: URL) {
+    static func removeWorktree(repo: String, dir: URL) {
         let worktree = dir.appendingPathComponent("wt").path
         guard FileManager.default.fileExists(atPath: worktree) else { return }
         _ = runProcess("/usr/bin/git", ["-C", repo, "worktree", "remove", "--force", worktree], timeout: 30)
