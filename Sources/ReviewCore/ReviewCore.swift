@@ -140,6 +140,8 @@ public struct ReviewRecord: Codable, Sendable, Equatable {
     public var startedAt: Double?
     public var finishedAt: Double?
     public var costUSD: Double?
+    /// What I sent to Bitbucket for this run, after a click and a confirm: "approved" or "changes requested".
+    public var posted: String?
 
     public init(key: String, head: String, phase: ReviewPhase, auto: Bool, queuedAt: Double) {
         self.key = key

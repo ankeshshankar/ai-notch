@@ -754,6 +754,7 @@ private struct UsagePanel: View {
         case "opencode": return "OpenCode"
         case "qwen": return "Qwen Code"
         case "cursor": return "Cursor · plan usage"
+        case "pr-review": return "PR review (notch)"
         case "archived": return "Deleted transcripts"
         default: return entrypoint.capitalized
         }
@@ -1935,6 +1936,7 @@ private struct SessionRow: View {
         var rows: [(String, String)] = [
             ("Folder", session.cwd.replacingOccurrences(of: home, with: "~")),
             ("Runs in", session.isCursorAgent ? "Cursor's own agent"
+                : session.entrypoint == "pr-review" ? "PR review · started by AI Notch"
                 : "\(session.kind.name) · \(AppInfo.of(session.appBundleId)?.name ?? (session.kind == .claude ? session.entrypoint : nil) ?? "terminal")"),
             ("Model", session.model.map { "\(modelName($0)) · \($0)" } ?? "—"),
             ("Session", "started \(elapsed(now - session.startedAt)) ago · \(session.toolCount) tool calls"),

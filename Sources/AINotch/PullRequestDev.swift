@@ -15,9 +15,43 @@ import NotchCore
 //                             "Send to agent" brief of each of mine with something to fix.
 
 enum PullRequestDev {
+    /// `--review-run <repo> <number> <head>`: one real headless review of an open pull request
+    /// (read-only, nothing is approved or posted), through the same runner and the same result
+    /// handling as the app. Prints the state, verdict, findings, cost and report path; never the
+    /// token. The ledger and reports go to CLAUDE_NOTCH_REVIEW_LEDGER / CLAUDE_NOTCH_REVIEWS.
+    static func reviewRun(_ args: [String]) -> Int32 {
+        guard args.count >= 3, let number = Int(args[1]), let ref = PullRequestRef(fullName: "asbl-dev/" + args[0], id: number) else {
+            FileHandle.standardError.write(Data("usage: AINotch --review-run <repo> <number> <head>\n".utf8))
+            return 2
+        }
+        guard let path = PRReviewStore.repoPath(ref), let token = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else {
+            print("no clone or no read token")
+            return 1
+        }
+        let head = args[2]
+        let started = Date()
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var result: PRReviewRunner.Outcome = .cancelled
+        PRReviewRunner().start(.init(ref: ref, head: head, repoPath: path, dir: PRReviewStore.folder(ref, head: head), token: token)) {
+            result = $0
+            done.signal()
+        }
+        done.wait()
+        let record = PRReviewStore.settle(ReviewRecord(key: ref.key, head: head, phase: .reviewing, auto: false, queuedAt: started.timeIntervalSince1970), ref: ref, outcome: result)
+        print("phase: \(record.phase.rawValue)")
+        print("verdict: \(record.verdict?.rawValue ?? "-")")
+        print("findings: \(record.findings?.text ?? "-")")
+        print("error: \(record.error ?? "-")")
+        print("cost: \(record.costUSD.map { String(format: "$%.2f", $0) } ?? "-")")
+        print("seconds: \(Int(Date().timeIntervalSince(started)))")
+        print("folder: \(PRReviewStore.folder(ref, head: head).path)")
+        return record.phase == .done ? 0 : 1
+    }
+
     /// Runs a dev flag and exits; returns when none was given.
     static func runIfAsked(_ arguments: [String]) {
         if arguments.contains("--pr-selfcheck") { exit(selfCheck()) }
+        if let index = arguments.firstIndex(of: "--review-run") { exit(reviewRun(Array(arguments[(index + 1)...]))) }
         guard let index = arguments.firstIndex(of: "--pr-watch") else { return }
         let seconds = index + 1 < arguments.count ? Double(arguments[index + 1]) ?? 60 : 60
         let prsOnly = arguments.contains("--prs-only")

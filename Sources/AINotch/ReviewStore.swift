@@ -44,6 +44,8 @@ final class ReviewStore: ObservableObject {
     @Published private(set) var notify = NotifyPrefs.load()
     /// Which session belongs to which of my pull requests, for the line under its row.
     let sessionLinks = SessionPRStore()
+    /// Automatic reviews of the ones I review (PRReview.swift).
+    let autoReview = PRReviewStore()
     private var watchedKeys: Set<String> = []
 
     private var source: PullRequestSource?
@@ -117,6 +119,7 @@ final class ReviewStore: ObservableObject {
         muted = Set(UserDefaults.standard.stringArray(forKey: Self.mutedKey) ?? [])
         seenNews = Set(UserDefaults.standard.stringArray(forKey: Self.seenKey) ?? [])
         sessionLinks.onWatched = { [weak self] keys in self?.setWatched(keys) }
+        autoReview.meUUID = { [weak self] in self?.me?.uuid }
         sessionLinks.feedback = { [weak self] pr, build, comments in
             await self?.feedback(for: pr, build: build, comments: comments) ?? PRFeedbackData()
         }
@@ -213,6 +216,7 @@ final class ReviewStore: ObservableObject {
         if mine != self.mine { self.mine = mine }
         if toReview != self.toReview { self.toReview = toReview }
         sessionLinks.setMine(mine)
+        autoReview.observe(toReview: toReview, healthy: snapshot.status == nil && snapshot.mineFetchedAt > 0)
         // A muted pull request that closed is forgotten (only from a healthy, read answer).
         if snapshot.status == nil, snapshot.mineFetchedAt > 0, !muted.isEmpty {
             let open = Set(prs.map(\.id))
