@@ -17,8 +17,12 @@ let package = Package(
         // hotkey gestures, the pasteboard round trip. Unit-tested (`swift test`).
         .target(name: "DictationCore"),
         .testTarget(name: "DictationCoreTests", dependencies: ["DictationCore"]),
+        // The automatic review's logic without the UI: verdict parsing, the ledger that dedupes runs,
+        // the approve gate, the headless command. Unit-tested (`swift test`).
+        .target(name: "ReviewCore"),
+        .testTarget(name: "ReviewCoreTests", dependencies: ["ReviewCore"]),
         // The notch app: reads the state files and draws them under the notch.
-        .executableTarget(name: "AINotch", dependencies: ["NotchCore", "VPNCore", "DictationCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
+        .executableTarget(name: "AINotch", dependencies: ["NotchCore", "VPNCore", "DictationCore", "ReviewCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
     ],
     swiftLanguageModes: [.v5]
 )
