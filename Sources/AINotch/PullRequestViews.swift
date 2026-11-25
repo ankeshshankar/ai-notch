@@ -1,5 +1,6 @@
 import AppKit
 import NotchCore
+import ReviewCore
 import SwiftUI
 
 // Pull requests on screen: one list, the PRs section with every open pull request, Mine | To
@@ -84,6 +85,19 @@ struct PRMenu: View {
     var body: some View {
         Button(reviews.isMuted(pr) ? "Unmute this PR" : "Mute this PR") { reviews.toggleMute(pr) }
         Button("Mark seen") { reviews.markRowSeen(pr) }
+        if PRReviewStore.supports(pr) {
+            Divider()
+            let auto = reviews.autoReview
+            let phase = auto.record(for: pr)?.record.phase
+            if phase == .queued || phase == .reviewing {
+                Button("Cancel review") { auto.cancel(pr) }
+            } else {
+                Button(phase == nil ? "Review now" : "Re-review") { auto.reviewNow(pr) }
+            }
+            if let found = auto.record(for: pr), let url = auto.reportURL(found.record) {
+                Button("View report") { NSWorkspace.shared.open(url) }
+            }
+        }
         Divider()
         Button("Open on bitbucket.org", action: open)
     }
@@ -226,7 +240,7 @@ struct PullRequestsNeedYou: View {
                     SafeLink.open(url, for: .bitbucket)
                 }
                 Button(action: open) {
-                    PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: false, merge: nil)
+                    PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: false, merge: nil, review: reviews.autoReview)
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(RowButtonStyle())
@@ -312,7 +326,7 @@ struct PullRequestsPanel: View {
     }
 
     private var about: String {
-        "Your open pull requests and the ones waiting for your review, in the repositories of bitbucket in \(BuildsConfig.displayPath). Mine every 2 minutes, review lists every 10 (20 while a pipeline of yours runs), details only for what changed, merge checks only when you open Details. \(reviews.requestSummary.isEmpty ? "" : reviews.requestSummary + ".") Right-click a row to mute it or mark it seen. Read only: nothing is approved, merged or commented from here."
+        "Your open pull requests and the ones waiting for your review, in the repositories of bitbucket in \(BuildsConfig.displayPath). Mine every 2 minutes, review lists every 10 (20 while a pipeline of yours runs), details only for what changed, merge checks only when you open Details. \(reviews.requestSummary.isEmpty ? "" : reviews.requestSummary + ".") Right-click a row to mute it or mark it seen. Pull requests you review are reviewed automatically (Claude, read only); the verdict shows on the row and Approve appears only when it is safe, after a click and a confirm. Nothing is merged or commented from here."
     }
 
     private func group(_ title: String, _ prs: [PullRequest]) -> some View {
@@ -334,9 +348,10 @@ struct PullRequestsPanel: View {
             controller.collapse()
             SafeLink.open(url, for: .bitbucket)
         }
-        return ZStack(alignment: .bottomTrailing) {
+        return VStack(alignment: .leading, spacing: 4) {
+        ZStack(alignment: .bottomTrailing) {
             Button(action: open) {
-                PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: isOpen, merge: merge[pr.id])
+                PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: isOpen, merge: merge[pr.id], review: reviews.autoReview)
                     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(RowButtonStyle())
@@ -361,6 +376,8 @@ struct PullRequestsPanel: View {
             .ax(isOpen ? "Hide details" : "Show details", value: pr.title)
         }
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.bitbucket, lineWidth: highlighted == pr.id ? 2 : 0).allowsHitTesting(false))
+        if PRReviewStore.supports(pr) { PRReviewBar(pr: pr, store: reviews.autoReview) }
+        }
         .id(pr.id)
     }
 
@@ -383,6 +400,8 @@ struct PRPanelRowView: View {
     var isDetailed: Bool
     @Environment(\.notchGlass) private var glass
     var merge: PullRequestsPanel.MergeState?
+    /// The automatic review's chip on a row I review.
+    var review: PRReviewStore? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -398,6 +417,7 @@ struct PRPanelRowView: View {
             }
             HStack(spacing: 6) {
                 PRStatusGlyphs(pr: pr)
+                if let review, PRReviewStore.supports(pr) { PRReviewChip(pr: pr, store: review) }
                 if pr.updatedAt > 0 {
                     Text(ago(now - pr.updatedAt)).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1).fixedSize()
                 }

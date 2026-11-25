@@ -293,9 +293,9 @@ final class PRReviewStore: ObservableObject {
     }
 
     /// Whether the write token is stored, read at most every 30 s (the cache is `hasWriteToken`).
-    func refreshWriteToken() {
+    func refreshWriteToken(force: Bool = false) {
         let now = Date().timeIntervalSince1970
-        guard now - tokenCheckedAt > 30 else { return }
+        guard force || now - tokenCheckedAt > 30 else { return }
         tokenCheckedAt = now
         Task {
             let has = await PRReviewAPI.hasWriteTokenAsync()

@@ -42,6 +42,9 @@ final class SetupModel: ObservableObject {
     /// Pull requests: on or off in builds.json, and whether they read (nil without a bitbucket part).
     @Published private(set) var pullRequests: PRSetupInfo?
     @Published private(set) var prNotify = ReviewStore.NotifyPrefs.load()
+    /// Automatic reviews of the pull requests I review, and whether the write token (Approve) is stored.
+    @Published private(set) var autoReviewOn = UserDefaults.standard.object(forKey: PRReviewStore.autoKey) as? Bool ?? true
+    @Published private(set) var writeTokenSet = false
     /// Prod (Datadog): its state, and which of its news notifies.
     @Published private(set) var prod = ProdSetupInfo.make(nil)
     @Published private(set) var prodAlerts = ProdAlertPrefs.load()
@@ -118,7 +121,12 @@ final class SetupModel: ObservableObject {
         set(\.bitbucket, builds.flatMap { $0.bitbucketOn ? BuildSourceInfo.bitbucket($0.bitbucket) : nil })
         let reviews = SetupWindowController.shared.reviews
         set(\.pullRequests, PRSetupInfo.make(reviews))
-        if let reviews { set(\.prNotify, reviews.notify) }
+        if let reviews {
+            set(\.prNotify, reviews.notify)
+            set(\.autoReviewOn, reviews.autoReview.autoOn)
+            set(\.writeTokenSet, reviews.autoReview.hasWriteToken)
+            reviews.autoReview.refreshWriteToken()
+        }
         let prodStore = SetupWindowController.shared.prod
         set(\.prod, ProdSetupInfo.make(prodStore))
         if let prodStore { set(\.prodAlerts, prodStore.alertPrefs) }
@@ -211,6 +219,11 @@ final class SetupModel: ObservableObject {
     func setPRNotify(_ prefs: ReviewStore.NotifyPrefs) {
         prNotify = prefs
         if let reviews = SetupWindowController.shared.reviews { reviews.setNotify(prefs) } else { prefs.save() }
+    }
+
+    func setAutoReview(_ on: Bool) {
+        autoReviewOn = on
+        if let reviews = SetupWindowController.shared.reviews { reviews.autoReview.setAuto(on) } else { UserDefaults.standard.set(on, forKey: PRReviewStore.autoKey) }
     }
 
     /// Check Again for Bitbucket: Pipelines and pull requests read the Keychain again now.
@@ -654,6 +667,7 @@ struct SetupView: View {
     @State private var showsProdExample = false
     @State private var showsProdSteps = false
     @State private var showsTokenSteps = false
+    @State private var showsWriteSteps = false
     @ObservedObject private var auth = DatadogAuthModel.shared
     @ObservedObject private var effects = EffectsPrefs.shared
     @ObservedObject private var soundPrefs = SoundPrefs.shared
@@ -1042,7 +1056,43 @@ struct SetupView: View {
                 .toggleStyle(.checkbox).font(Typo.subtitle()).fixedSize()
             }
             .padding(.vertical, 4)
+            divider
+            row("Auto review", icon: "checkmark.seal.fill", tint: Color(red: 0.15, green: 0.52, blue: 1.0),
+                info: "Pull requests where you are a reviewer are reviewed by Claude (your own login, the homes-pr-review skill, read only, one at a time, 30 minutes at most) when they appear or get new commits, in homes-api-app and homes-ecosystem. The verdict shows on the row, with the full report to open. Nothing is posted, commented or committed on its own. Approve appears only for an APPROVE verdict on the current commit with a green pipeline, and asks twice. A run needing anything beyond reading (git push, editing the repo, curl -X) is refused and the review is marked failed.") {
+                Toggle("Auto review", isOn: Binding(get: { model.autoReviewOn }, set: { model.setAutoReview($0) }))
+                    .toggleStyle(.switch).controlSize(.small).labelsHidden()
+            }
+            .padding(.vertical, 4)
+            row("Approve token", icon: "key.fill", tint: Color(red: 0.15, green: 0.52, blue: 1.0),
+                info: "Approve and Request changes use a second, separate token (Keychain \(PRReviewAPI.writeService)) with the scope write:pullrequest (pullrequest:write), so the token that reads stays read only. Without it the verdicts still show and the buttons say what is missing.") {
+                badge(model.writeTokenSet ? "Stored" : "Not set", symbol: model.writeTokenSet ? "checkmark.circle.fill" : "circle.dashed",
+                      color: model.writeTokenSet ? .green : .secondary).fixedSize()
+                Button(showsWriteSteps ? "Hide" : "How") { showsWriteSteps.toggle() }.controlSize(.small)
+                Button("Check Again") { SetupWindowController.shared.reviews?.autoReview.refreshWriteToken(force: true); model.refresh() }.controlSize(.small)
+            }
+            if showsWriteSteps { writeTokenSteps }
         }
+    }
+
+    private var writeTokenSteps: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("1. In Atlassian account settings → Security → API tokens, create a second API token for Bitbucket with the scopes write:pullrequest and read:pullrequest. It lets AI Notch approve or request changes, only after you click twice.")
+                .font(Typo.body()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("2. Paste this in Terminal with its expiry date, copy the token, press Return (it reads the clipboard and clears it).")
+                .font(Typo.body()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(PRReviewAPI.saveCommand)
+                .font(Typo.label(mono: true)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.primary.opacity(0.07)))
+            HStack(spacing: 8) {
+                Text("3. Check Again.").font(Typo.body()).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                CopyButton(text: PRReviewAPI.saveCommand)
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10).padding(.leading, 32)
     }
 
     static let configHelp = """
