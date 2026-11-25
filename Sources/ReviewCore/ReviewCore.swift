@@ -172,6 +172,19 @@ public struct ReviewRecord: Codable, Sendable, Equatable {
     public var resumed: Bool?
     /// The Claude Code session of the run, which the review window's chat continues.
     public var sessionID: String?
+    /// A follow-up review: the commit the previous review covered (nil for a full review).
+    public var baseHead: String?
+    /// New commits a follow-up covers.
+    public var commitCount: Int?
+    /// A review of my own pull request or branch: for me only, nothing is posted or approved.
+    public var own: Bool?
+    /// A branch review (no pull request yet): the branch and what it is compared with.
+    public var branch: String?
+    public var target: String?
+    /// Comments I posted from this run's cards (the review no longer waits for my call).
+    public var commentsPosted: Int?
+    /// The "review finished" notification was sent.
+    public var notified: Bool?
 
     public init(key: String, head: String, phase: ReviewPhase, auto: Bool, queuedAt: Double) {
         self.key = key
@@ -182,6 +195,7 @@ public struct ReviewRecord: Codable, Sendable, Equatable {
     }
 
     public var isActive: Bool { phase == .queued || phase == .reviewing }
+    public var isFollowUp: Bool { baseHead != nil }
 }
 
 /// Every run, keyed by "<pull request>@<commit, 12 characters>": a pull request is reviewed
@@ -239,7 +253,24 @@ public struct ReviewLedger: Codable, Sendable, Equatable {
     }
 }
 
+/// What a review of a new head is: a full one, or a follow-up on a finished review of an older commit.
+public enum ReviewPlan: Equatable, Sendable {
+    case full
+    case followUp(base: ReviewRecord)
+}
+
 public enum ReviewPolicy {
+    /// A pull request with a finished review of another commit gets a follow-up (its diff, its
+    /// findings and comments); `full` forces a whole review. A branch review follows up on its own branch only.
+    public static func plan(key: String, head: String, ledger: ReviewLedger, full: Bool = false) -> ReviewPlan {
+        if full { return .full }
+        let bases = ledger.records.values.filter {
+            $0.key == key && $0.phase == .done && $0.verdict != nil && !ReviewGate.sameCommit($0.head, head)
+        }
+        guard let base = bases.max(by: { ($0.finishedAt ?? $0.queuedAt) < ($1.finishedAt ?? $1.queuedAt) }) else { return .full }
+        return .followUp(base: base)
+    }
+
     /// Pull requests older than this (last update) are not queued on their own.
     public static let autoMaxAge: Double = 7 * 86_400
 
@@ -279,6 +310,7 @@ public enum ReviewGate: Equatable, Sendable {
     public static func check(_ action: ReviewAction, record: ReviewRecord?, currentHead: String?, pipeline: PipelineState,
                              isOpen: Bool = true, alreadyApproved: Bool = false) -> ReviewGate {
         guard let record, record.phase == .done, let verdict = record.verdict else { return .blocked("no finished review") }
+        if record.own == true { return .blocked("your own work") }
         if action == .approve, !(record.denied ?? []).isEmpty { return .blocked("the review was refused a tool") }
         guard isOpen else { return .blocked("pull request is not open") }
         guard sameCommit(record.head, currentHead) else { return .blocked("new commits since the review") }
@@ -368,12 +400,15 @@ public enum ReviewCommand {
     /// The prompt: the skill's own text (read from its file at run time), its input, and the
     /// limits of a headless run. The skill is passed as text, not by name, because the run loads
     /// no user settings (see `arguments`) and with them goes user-level skill discovery.
-    public static func prompt(prNumber: Int, scratch: String, skill: String, bbget: String? = nil) -> String {
-        """
+    public static func prompt(prNumber: Int, scratch: String, skill: String, bbget: String? = nil, branch: BranchTarget? = nil) -> String {
+        let input = branch.map { b in
+            "INPUT: no pull request exists yet. Review the branch `\(b.branch)` at commit \(b.head) against `\(b.target)`: the changes are `git diff \(b.target)...\(b.head)` (use `git merge-base` and the commit log of that range). Skip every step that reads the pull request, its description, its comments, its tasks or its pipeline from Bitbucket; there is no CI line. The checkout is the commit above."
+        } ?? "INPUT: PR number \(prNumber)."
+        return """
         \(ReviewAgents.body(of: skill))
 
         ---
-        INPUT: PR number \(prNumber).
+        \(input)
         Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(bbget ?? scratch + "/bbget") <url> [file-name]`, which sends the token itself; with a plain file name (no folder) the response is saved in \(scratch) under that name, to Read. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
 
         \(ReviewChat.commentsInstruction(scratch: scratch))
@@ -405,9 +440,9 @@ public enum ReviewCommand {
     /// own allow rules (git commit, checkout, MCP writes, Edit on skill files) must not widen a
     /// review that reads other people's code. `--agents` supplies the lens and verifier
     /// subagents, which user-level discovery would otherwise have provided.
-    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory(), skillName: String = ReviewNames.defaultSkill) -> [String] {
+    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory(), skillName: String = ReviewNames.defaultSkill, branch: BranchTarget? = nil) -> [String] {
         let bbget = bbGetPath(home: home)
-        return ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill, bbget: bbget),
+        return ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill, bbget: bbget, branch: branch),
          "--setting-sources", ""] + (hookCommand.map { ["--settings", observeHooksJSON(command: $0)] } ?? []) + [
          "--agents", agentsJSON,
          "--add-dir"] + extraDirectories(scratch: scratch, home: home, skill: skillName) + [

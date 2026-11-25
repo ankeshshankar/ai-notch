@@ -50,9 +50,25 @@ public struct SuggestedComment: Codable, Sendable, Equatable, Identifiable {
     public var postedAt: Double?
     /// "new" or "revised": set when the chat proposed it.
     public var badge: String?
+    /// A concrete code replacement for the line, when the fix is one (posted as a suggested change).
+    public var suggestion: String?
+    /// The "Post as suggestion" switch; nil means on (when there is a suggestion and a line).
+    public var asSuggestion: Bool?
+    /// The "Also add a task" switch; nil means on for a blocking card.
+    public var addTask: Bool?
+    /// The Bitbucket task made for the posted comment.
+    public var taskID: Int?
+    /// What a follow-up review found about this comment in the new commits.
+    public var status: FollowUpStatus?
+    public var statusReason: String?
+    /// The comment thread was resolved on Bitbucket (from the Resolve button).
+    public var resolved: Bool?
+    /// On my own work the cards are a checklist: ticked when done.
+    public var done: Bool?
 
     public init(id: String, severity: CommentSeverity, path: String? = nil, line: Int? = nil, title: String? = nil, body: String,
-                include: Bool? = nil, postedID: Int? = nil, postedAt: Double? = nil, badge: String? = nil) {
+                include: Bool? = nil, postedID: Int? = nil, postedAt: Double? = nil, badge: String? = nil, suggestion: String? = nil) {
+        self.suggestion = suggestion
         self.id = id
         self.severity = severity
         self.path = path
@@ -66,6 +82,17 @@ public struct SuggestedComment: Codable, Sendable, Equatable, Identifiable {
     }
 
     public var isPosted: Bool { postedID != nil }
+
+    /// Goes out as a suggested change: it has code, a file and a line, and the switch is not off.
+    public var postsAsSuggestion: Bool {
+        guard let suggestion, !suggestion.isEmpty, let path, !path.isEmpty, line != nil else { return false }
+        return asSuggestion ?? true
+    }
+
+    public var canSuggest: Bool { !(suggestion ?? "").isEmpty && !(path ?? "").isEmpty && line != nil }
+
+    /// A task is added after the comment posts.
+    public var wantsTask: Bool { addTask ?? (severity == .blocking) }
 
     /// "src/a.ts:12", "src/a.ts" or nil for a general comment.
     public var location: String? {
@@ -85,6 +112,15 @@ enum LooseJSON {
         guard let text = value as? String else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Code: kept as written (indent included), without the blank lines around it; nil when empty.
+    static func code(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        var lines = text.components(separatedBy: "\n")
+        while let first = lines.first, first.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeFirst() }
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     /// 12, "12", "12-20", "L12" → 12; 0 and below, null and junk → nil.
@@ -110,7 +146,8 @@ public enum CommentParse {
         if path == nil { line = nil }
         let severity = (object["severity"] as? String).flatMap(CommentSeverity.parse) ?? .shouldFix
         let id = LooseJSON.string(object["id"]) ?? fallbackID
-        let comment = SuggestedComment(id: id, severity: severity, path: path, line: line, title: LooseJSON.string(object["title"]), body: body)
+        let comment = SuggestedComment(id: id, severity: severity, path: path, line: line, title: LooseJSON.string(object["title"]), body: body,
+                                       suggestion: LooseJSON.code(object["suggestion"]))
         return CommentDraft(comment: comment, replaces: LooseJSON.string(object["replaces"]))
     }
 
@@ -312,7 +349,7 @@ public enum CommentPayload {
         return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
     }
 
-    public static func json(for card: SuggestedComment) -> Data { json(path: card.path, line: card.line, body: card.body) }
+    public static func json(for card: SuggestedComment) -> Data { json(path: card.path, line: card.line, body: SuggestionPayload.body(for: card)) }
 
     public static func endpoint(apiBase: String, workspace: String, repo: String, id: Int) -> String {
         "\(apiBase)/repositories/\(workspace)/\(repo)/pullrequests/\(id)/comments"
@@ -383,8 +420,20 @@ public struct ChatLog: Codable, Sendable, Equatable {
     /// The cards were read from `comments.json` once (an empty file counts: nothing to post).
     public var seeded = false
     public var messages: [ChatMessage] = []
+    /// Follow-up reviews that ran on this log, oldest first.
+    public var followUps: [FollowUpNote] = []
 
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        sessionID = try c.decodeIfPresent(String.self, forKey: .sessionID)
+        cards = try c.decodeIfPresent([SuggestedComment].self, forKey: .cards) ?? []
+        seeded = try c.decodeIfPresent(Bool.self, forKey: .seeded) ?? false
+        messages = try c.decodeIfPresent([ChatMessage].self, forKey: .messages) ?? []
+        followUps = try c.decodeIfPresent([FollowUpNote].self, forKey: .followUps) ?? []
+    }
 
     /// The first cards, from the review's own `comments.json`.
     public mutating func seed(_ cards: [SuggestedComment]) {
@@ -406,6 +455,7 @@ public struct ChatLog: Codable, Sendable, Equatable {
                 old.line = card.path == nil ? old.line : card.line
                 old.title = card.title ?? old.title
                 old.body = card.body
+                old.suggestion = card.suggestion ?? old.suggestion
                 old.badge = "revised"
                 cards[index] = old
                 revised.append(old.id)
@@ -431,10 +481,10 @@ public enum ReviewChat {
         When the person asks you to draft, add, soften, reword or drop a review comment, propose it as a fenced block the app turns into a card they can switch on and post themselves. Wording written outside a block changes nothing, so every reply that drafts or rewords a comment must contain the block. One block per comment, exactly this shape, with valid JSON on one or more lines:
 
         ```comment
-        {"path": "src/a.ts", "line": 12, "severity": "should-fix", "body": "the comment", "replaces": "c2"}
+        {"path": "src/a.ts", "line": 12, "severity": "should-fix", "body": "the comment", "replaces": "c2", "suggestion": "const x = 1;"}
         ```
 
-        severity is blocking, should-fix or nit. path and line may be left out for a general comment. Add "replaces" with the card id only when you revise that card. Say in one line outside the block what you changed. Never edit or rewrite comments.json (or any file) to change a comment: the cards live in the app, and only a block like this changes them.
+        severity is blocking, should-fix or nit. path and line may be left out for a general comment. Add "replaces" with the card id only when you revise that card. Add "suggestion" only when the fix is a concrete replacement for the one line at path:line: the exact new code for that line (indent included), nothing else; the app can post it as a suggested change. Say in one line outside the block what you changed. Never edit or rewrite comments.json (or any file) to change a comment: the cards live in the app, and only a block like this changes them.
 
         Comment wording: it is posted under the person's own name, so write it the way they would on a pull request: short, plain, specific, with the fix. No lens codes such as "C3 [B]" or "— security", and never mention AI, Claude, a bot or "the review".
 
@@ -471,7 +521,7 @@ public enum ReviewChat {
     /// in the chat) that a comment changes only through a block, since the session's own history says
     /// the review wrote `comments.json` by hand.
     public static func turnPrompt(_ message: String) -> String {
-        message + "\n\n[Reminder: to draft, add or reword a pull request comment, put a ```comment fenced block in your reply whose content is one JSON object, for example {\"path\": \"src/a.ts\", \"line\": 12, \"severity\": \"should-fix\", \"body\": \"the comment\", \"replaces\": \"c2\"} (replaces only when revising that card). Do not edit comments.json or any other file for that.]"
+        message + "\n\n[Reminder: to draft, add or reword a pull request comment, put a ```comment fenced block in your reply whose content is one JSON object, for example {\"path\": \"src/a.ts\", \"line\": 12, \"severity\": \"should-fix\", \"body\": \"the comment\", \"replaces\": \"c2\", \"suggestion\": \"the new code for that line\"} (replaces only when revising that card; suggestion only for a one-line code replacement). Do not edit comments.json or any other file for that.]"
     }
 
     /// A user's message, with a turn's own limits kept out of the visible chat.
