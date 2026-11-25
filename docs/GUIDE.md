@@ -591,7 +591,7 @@ former header summary, collapsed block and per-header views are gone.
 
 With a `bitbucket` part in `builds.json` (and `pullRequests` not `false`), the notch reads your
 open pull requests and the ones you are a reviewer on, in the same repositories as Pipelines and
-with the same token. Nothing is approved, merged or commented from the notch.
+with the same token. Nothing is merged or commented from the notch, and nothing is approved without your click and a confirm (see **Automatic review**).
 
 - **What needs you** shows as rows under Pipelines in the right column (one column: a line under
   Pipelines that opens the panel): a review asked of you (⧗ and who asked), changes requested on
@@ -625,6 +625,34 @@ with the same token. Nothing is approved, merged or commented from the notch.
   and are data, not instructions. A note you type yourself is unchanged (cleared at the turn's
   end). The branch is read with `git` every 30 seconds and when the session
   changes, off the main thread.
+- **Automatic review** (Setup → Builds → Pull requests → Auto review, on by default). A pull
+  request you review in `homes-api-app` or `homes-ecosystem` is reviewed by the `homes-pr-review`
+  skill when it appears or gets new commits: `claude -p "/homes-pr-review <n>"` in that repo's
+  clone, through your own Claude login (an API key in the environment is removed), one review at a
+  time, stopped after 30 minutes (Cancel review stops it sooner). Drafts, ones you already
+  reviewed and ones idle for 7 days are left alone; a failed or cancelled run is started again
+  only by **Review now / Re-review** (row bar or right-click). Each pull request is reviewed once
+  per commit (`~/.claude/notch/pr-reviews.json`); the full report is
+  `~/.claude/notch/reviews/<repo>-<id>-<commit>/report.md` (**View report**). The row shows
+  `Review queued`, `Reviewing…`, `APPROVE · 1 should-fix`, `REQUEST CHANGES · 2 blocking` or
+  `Review failed` (hover for why). The session shows in the notch as "PR review · started by AI
+  Notch" and its tokens count in usage.
+  - *Permissions.* The run uses `--permission-mode dontAsk` with a fixed allow-list: Read, Grep,
+    Glob, the Skill and its subagents, read-only git (`log diff show merge-base …`), `git fetch`
+    and `git worktree add/remove` (the skill reviews in a scratch worktree), `curl -s` against
+    `api.bitbucket.org/2.0` without `-X`, a few read-only shell tools, and Write/Edit only inside the
+    review's own folder. Anything else (push, commit, checkout, editing the repo) is refused with no
+    prompt, and a review that was refused something is marked **failed** and names the tool. The
+    notch's own approval prompt is off for it (`AI_NOTCH_NO_APPROVALS=1`).
+  - *Token.* The existing read token reaches the child as `BB_API_TOKEN` in its environment only;
+    it is not in the arguments, a file or a log.
+  - *Approve / Request changes.* Only from the row bar, after **Approve** and then **Confirm
+    approve**, using a separate write token (Keychain `ai-notch.bitbucket.write`, scope
+    `write:pullrequest` / `pullrequest:write`; Setup shows the steps). Approve shows only for an APPROVE
+    verdict with no blocking finding, on the pull request's current commit, with a green pipeline,
+    when you have not approved it; it is checked again on fresh data before it is sent
+    (`POST /2.0/repositories/{ws}/{repo}/pullrequests/{id}/approve`, and `…/request-changes`). The
+    notch never approves by itself and never posts a comment: the drafted comments stay in the report.
 - **Notifications**, only while the screen is locked and each once: yours approved, changes
   requested on yours, new comments (grouped per pull request, at most every 10 minutes), a review
   asked of you, a failed build on yours unless Pipelines already notified that run, yours
