@@ -7,7 +7,8 @@ import ReviewCore
 /// environment only (`BB_API_TOKEN`, what the skill's curl calls use): it is never in the
 /// arguments, a file or a log.
 ///
-/// Permissions: `--permission-mode dontAsk` plus the allow-list in `ReviewCommand`. Anything
+/// Permissions: no user, project or local settings are loaded (the user's own allow rules would
+/// widen the run), `--permission-mode dontAsk` plus the allow-list in `ReviewCommand`. Anything
 /// outside it is refused on the spot, with no prompt (and `AI_NOTCH_NO_APPROVALS=1` keeps the
 /// notch's own approval prompt out of it). A review that needed a refused tool is marked failed
 /// and names the tool, rather than carrying on half blind.
@@ -68,7 +69,13 @@ final class PRReviewRunner: @unchecked Sendable {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: claude)
-        process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard let skill = try? String(contentsOfFile: home + "/.claude/skills/homes-pr-review/SKILL.md", encoding: .utf8) else {
+            return .failed("the homes-pr-review skill is not installed")
+        }
+        let agents = ["homes-pr-lens", "homes-pr-verifier"].compactMap { try? String(contentsOfFile: home + "/.claude/agents/\($0).md", encoding: .utf8) }
+        guard agents.count == 2 else { return .failed("the homes-pr-lens or homes-pr-verifier agent is missing") }
+        process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents))
         process.currentDirectoryURL = URL(fileURLWithPath: job.repoPath, isDirectory: true)
         process.environment = Self.environment(token: job.token)
         process.standardInput = FileHandle.nullDevice

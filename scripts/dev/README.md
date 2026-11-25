@@ -225,6 +225,7 @@
   `--dictation-trace` on `--dictation-transcribe` prints each partial/final result's size and time.
 - `AINotch --setup-preview --focus dictation` — Setup at the Dictation section.
 
+- `AINotch --review-args <pr> <dir>` — prints the NUL-separated `claude` arguments of a review (for permission probes).
 - `AINotch --review-run <repo> <number> <head12>` — one real headless review (read only, nothing is
   approved or posted) through the app's runner; prints phase, verdict, findings, cost, seconds and
   the report folder. `CLAUDE_NOTCH_REVIEWS` (reports) and `CLAUDE_NOTCH_REVIEW_LEDGER` move the

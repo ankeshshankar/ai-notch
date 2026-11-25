@@ -120,6 +120,11 @@ final class ReviewGateTests: XCTestCase {
         XCTAssertFalse(ReviewGate.check(.approve, record: record(), currentHead: head, pipeline: .unknown).isAllowed)
         XCTAssertFalse(ReviewGate.check(.approve, record: record(), currentHead: head, pipeline: .green, isOpen: false).isAllowed)
         XCTAssertFalse(ReviewGate.check(.approve, record: record(), currentHead: head, pipeline: .green, alreadyApproved: true).isAllowed)
+        var limited = record()
+        limited.denied = ["Bash"]
+        XCTAssertFalse(ReviewGate.check(.approve, record: limited, currentHead: head, pipeline: .green).isAllowed, "a review that was refused a tool cannot approve")
+        limited.verdict = .requestChanges
+        XCTAssertTrue(ReviewGate.check(.requestChanges, record: limited, currentHead: head, pipeline: .green).isAllowed)
     }
 
     func testRequestChangesGate() {
@@ -133,17 +138,37 @@ final class ReviewGateTests: XCTestCase {
 final class ReviewCommandTests: XCTestCase {
     func testReadOnlyAndScoped() {
         let tools = ReviewCommand.allowedTools(scratch: "/s/r1")
-        XCTAssertTrue(tools.contains("Write(/s/r1/**)"))
+        XCTAssertTrue(tools.contains("Write(//s/r1/**)"))
         XCTAssertFalse(tools.contains("Write"), "no unscoped write")
         XCTAssertFalse(tools.contains("Bash"), "no blanket Bash")
         for banned in ["push", "commit", "checkout", "reset", "merge", "rebase", "clean", "stash", "-X POST"] {
-            XCTAssertFalse(tools.contains { $0.contains("git \(banned):") || $0.contains("git -C * \(banned):") || $0.contains(banned + " ") && banned == "-X POST" }, banned)
+            XCTAssertFalse(tools.contains { $0.contains("git \(banned):") || $0.contains("git -C * \(banned) ") || $0.contains(banned + " ") && banned == "-X POST" }, banned)
         }
-        XCTAssertFalse(tools.contains { $0.hasPrefix("Bash(git -C *:") }, "git -C never covers every subcommand")
-        let args = ReviewCommand.arguments(prNumber: 42, scratch: "/s/r1")
+        XCTAssertFalse(tools.contains { $0.hasPrefix("Bash(git -C *:") || $0 == "Bash(git -C *)" || $0 == "Bash(git -C * *)" }, "git -C never covers every subcommand")
+        let args = ReviewCommand.arguments(prNumber: 42, scratch: "/s/r1", skill: "---\nname: x\n---\n\nSKILL BODY", agentsJSON: "{}")
         XCTAssertEqual(args.first, "-p")
-        XCTAssertTrue(args[1].hasPrefix("/homes-pr-review 42"))
+        XCTAssertTrue(args[1].hasPrefix("SKILL BODY"))
+        XCTAssertTrue(args[1].contains("PR number 42"))
+        XCTAssertEqual(args[args.firstIndex(of: "--setting-sources")! + 1], "", "no user, project or local settings")
         XCTAssertEqual(args[args.firstIndex(of: "--permission-mode")! + 1], "dontAsk")
         XCTAssertEqual(args[args.firstIndex(of: "--output-format")! + 1], "json")
+        let add = args.firstIndex(of: "--add-dir")!
+        XCTAssertEqual(Array(args[(add + 1)...(add + 2)]), ["/s/r1", NSHomeDirectory() + "/.claude/skills/homes-pr-review"])
+        XCTAssertTrue(args[(add + 3)].hasPrefix("--"), "the variadic --add-dir ends before the next flag")
+    }
+}
+
+final class ReviewAgentsTests: XCTestCase {
+    func testFrontMatterAndJSON() {
+        let file = "---\nname: lens\ndescription: One lens: of a PR\nmodel: claude-opus-5-5\ntools: Read, Grep, Bash\n---\n\nYou review.\n"
+        let (meta, body) = ReviewAgents.parts(of: file)
+        XCTAssertEqual(meta["description"], "One lens: of a PR")
+        XCTAssertEqual(body, "You review.")
+        let json = ReviewAgents.json(files: [file, "no front matter"])
+        let object = try! JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: [String: Any]]
+        XCTAssertEqual(Array(object.keys), ["lens"])
+        XCTAssertEqual(object["lens"]?["tools"] as? [String], ["Read", "Grep", "Bash"])
+        XCTAssertEqual(object["lens"]?["prompt"] as? String, "You review.")
+        XCTAssertEqual(object["lens"]?["model"] as? String, "claude-opus-5-5")
     }
 }

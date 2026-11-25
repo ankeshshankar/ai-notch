@@ -219,10 +219,10 @@ final class PRReviewStore: ObservableObject {
             if output.isError {
                 record.phase = .failed
                 record.error = String(output.text.prefix(160))
-            } else if !output.denied.isEmpty {
-                record.phase = .failed
-                record.error = "needed a tool that is not allowed: " + output.denied.joined(separator: ", ")
             } else if let parsed = ReviewParse.parse(output.text) {
+                // A refused tool does not fail a review that reached a verdict, but it can no
+                // longer approve (the gate), and the row says so.
+                record.denied = output.denied.isEmpty ? nil : output.denied
                 record.phase = .done
                 record.verdict = parsed.verdict
                 record.findings = parsed.findings

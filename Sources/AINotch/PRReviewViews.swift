@@ -46,9 +46,11 @@ struct PRReviewChip: View {
         case .done:
             let verdict = record.verdict ?? .requestChanges
             let posted = record.posted.map { " · \($0)" } ?? ""
-            let text = (verdict == .approve ? "APPROVE" : "REQUEST CHANGES") + " · " + (record.findings?.text ?? "") + older + posted
+            let limited = (record.denied ?? []).isEmpty ? "" : " · limited"
+            let text = (verdict == .approve ? "APPROVE" : "REQUEST CHANGES") + " · " + (record.findings?.text ?? "") + limited + older + posted
             return (text, verdict == .approve ? Palette.done : Palette.waiting,
-                    "Claude's verdict on the commit \(record.head.prefix(7)). View report has the findings and the drafted comments; nothing was posted.")
+                    "Claude's verdict on the commit \(record.head.prefix(7)). View report has the findings and the drafted comments; nothing was posted."
+                    + ((record.denied ?? []).isEmpty ? "" : " The review was refused \(record.denied!.joined(separator: ", ")) and could not read everything, so Approve is off."))
         }
     }
 }

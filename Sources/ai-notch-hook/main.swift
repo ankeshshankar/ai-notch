@@ -300,8 +300,6 @@ if isCursor {
 } else {
     if state.pid == nil { state.pid = claudePid() }
     if state.appBundleId == nil { state.appBundleId = env["__CFBundleIdentifier"] }
-    // A review the notch started itself (AI_NOTCH_REVIEW=1): marked, so the notch tells it from yours.
-    if env["AI_NOTCH_REVIEW"] == "1" { state.entrypoint = "pr-review" }
     if state.entrypoint == nil { state.entrypoint = env["CLAUDE_CODE_ENTRYPOINT"] }
     // How this process compacts (the app cannot read another process's environment).
     if (event["agent_id"] as? String) == nil, let compact = AutoCompactEnv.read(env), compact != state.autoCompact { state.autoCompact = compact }

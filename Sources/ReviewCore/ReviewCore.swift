@@ -142,6 +142,8 @@ public struct ReviewRecord: Codable, Sendable, Equatable {
     public var costUSD: Double?
     /// What I sent to Bitbucket for this run, after a click and a confirm: "approved" or "changes requested".
     public var posted: String?
+    /// Tools the run asked for and was refused: its verdict stands, but it was partly blind, so Approve stays off.
+    public var denied: [String]?
 
     public init(key: String, head: String, phase: ReviewPhase, auto: Bool, queuedAt: Double) {
         self.key = key
@@ -238,6 +240,7 @@ public enum ReviewGate: Equatable, Sendable {
     public static func check(_ action: ReviewAction, record: ReviewRecord?, currentHead: String?, pipeline: PipelineState,
                              isOpen: Bool = true, alreadyApproved: Bool = false) -> ReviewGate {
         guard let record, record.phase == .done, let verdict = record.verdict else { return .blocked("no finished review") }
+        if action == .approve, !(record.denied ?? []).isEmpty { return .blocked("the review was refused a tool") }
         guard isOpen else { return .blocked("pull request is not open") }
         guard sameCommit(record.head, currentHead) else { return .blocked("new commits since the review") }
         switch action {
@@ -265,16 +268,19 @@ public enum ReviewCommand {
     public static func allowedTools(scratch: String) -> [String] {
         let gitRead = ["log", "diff", "show", "merge-base", "rev-parse", "status", "ls-files", "ls-tree", "cat-file", "grep",
                        "blame", "branch --show-current", "remote get-url", "shortlog", "describe", "name-rev", "for-each-ref"]
-        var tools = ["Read", "Grep", "Glob", "Skill", "Agent", "TodoWrite",
-                     "Write(\(scratch)/**)", "Edit(\(scratch)/**)"]
+        // `//path` is an absolute path in a permission rule (a single `/` is relative to the project).
+        var tools = ["Read", "Grep", "Glob", "Agent", "TodoWrite",
+                     "Write(/\(scratch)/**)", "Edit(/\(scratch)/**)"]
+        // `git -C <dir> <sub> …` needs the wildcard form (`*` mid-pattern); `:*` only ends a prefix.
         for sub in gitRead {
             tools.append("Bash(git \(sub):*)")
-            tools.append("Bash(git -C * \(sub):*)")
+            tools.append("Bash(git -C * \(sub) *)")
+            tools.append("Bash(git -C * \(sub))")
         }
-        tools += ["Bash(git fetch:*)", "Bash(git -C * fetch:*)",
-                  "Bash(git worktree add:*)", "Bash(git -C * worktree add:*)",
-                  "Bash(git worktree remove:*)", "Bash(git -C * worktree remove:*)",
-                  "Bash(git worktree list:*)", "Bash(git worktree prune:*)",
+        tools += ["Bash(git fetch:*)", "Bash(git -C * fetch *)",
+                  "Bash(git worktree add:*)", "Bash(git -C * worktree add *)",
+                  "Bash(git worktree remove:*)", "Bash(git -C * worktree remove *)",
+                  "Bash(git worktree list:*)", "Bash(git worktree prune:*)", "Bash(cd:*)",
                   "Bash(curl -s -H * https://api.bitbucket.org/2.0/*)",
                   "Bash(curl -s https://api.bitbucket.org/2.0/*)",
                   "Bash(mkdir -p \(scratch)/*)", "Bash(mkdir -p \(scratch))"]
@@ -284,15 +290,68 @@ public enum ReviewCommand {
         return tools
     }
 
-    /// The prompt: the skill by name, its input, and the limits of a headless run.
-    public static func prompt(prNumber: Int, scratch: String) -> String {
-        "/homes-pr-review \(prNumber)\n\nHeadless run started by AI Notch. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line."
+    /// The prompt: the skill's own text (read from its file at run time), its input, and the
+    /// limits of a headless run. The skill is passed as text, not by name, because the run loads
+    /// no user settings (see `arguments`) and with them goes user-level skill discovery.
+    public static func prompt(prNumber: Int, scratch: String, skill: String) -> String {
+        """
+        \(ReviewAgents.body(of: skill))
+
+        ---
+        INPUT: PR number \(prNumber).
+        Headless run started by AI Notch. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
+        """
     }
 
-    public static func arguments(prNumber: Int, scratch: String) -> [String] {
-        ["-p", prompt(prNumber: prNumber, scratch: scratch),
+    /// Folders outside the repository the review reads or writes: its scratch folder and the skill's files.
+    public static func extraDirectories(scratch: String, home: String) -> [String] {
+        [scratch, home + "/.claude/skills/homes-pr-review"]
+    }
+
+    /// `--setting-sources ""` loads none of the user's, project's or local settings: the user's
+    /// own allow rules (git commit, checkout, MCP writes, Edit on skill files) must not widen a
+    /// review that reads other people's code. `--agents` supplies the lens and verifier
+    /// subagents, which user-level discovery would otherwise have provided.
+    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, home: String = NSHomeDirectory()) -> [String] {
+        ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill),
+         "--setting-sources", "",
+         "--agents", agentsJSON,
+         "--add-dir"] + extraDirectories(scratch: scratch, home: home) + [
          "--output-format", "json",
          "--permission-mode", "dontAsk",
          "--allowedTools", allowedTools(scratch: scratch).joined(separator: ",")]
+    }
+}
+
+public enum ReviewAgents {
+    /// A markdown file split into its `key: value` front matter and its body.
+    public static func parts(of file: String) -> (meta: [String: String], body: String) {
+        let lines = file.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---", let end = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) else {
+            return ([:], file)
+        }
+        var meta: [String: String] = [:]
+        for line in lines[1..<end] {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            meta[line[..<colon].trimmingCharacters(in: .whitespaces)] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        }
+        return (meta, lines[(end + 1)...].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    public static func body(of file: String) -> String { parts(of: file).body }
+
+    /// `--agents` JSON from agent files: {name: {description, prompt, tools, model}}.
+    public static func json(files: [String]) -> String {
+        var agents: [String: [String: Any]] = [:]
+        for file in files {
+            let (meta, body) = parts(of: file)
+            guard let name = meta["name"], !body.isEmpty else { continue }
+            var agent: [String: Any] = ["description": meta["description"] ?? name, "prompt": body]
+            if let tools = meta["tools"] { agent["tools"] = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+            if let model = meta["model"] { agent["model"] = model }
+            agents[name] = agent
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: agents, options: [.sortedKeys])) ?? Data("{}".utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 }

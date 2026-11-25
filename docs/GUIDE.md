@@ -627,7 +627,7 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
   changes, off the main thread.
 - **Automatic review** (Setup → Builds → Pull requests → Auto review, on by default). A pull
   request you review in `homes-api-app` or `homes-ecosystem` is reviewed by the `homes-pr-review`
-  skill when it appears or gets new commits: `claude -p "/homes-pr-review <n>"` in that repo's
+  skill when it appears or gets new commits: `claude -p` with the skill's text and the PR number, in that repo's
   clone, through your own Claude login (an API key in the environment is removed), one review at a
   time, stopped after 30 minutes (Cancel review stops it sooner). Drafts, ones you already
   reviewed and ones idle for 7 days are left alone; a failed or cancelled run is started again
@@ -635,15 +635,17 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
   per commit (`~/.claude/notch/pr-reviews.json`); the full report is
   `~/.claude/notch/reviews/<repo>-<id>-<commit>/report.md` (**View report**). The row shows
   `Review queued`, `Reviewing…`, `APPROVE · 1 should-fix`, `REQUEST CHANGES · 2 blocking` or
-  `Review failed` (hover for why). The session shows in the notch as "PR review · started by AI
-  Notch" and its tokens count in usage.
-  - *Permissions.* The run uses `--permission-mode dontAsk` with a fixed allow-list: Read, Grep,
-    Glob, the Skill and its subagents, read-only git (`log diff show merge-base …`), `git fetch`
-    and `git worktree add/remove` (the skill reviews in a scratch worktree), `curl -s` against
-    `api.bitbucket.org/2.0` without `-X`, a few read-only shell tools, and Write/Edit only inside the
-    review's own folder. Anything else (push, commit, checkout, editing the repo) is refused with no
-    prompt, and a review that was refused something is marked **failed** and names the tool. The
-    notch's own approval prompt is off for it (`AI_NOTCH_NO_APPROVALS=1`).
+  `Review failed` (hover for why). Its tokens count in usage like any session.
+  - *Permissions.* The run loads none of your settings (`--setting-sources ""`), so your own allow
+    rules (commit, checkout, MCP writes) do not apply; the skill's text and the `homes-pr-lens` and
+    `homes-pr-verifier` agents are read from `~/.claude` and passed in directly. It uses
+    `--permission-mode dontAsk` with a fixed allow-list: Read, Grep, Glob, subagents, read-only git
+    (`log diff show merge-base …`), `git fetch` and `git worktree add/remove` (the skill reviews in
+    a scratch worktree), `curl -s` against `api.bitbucket.org/2.0` without `-X`, a few read-only
+    shell tools, and Write/Edit only inside the review's own folder. Anything else is refused with
+    no prompt. A review that still reached a verdict keeps it but is marked **limited** and cannot
+    be approved from the notch; one with no verdict is **failed** and names the tool. The notch's
+    own approval prompt is off for it (`AI_NOTCH_NO_APPROVALS=1`).
   - *Token.* The existing read token reaches the child as `BB_API_TOKEN` in its environment only;
     it is not in the arguments, a file or a log.
   - *Approve / Request changes.* Only from the row bar, after **Approve** and then **Confirm
