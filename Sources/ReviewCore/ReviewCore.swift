@@ -338,7 +338,7 @@ public enum ReviewCommand {
 
         ---
         INPUT: PR number \(prNumber).
-        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(scratch)/bbget <url> [output-file]`, which sends the token itself. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
+        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(scratch)/bbget <url> [output-file]`, which sends the token itself. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
         """
     }
 
@@ -386,7 +386,13 @@ public enum ReviewAgents {
             let (meta, body) = parts(of: file)
             guard let name = meta["name"], !body.isEmpty else { continue }
             var agent: [String: Any] = ["description": meta["description"] ?? name, "prompt": body]
-            if let tools = meta["tools"] { agent["tools"] = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+            // Reports are written with the Write tool (allowed only inside the review's folder),
+            // since a shell redirect or heredoc is not on the allow-list.
+            if let tools = meta["tools"] {
+                var list = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                if !list.contains("Write") { list.append("Write") }
+                agent["tools"] = list
+            }
             if let model = meta["model"] { agent["model"] = model }
             agents[name] = agent
         }

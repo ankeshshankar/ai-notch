@@ -167,7 +167,7 @@ final class ReviewAgentsTests: XCTestCase {
         let json = ReviewAgents.json(files: [file, "no front matter"])
         let object = try! JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: [String: Any]]
         XCTAssertEqual(Array(object.keys), ["lens"])
-        XCTAssertEqual(object["lens"]?["tools"] as? [String], ["Read", "Grep", "Bash"])
+        XCTAssertEqual(object["lens"]?["tools"] as? [String], ["Read", "Grep", "Bash", "Write"])
         XCTAssertEqual(object["lens"]?["prompt"] as? String, "You review.")
         XCTAssertEqual(object["lens"]?["model"] as? String, "claude-opus-5-5")
     }
