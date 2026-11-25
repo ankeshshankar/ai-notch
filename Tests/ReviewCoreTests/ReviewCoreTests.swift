@@ -172,3 +172,23 @@ final class ReviewAgentsTests: XCTestCase {
         XCTAssertEqual(object["lens"]?["model"] as? String, "claude-opus-5-5")
     }
 }
+
+final class ReviewBitbucketReadTests: XCTestCase {
+    func testTokenGoesThroughTheWrapperOnly() {
+        let rules = ReviewCommand.allowedTools(scratch: "/s/r1")
+        XCTAssertTrue(rules.contains("Bash(/s/r1/bbget *)"))
+        XCTAssertFalse(rules.contains { $0.contains("curl") })
+        XCTAssertTrue(ReviewCommand.bbGetScript.hasPrefix("#!/bin/sh"))
+        XCTAssertTrue(ReviewCommand.bbGetScript.contains("https://api.bitbucket.org/2.0/*"))
+        XCTAssertFalse(ReviewCommand.bbGetScript.contains("-X"))
+        XCTAssertTrue(ReviewCommand.prompt(prNumber: 1, scratch: "/s/r1", skill: "x").contains("/s/r1/bbget"))
+    }
+}
+
+final class ReviewSectionTests: XCTestCase {
+    func testBulletsUnderBoldHeadings() {
+        let report = "PR #1\n\n**BLOCKING**\nNone.\n\n**SHOULD-FIX**\n- a.ts:1 one\n  - sub point\n- b.ts:2 two\n\n**NIT**\n- c\n\n**CANNOT-VERIFY**\n- d\n\nLenses: 6 run\n\nVERDICT: REQUEST CHANGES"
+        let parsed = ReviewParse.parse(report)
+        XCTAssertEqual(parsed?.findings, ReviewFindings(blocking: 0, shouldFix: 2, nits: 1, cannotVerify: 1))
+    }
+}

@@ -65,8 +65,30 @@ public enum ReviewParse {
 
     private static func count(_ lines: ArraySlice<String>) -> ReviewFindings {
         var findings = ReviewFindings()
+        // A bold heading on its own line ("**SHOULD-FIX**") followed by top-level bullets: each
+        // bullet is one finding, until a prose line or the next heading ("None." is no finding).
+        var section: String?
+        let headings = ["BLOCKING", "SHOULD-FIX", "NIT", "CANNOT-VERIFY"]
         for raw in lines {
             let line = strip(raw)
+            let bare = line.uppercased().trimmingCharacters(in: CharacterSet(charactersIn: ": "))
+            if headings.contains(bare) { section = bare; continue }
+            if let current = section, !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+                let top = !raw.hasPrefix(" ") && !raw.hasPrefix("\t")
+                let bullet = raw.hasPrefix("- ") || raw.hasPrefix("* ") || raw.range(of: #"^\d+[.)]\s"#, options: .regularExpression) != nil
+                if top && bullet {
+                    if !line.lowercased().hasPrefix("none") {
+                        switch current {
+                        case "BLOCKING": findings.blocking += 1
+                        case "SHOULD-FIX": findings.shouldFix += 1
+                        case "NIT": findings.nits += 1
+                        default: findings.cannotVerify += 1
+                        }
+                    }
+                    continue
+                }
+                if top { section = nil } else { continue }
+            }
             func hit(_ keyword: String) -> Bool {
                 let upper = line.uppercased()
                 guard upper.hasPrefix(keyword) else { return false }
@@ -264,7 +286,7 @@ public enum ReviewCommand {
     /// rest without asking). Reads: files, search, read-only git, the Bitbucket API with GET
     /// flags only, plain file tools. Writes: only the review's own scratch folder, and the
     /// scratch worktree git adds and removes. No push, commit, checkout, reset, merge, rebase,
-    /// no `curl -X`, no editing of the code under review.
+    /// no `curl` of its own (see `bbGetScript`), no editing of the code under review.
     public static func allowedTools(scratch: String) -> [String] {
         let gitRead = ["log", "diff", "show", "merge-base", "rev-parse", "status", "ls-files", "ls-tree", "cat-file", "grep",
                        "blame", "branch --show-current", "remote get-url", "shortlog", "describe", "name-rev", "for-each-ref"]
@@ -281,14 +303,31 @@ public enum ReviewCommand {
                   "Bash(git worktree add:*)", "Bash(git -C * worktree add *)",
                   "Bash(git worktree remove:*)", "Bash(git -C * worktree remove *)",
                   "Bash(git worktree list:*)", "Bash(git worktree prune:*)", "Bash(cd:*)",
-                  "Bash(curl -s -H * https://api.bitbucket.org/2.0/*)",
-                  "Bash(curl -s https://api.bitbucket.org/2.0/*)",
+                  "Bash(\(scratch)/bbget *)",
                   "Bash(mkdir -p \(scratch)/*)", "Bash(mkdir -p \(scratch))"]
         for tool in ["ls", "wc", "head", "tail", "cat", "rg", "grep", "jq", "sort", "uniq", "cut", "tr", "sed -n", "awk", "diff", "stat", "date", "pwd", "echo", "basename", "dirname"] {
             tools.append("Bash(\(tool):*)")
         }
         return tools
     }
+
+    /// A permission rule refuses `$VAR` in a command, so the Bitbucket token cannot be put on a
+    /// `curl` line. This wrapper, written into the review's scratch folder, reads it from the
+    /// environment itself (the token is never in the file), does GET only and only against the
+    /// Bitbucket API.
+    public static let bbGetScript = """
+    #!/bin/sh
+    case "$1" in
+      https://api.bitbucket.org/2.0/*) ;;
+      *) echo "bbget: only https://api.bitbucket.org/2.0/ urls" >&2; exit 2 ;;
+    esac
+    [ -n "$BB_API_TOKEN" ] || { echo "bbget: no token" >&2; exit 2; }
+    if [ -n "$2" ]; then
+      exec curl -s -H "Authorization: Bearer $BB_API_TOKEN" -o "$2" "$1"
+    fi
+    exec curl -s -H "Authorization: Bearer $BB_API_TOKEN" "$1"
+
+    """
 
     /// The prompt: the skill's own text (read from its file at run time), its input, and the
     /// limits of a headless run. The skill is passed as text, not by name, because the run loads
@@ -299,7 +338,7 @@ public enum ReviewCommand {
 
         ---
         INPUT: PR number \(prNumber).
-        Headless run started by AI Notch. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
+        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(scratch)/bbget <url> [output-file]`, which sends the token itself. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
         """
     }
 

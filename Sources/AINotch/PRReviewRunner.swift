@@ -59,6 +59,9 @@ final class PRReviewRunner: @unchecked Sendable {
         guard let claude = UsageProbe.executable else { return .failed("claude is not installed") }
         let fm = FileManager.default
         try? fm.createDirectory(at: job.dir, withIntermediateDirectories: true)
+        let helper = job.dir.appendingPathComponent("bbget")
+        try? ReviewCommand.bbGetScript.write(to: helper, atomically: true, encoding: .utf8)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
         let out = job.dir.appendingPathComponent("out.json"), err = job.dir.appendingPathComponent("err.log")
         fm.createFile(atPath: out.path, contents: nil)
         fm.createFile(atPath: err.path, contents: nil)
