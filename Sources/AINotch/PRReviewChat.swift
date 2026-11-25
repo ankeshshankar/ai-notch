@@ -175,6 +175,8 @@ final class PRChatSession: ObservableObject {
 
     /// Where the repository is cloned (nil: the chat cannot run, the cards still work).
     var repoPath: () -> String? = { nil }
+    /// Told how many comments a posting run made (the review stops waiting for my call).
+    var onPosted: (Int) -> Void = { _ in }
     var token: @Sendable () -> String = { KeychainItem.read(service: BitbucketConfig.tokenService)?.secret ?? "" }
 
     init(ref: PullRequestRef, head: String, folder: URL) {
@@ -254,15 +256,18 @@ final class PRChatSession: ObservableObject {
     // MARK: Posting
 
     /// Posts what `PostPlan.pending` lists, one at a time, recording each comment's id the moment
-    /// it exists; stops at the first failure. Only ever called after the confirm.
-    func postPending() async {
-        guard !posting else { return }
+    /// it exists, then a task linked to it when the card has one switched on; stops at the first
+    /// failed comment (a failed task is reported and does not stop the rest). Only ever called
+    /// after the confirm. True when every comment went out.
+    @discardableResult
+    func postPending() async -> Bool {
+        guard !posting else { return false }
         let blocked = PostPlan.blocked(log.cards)
-        guard blocked.isEmpty else { notice = "Not posted: reword the flagged comments first"; return }
+        guard blocked.isEmpty else { notice = "Not posted: reword the flagged comments first"; return false }
         posting = true
         notice = nil
         defer { posting = false }
-        var count = 0
+        var count = 0, taskFailures = 0
         for card in PostPlan.pending(log.cards) {
             switch await PRReviewAPI.post(card, to: ref) {
             case .posted(let id):
@@ -273,14 +278,61 @@ final class PRChatSession: ObservableObject {
                 }
                 count += 1
                 save()
+                if card.wantsTask {
+                    switch await PRReviewAPI.createTask(for: card, commentID: id, to: ref) {
+                    case .created(let taskID):
+                        if let index = log.cards.firstIndex(where: { $0.id == card.id }) { log.cards[index].taskID = taskID; save() }
+                    case .failed: taskFailures += 1
+                    }
+                }
             case .failed(let why):
                 notice = "Posted \(count), then stopped: \(why)"
-                if count > 0 { loadExisting() }
-                return
+                if count > 0 { onPosted(count); loadExisting() }
+                return false
             }
         }
-        notice = count == 1 ? "Posted 1 comment" : "Posted \(count) comments"
+        var text = count == 1 ? "Posted 1 comment" : "Posted \(count) comments"
+        if taskFailures > 0 { text += "; \(taskFailures) task\(taskFailures == 1 ? "" : "s") could not be added" }
+        notice = text
+        onPosted(count)
         loadExisting()
+        return true
+    }
+
+    /// Resolves the thread of a posted comment that a follow-up found fixed. Only after the confirm.
+    func resolve(_ cardID: String) async {
+        guard let card = card(cardID), let commentID = card.postedID, card.status == .fixed, card.resolved != true, !posting else { return }
+        posting = true
+        defer { posting = false }
+        switch await PRReviewAPI.resolve(commentID: commentID, on: ref) {
+        case .done:
+            if let index = log.cards.firstIndex(where: { $0.id == cardID }) { log.cards[index].resolved = true; save() }
+            notice = "Thread resolved"
+        case .failed(let why):
+            notice = "Not resolved: \(why)"
+        }
+    }
+
+    /// The posted cards a follow-up found fixed and that are still open on Bitbucket.
+    var resolvable: [SuggestedComment] { log.cards.filter { $0.isPosted && $0.status == .fixed && $0.resolved != true } }
+
+    /// My own work: ticking a card off as done.
+    func setDone(_ id: String, _ on: Bool) {
+        guard let index = log.cards.firstIndex(where: { $0.id == id }) else { return }
+        log.cards[index].done = on
+        save()
+    }
+
+    func setSuggestionOn(_ id: String, _ on: Bool) {
+        guard let index = log.cards.firstIndex(where: { $0.id == id }), !log.cards[index].isPosted else { return }
+        log.cards[index].asSuggestion = on
+        save()
+    }
+
+    func setTask(_ id: String, _ on: Bool) {
+        guard let index = log.cards.firstIndex(where: { $0.id == id }), !log.cards[index].isPosted else { return }
+        log.cards[index].addTask = on
+        save()
     }
 
     // MARK: Chat

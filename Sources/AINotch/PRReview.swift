@@ -25,8 +25,10 @@ final class PRReviewStore: ObservableObject {
 
     /// The signed-in user's uuid, for "already approved" (set by ReviewStore).
     var meUUID: () -> String? = { nil }
+    /// A review (or follow-up) reached a verdict: the notch's notification and the waiting count hang off this.
+    var onFinished: (PullRequestRef, ReviewRecord) -> Void = { _, _ in }
 
-    private struct Queued { var ref: PullRequestRef; var head: String; var auto: Bool }
+    private struct Queued { var ref: PullRequestRef; var head: String; var auto: Bool; var base: ReviewRecord? = nil; var branch: BranchTarget? = nil }
     private var queue: [Queued] = []
     private var running: (ref: PullRequestRef, head: String)?
     private var runner: PRReviewRunner?
@@ -38,6 +40,9 @@ final class PRReviewStore: ObservableObject {
         loaded.settleAfterRestart(now: Date().timeIntervalSince1970)
         ledger = loaded
     }
+
+    /// Dev self-check only.
+    func injectLedgerForCheck(_ value: ReviewLedger) { ledger = value }
 
     // MARK: Paths
 
@@ -91,6 +96,33 @@ final class PRReviewStore: ObservableObject {
     /// A pull request I review in a repository with a local clone in builds.json (or the stub's).
     static func supports(_ pr: PullRequest) -> Bool { pr.role == .reviewing && (BitbucketConfig.isStubbed || repoPath(pr.ref) != nil) }
 
+    /// My own pull request, reviewed by hand for me only ("Review my PR").
+    static func supportsOwn(_ pr: PullRequest) -> Bool { pr.role == .mine && (BitbucketConfig.isStubbed || repoPath(pr.ref) != nil) }
+
+    /// Branch reviews kept in the ledger, as rows for the window (a negative number stands in for the pull request id).
+    var branchPRs: [PullRequest] { Self.branchPRs(in: ledger) }
+
+    nonisolated static func branchPRs(in ledger: ReviewLedger) -> [PullRequest] {
+        var newest: [String: ReviewRecord] = [:]
+        for record in ledger.records.values where record.branch != nil {
+            if let old = newest[record.key], (old.finishedAt ?? old.queuedAt) >= (record.finishedAt ?? record.queuedAt) { continue }
+            newest[record.key] = record
+        }
+        return newest.values.sorted { ($0.finishedAt ?? $0.queuedAt) > ($1.finishedAt ?? $1.queuedAt) }.compactMap { record in
+            guard let ref = PullRequestRef(key: record.key) else { return nil }
+            return PullRequest(ref: ref, title: "Branch \(record.branch ?? "")", isDraft: false, author: PRPerson(uuid: nil, name: "You"),
+                               source: record.branch, destination: record.target, role: .mine, participants: [], myReview: .none,
+                               taskCount: 0, commentCount: 0, updatedOn: "", updatedAt: record.finishedAt ?? record.queuedAt, url: nil, head: record.head)
+        }
+    }
+
+    /// The pull requests waiting for my call: review done on the current commit, nothing approved, requested or posted since.
+    func waitingKeys(_ prs: [PullRequest], muted: Set<String>) -> [String] {
+        ReviewWaiting.keys(prs.filter { $0.role == .reviewing }.map {
+            WaitingInput(key: $0.ref.key, head: $0.head, decided: $0.myReview != .none, muted: muted.contains($0.id))
+        }, ledger: ledger)
+    }
+
     /// The run that counts for a row: the one for its head now; else the newest older one,
     /// which shows as outdated.
     func record(for pr: PullRequest) -> (record: ReviewRecord, outdated: Bool)? {
@@ -104,6 +136,14 @@ final class PRReviewStore: ObservableObject {
         let pipeline: PipelineState = pr.build.map { $0.state == .succeeded ? .green : .notGreen } ?? .unknown
         return ReviewGate.check(action, record: found.record, currentHead: pr.head, pipeline: pipeline,
                                 alreadyApproved: pr.myReview == .approved)
+    }
+
+    private func pipelineState(_ pr: PullRequest) -> PipelineState { pr.build.map { $0.state == .succeeded ? .green : .notGreen } ?? .unknown }
+
+    /// The combined actions on offer for the cards switched on, each with its gate.
+    func combinedOptions(for pr: PullRequest, pending: [SuggestedComment]) -> [(action: CombinedAction, gate: ReviewGate)] {
+        guard let found = record(for: pr), !found.outdated else { return [] }
+        return ReviewGate.combinedOptions(pending: pending, record: found.record, currentHead: pr.head, pipeline: pipelineState(pr), alreadyApproved: pr.myReview == .approved)
     }
 
     // MARK: Queueing
@@ -128,10 +168,27 @@ final class PRReviewStore: ObservableObject {
         if next != ledger { ledger = next; save() }
     }
 
-    /// "Review now" / "Re-review": queued for the pull request's head, whatever came before.
-    func reviewNow(_ pr: PullRequest) {
-        guard Self.supports(pr), let head = pr.head else { return }
-        enqueue(pr.ref, head: head, auto: false)
+    /// "Review now" / "Re-review": queued for the pull request's head; a follow-up when an
+    /// older commit has a finished review, unless `full`. My own pull request is reviewed here too (for me only).
+    func reviewNow(_ pr: PullRequest, full: Bool = false) {
+        guard Self.supports(pr) || Self.supportsOwn(pr), let head = pr.head else { return }
+        enqueue(pr.ref, head: head, auto: false, full: full, own: pr.role == .mine)
+    }
+
+    /// "Review a branch…": a branch of a known repository against its target, for me only.
+    @discardableResult
+    func reviewBranch(repoKey: String, branch: String, target: String, head: String) -> PullRequestRef? {
+        guard ReviewBranch.isValid(branch), ReviewBranch.isValid(target), let ref = PullRequestRef(fullName: repoKey, id: ReviewBranch.pseudoID(repoKey: repoKey, branch: branch)) else { return nil }
+        enqueue(ref, head: head, auto: false, full: true, own: true, branch: BranchTarget(branch: branch, target: target, head: head))
+        return ref
+    }
+
+    /// A review's cards were posted: it no longer waits for my call.
+    func notePosted(key: String, head: String, count: Int) {
+        guard count > 0, var record = ledger.record(key, head: head) else { return }
+        record.commentsPosted = (record.commentsPosted ?? 0) + count
+        ledger.set(record)
+        save()
     }
 
     func setAuto(_ on: Bool) {
@@ -154,14 +211,24 @@ final class PRReviewStore: ObservableObject {
         }
     }
 
-    private func enqueue(_ ref: PullRequestRef, head: String, auto: Bool, resumed: Bool = false) {
+    private func enqueue(_ ref: PullRequestRef, head: String, auto: Bool, resumed: Bool = false, full: Bool = false, own: Bool = false, branch: BranchTarget? = nil) {
         if let existing = ledger.record(ref.key, head: head), existing.isActive { return }
         var record = ReviewRecord(key: ref.key, head: head, phase: .queued, auto: auto, queuedAt: Date().timeIntervalSince1970)
         record.posted = nil
         if resumed { record.resumed = true }
+        var base: ReviewRecord?
+        if branch == nil, case .followUp(let found) = ReviewPolicy.plan(key: ref.key, head: head, ledger: ledger, full: full) {
+            // The chat of a follow-up goes on in the full review's session; the pass itself starts fresh.
+            base = found
+            record.baseHead = found.head
+            record.sessionID = found.sessionID
+            record.own = found.own
+        }
+        if own { record.own = true }
+        if let branch { record.branch = branch.branch; record.target = branch.target; record.own = true }
         ledger.set(record)
         save()
-        queue.append(Queued(ref: ref, head: head, auto: auto))
+        queue.append(Queued(ref: ref, head: head, auto: auto, base: base, branch: branch))
         pump()
     }
 
@@ -190,9 +257,28 @@ final class PRReviewStore: ObservableObject {
         let runner = PRReviewRunner()
         self.runner = runner
         let folder = Self.folder(job.ref, head: job.head)
-        runner.start(.init(ref: job.ref, head: job.head, repoPath: repo, dir: folder, token: token)) { [weak self] outcome in
+        var spec = PRReviewRunner.Job(ref: job.ref, head: job.head, repoPath: repo, dir: folder, token: token, branch: job.branch)
+        let done: @Sendable (PRReviewRunner.Outcome) -> Void = { [weak self] outcome in
             Task { @MainActor in self?.finish(job.ref, head: job.head, outcome: outcome) }
         }
+        guard let base = job.base else { runner.start(spec, done: done); return }
+        // A follow-up: what the last review said and did, and the comments on the pull request now.
+        Task { @MainActor in
+            let (log, commits) = await self.followUpInput(job.ref, base: base, head: job.head)
+            let existing = await PRReviewAPI.comments(job.ref) ?? []
+            if var current = self.ledger.record(job.ref.key, head: job.head) { current.commitCount = commits; self.ledger.set(current); self.save() }
+            let input = FollowUp.inputJSON(previousHead: base.head, newHead: job.head, previous: base, log: log, existing: existing)
+            spec.followUp = .init(baseHead: base.head, inputJSON: input)
+            runner.start(spec, done: done)
+        }
+    }
+
+    /// The previous review's cards (its `chat.json`, else its `comments.json`) and the number of new commits.
+    private func followUpInput(_ ref: PullRequestRef, base: ReviewRecord, head: String) async -> (ChatLog, Int?) {
+        let folder = Self.folder(ref, head: base.head)
+        let log = FollowUp.baseLog(chatJSON: try? Data(contentsOf: folder.appendingPathComponent("chat.json")),
+                                   commentsJSON: try? Data(contentsOf: folder.appendingPathComponent("comments.json")), sessionID: base.sessionID)
+        return (log, await PRReviewAPI.commitsSince(ref, reviewed: base.head, head: head))
     }
 
     private func fail(_ record: inout ReviewRecord, _ message: String) {
@@ -208,9 +294,44 @@ final class PRReviewStore: ObservableObject {
         runner = nil
         defer { pump() }
         guard let existing = ledger.record(ref.key, head: head) else { return }
-        let record = Self.settle(existing, ref: ref, outcome: outcome)
+        var record = Self.settle(existing, ref: ref, outcome: outcome)
+        if existing.baseHead != nil { record = Self.settleFollowUp(record, existing: existing, ref: ref, outcome: outcome) }
+        if record.phase == .done, record.notified != true, record.own != true {
+            record.notified = true
+            ledger.set(record)
+            save()
+            onFinished(ref, record)
+            return
+        }
         ledger.set(record)
         save()
+    }
+
+    /// A follow-up's result: its `followup.json` folded into the cards of the review it follows, the
+    /// open findings counted from them, and the full review's session kept for the chat.
+    nonisolated static func settleFollowUp(_ settled: ReviewRecord, existing: ReviewRecord, ref: PullRequestRef, outcome: PRReviewRunner.Outcome) -> ReviewRecord {
+        guard case .finished = outcome, let baseHead = existing.baseHead else { return settled }
+        var record = settled
+        record.sessionID = existing.sessionID
+        let folder = Self.folder(ref, head: existing.head)
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("followup.json")), let result = FollowUp.parse(data) else {
+            // No structured answer: the report's VERDICT line still counts, nothing is marked.
+            return record
+        }
+        let baseFolder = Self.folder(ref, head: baseHead)
+        var log = FollowUp.baseLog(chatJSON: try? Data(contentsOf: baseFolder.appendingPathComponent("chat.json")),
+                                   commentsJSON: try? Data(contentsOf: baseFolder.appendingPathComponent("comments.json")), sessionID: existing.sessionID)
+        log.applyFollowUp(result, from: baseHead, to: existing.head, commits: existing.commitCount, at: Date().timeIntervalSince1970)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        if let encoded = try? encoder.encode(log) { try? encoded.write(to: folder.appendingPathComponent("chat.json"), options: .atomic) }
+        let findings = log.openFindings
+        record.findings = findings
+        record.phase = .done
+        record.error = nil
+        // A verdict of APPROVE cannot stand over a blocking or should-fix comment that is still open.
+        record.verdict = (findings.blocking + findings.shouldFix > 0) ? .requestChanges : result.verdict
+        return record
     }
 
     /// What a finished run means for its record: the report on disk, the verdict, or why it failed.
@@ -301,6 +422,44 @@ final class PRReviewStore: ObservableObject {
                 notices[id] = action == .approve ? "Approved" : "Changes requested"
             case .failed(let why):
                 notices[id] = "Not sent: " + why
+            }
+        }
+    }
+
+    /// "Post N + Request changes" / "Post N + Approve" / "Approve with comments": one confirm in the view, then
+    /// the same checks on fresh data as the single actions, the comments (and their tasks), and only when every
+    /// comment went out, the approval or the request for changes.
+    func performCombined(_ action: CombinedAction, on pr: PullRequest, session: PRChatSession) {
+        let id = pr.ref.key
+        guard acting[id] == nil, !session.posting, let head = pr.head else { return }
+        let pending = PostPlan.pending(session.cards)
+        let initial = ReviewGate.checkCombined(action, pending: pending, record: ledger.record(id, head: head), currentHead: pr.head,
+                                               pipeline: pipelineState(pr), alreadyApproved: pr.myReview == .approved)
+        guard initial.isAllowed else { notices[id] = "Not sent: " + Self.reason(initial); return }
+        acting[id] = "Posting…"
+        notices[id] = nil
+        let ref = pr.ref
+        let me = meUUID()
+        Task { @MainActor in
+            defer { acting[id] = nil }
+            guard await PRReviewAPI.hasWriteTokenAsync() else { notices[id] = "Needs the write token: Setup → Pull requests"; return }
+            guard let fresh = await PRReviewAPI.fresh(ref, me: me) else { notices[id] = "Not sent: could not read the pull request"; return }
+            let again = ReviewGate.checkCombined(action, pending: pending, record: ledger.record(id, head: head), currentHead: fresh.head,
+                                                 pipeline: fresh.pipeline, isOpen: fresh.isOpen, alreadyApproved: fresh.alreadyApproved)
+            guard again.isAllowed else { notices[id] = "Not sent: " + Self.reason(again); return }
+            if action != .approveWithComments || !pending.isEmpty {
+                guard await session.postPending() else { notices[id] = "Not sent: " + (session.notice ?? "the comments were not posted"); return }
+            }
+            acting[id] = action.final == .approve ? "Approving…" : "Requesting changes…"
+            switch await PRReviewAPI.send(action.final, to: ref) {
+            case .done:
+                var record = ledger.record(id, head: head)
+                record?.posted = action.final == .approve ? "approved" : "changes requested"
+                if let record { ledger.set(record); save() }
+                let n = pending.count
+                notices[id] = (action.final == .approve ? "Approved" : "Changes requested") + " · \(n) comment\(n == 1 ? "" : "s") posted"
+            case .failed(let why):
+                notices[id] = "Comments posted, not \(action.final == .approve ? "approved" : "requested"): " + why
             }
         }
     }

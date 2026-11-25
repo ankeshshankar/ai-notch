@@ -168,6 +168,13 @@ extension PRsChip {
                     .padding(.horizontal, 4).padding(.vertical, 0.5)
                     .background(Capsule().fill(isOpen ? Palette.onDone : Palette.bitbucket))
             }
+            if !quiet, reviews.waitingCount > 0 {
+                Text("\(reviews.waitingCount)").font(Typo.caption(.bold).monospacedDigit())
+                    .foregroundStyle(isOpen ? Palette.done : Palette.onDone)
+                    .padding(.horizontal, 4).padding(.vertical, 0.5)
+                    .background(Capsule().fill(isOpen ? Palette.onDone : Palette.done))
+                    .help("Reviews done, waiting for your call")
+            }
         }
         .lineLimit(1).fixedSize()
     }

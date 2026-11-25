@@ -10,7 +10,14 @@ import SwiftUI
 
 @MainActor
 final class PRListSource: ObservableObject {
+    /// The ones I am asked to review.
     @Published var prs: [PullRequest] = []
+    /// My own open pull requests (reviewed by hand, for me only).
+    @Published var mine: [PullRequest] = []
+    /// Branch reviews (no pull request yet).
+    @Published var branches: [PullRequest] = []
+
+    var all: [PullRequest] { prs + mine + branches }
 }
 
 @MainActor
@@ -18,6 +25,9 @@ final class PRReviewWindowModel: ObservableObject {
     enum Overlay: Equatable {
         case post
         case action(ReviewAction)
+        case combined(CombinedAction)
+        case resolve(String)
+        case branch
     }
 
     let store: PRReviewStore
@@ -26,6 +36,12 @@ final class PRReviewWindowModel: ObservableObject {
     @Published var overlay: Overlay?
     /// "3 new commits since the review", by pull request, once counted.
     @Published private(set) var behind: [String: String] = [:]
+    /// The comment card the keyboard is on.
+    @Published var focusedCard: String?
+    /// The shortcuts popover.
+    @Published var showKeys = false
+    /// Bumped by ⌘L: the chat box takes the focus.
+    @Published var focusChat = 0
     private var sessions: [String: PRChatSession] = [:]
 
     init(store: PRReviewStore, list: PRListSource) {
@@ -33,7 +49,7 @@ final class PRReviewWindowModel: ObservableObject {
         self.list = list
     }
 
-    var prs: [PullRequest] { list.prs }
+    var prs: [PullRequest] { list.all }
     var current: PullRequest? { prs.first { $0.id == selected } ?? prs.first }
 
     func select(_ id: String) {
@@ -49,6 +65,8 @@ final class PRReviewWindowModel: ObservableObject {
         if let session = sessions[key] { return session }
         let session = PRChatSession(ref: pr.ref, head: found.record.head, folder: folder)
         session.repoPath = { PRReviewStore.repoPath(pr.ref) }
+        let (rkey, head) = (pr.ref.key, found.record.head)
+        session.onPosted = { [weak store] count in store?.notePosted(key: rkey, head: head, count: count) }
         session.loadExisting()
         sessions[key] = session
         return session
@@ -66,6 +84,12 @@ final class PRReviewWindowModel: ObservableObject {
     }
 
     func forgetBehind(_ id: String) { behind[id] = nil }
+
+    /// ⌘R and the Re-review button: a follow-up when the pull request has new commits since a finished review.
+    func reReview(_ pr: PullRequest) {
+        guard store.record(for: pr)?.record.isActive != true else { return }
+        store.reviewNow(pr)
+    }
 }
 
 @MainActor
@@ -95,8 +119,13 @@ final class PRReviewWindowController: NSObject, NSWindowDelegate {
     private func makeModel(_ reviews: ReviewStore) -> PRReviewWindowModel {
         let list = PRListSource()
         list.prs = reviews.toReview.filter { PRReviewStore.supports($0) }
-        cancellable = reviews.$toReview.sink { [weak list] prs in
-            list?.prs = prs.filter { PRReviewStore.supports($0) }
+        list.mine = reviews.mine.filter { PRReviewStore.supportsOwn($0) }
+        list.branches = reviews.autoReview.branchPRs
+        cancellable = Publishers.CombineLatest3(reviews.$toReview, reviews.$mine, reviews.autoReview.$ledger).sink { [weak list] toReview, mine, ledger in
+            guard let list else { return }
+            list.prs = toReview.filter { PRReviewStore.supports($0) }
+            list.mine = mine.filter { PRReviewStore.supportsOwn($0) }
+            list.branches = PRReviewStore.branchPRs(in: ledger)
         }
         let model = PRReviewWindowModel(store: reviews.autoReview, list: list)
         self.model = model
@@ -166,7 +195,7 @@ struct PRReviewWindowView: View {
             ZStack {
                 Palette.surface.ignoresSafeArea()
                 Group {
-                    if list.prs.isEmpty {
+                    if list.all.isEmpty {
                         emptyState
                     } else if compact {
                         VStack(spacing: 0) {
@@ -182,7 +211,9 @@ struct PRReviewWindowView: View {
                         }
                     }
                 }
-                if let overlay = model.overlay, let pr = model.current {
+                if model.overlay == .branch {
+                    PRReviewBranchPicker(model: model, store: store)
+                } else if let overlay = model.overlay, let pr = model.current {
                     PRReviewConfirm(model: model, store: store, pr: pr, overlay: overlay)
                 }
             }
@@ -197,6 +228,7 @@ struct PRReviewWindowView: View {
             Text("No pull requests to review").font(Typo.title(.medium)).foregroundStyle(Palette.ink2)
             Text("The ones you are asked to review show here, in repositories with a clone in builds.json.")
                 .font(Typo.label()).foregroundStyle(Palette.ink3).multilineTextAlignment(.center)
+            PRReviewPill(title: "Review a branch…", symbol: "arrow.triangle.branch") { model.overlay = .branch }
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -216,25 +248,45 @@ struct PRReviewWindowView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("To review · \(list.prs.count)").font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3)
-                .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 6)
             ScrollView {
-                VStack(spacing: 4) {
-                    ForEach(list.prs) { pr in
-                        Button { model.select(pr.id) } label: { PRReviewSidebarRow(pr: pr, store: store, selected: pr.id == model.current?.id) }
-                            .buttonStyle(.plain)
-                            .ax("\(pr.ref.repo) #\(pr.ref.id)", value: pr.title, selected: pr.id == model.current?.id)
+                VStack(alignment: .leading, spacing: 4) {
+                    sectionTitle("To review · \(list.prs.count)")
+                    rows(list.prs)
+                    sectionTitle("Mine · \(list.mine.count)", info: "Your own open pull requests. Review one by hand: the result is for you only, nothing is posted, approved or requested.")
+                    rows(list.mine)
+                    if !list.branches.isEmpty { sectionTitle("Branches · \(list.branches.count)"); rows(list.branches) }
+                    Button { model.overlay = .branch } label: {
+                        Label("Review a branch…", systemImage: "arrow.triangle.branch").font(Typo.label(.medium)).foregroundStyle(Palette.bitbucket)
+                            .padding(.horizontal, 6).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .ax("Review a branch")
                 }
-                .padding(.horizontal, 8).padding(.bottom, 8)
+                .padding(.horizontal, 8).padding(.bottom, 8).padding(.top, 8)
             }
         }
         .background(Palette.panel)
     }
 
+    private func sectionTitle(_ text: String, info: String? = nil) -> some View {
+        HStack(spacing: 4) {
+            Text(text).font(Typo.caption(.semibold)).foregroundStyle(Palette.ink3)
+            if let info { InfoMark(text: info) }
+        }
+        .padding(.horizontal, 4).padding(.top, 6)
+    }
+
+    private func rows(_ prs: [PullRequest]) -> some View {
+        ForEach(prs) { pr in
+            Button { model.select(pr.id) } label: { PRReviewSidebarRow(pr: pr, store: store, selected: pr.id == model.current?.id) }
+                .buttonStyle(.plain)
+                .ax("\(pr.ref.repo) #\(pr.ref.id)", value: pr.title, selected: pr.id == model.current?.id)
+        }
+    }
+
     private var picker: some View {
         Menu {
-            ForEach(list.prs) { pr in
+            ForEach(list.all) { pr in
                 Button("\(pr.ref.repo) #\(pr.ref.id) · \(pr.title)") { model.select(pr.id) }
             }
         } label: {
@@ -244,7 +296,7 @@ struct PRReviewWindowView: View {
                     Text(pr.title).font(Typo.body(.medium)).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.tail)
                 }
                 Spacer(minLength: 0)
-                Text("\(list.prs.count) to review").font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize()
+                Text("\(list.all.count) listed").font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize()
                 Image(systemName: "chevron.up.chevron.down").font(Typo.micro(.bold)).foregroundStyle(Palette.ink3).decorative()
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
@@ -325,7 +377,7 @@ private struct PRReviewSidebarRow: View {
         let pipeline = PRReviewBadge.pipeline(pr)
         let reviewers = ReviewerSummary(pr.reviewerRows)
         VStack(alignment: .leading, spacing: 3) {
-            Text("\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
+            Text(pr.ref.id < 0 ? pr.ref.repo : "\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
             Text(pr.title).font(Typo.body(.medium)).foregroundStyle(Palette.ink).lineLimit(2).multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
@@ -414,7 +466,8 @@ struct PRReviewDetail: View {
             switch record?.phase {
             case nil:
                 Text("Not reviewed yet").font(Typo.title(.medium)).foregroundStyle(Palette.ink2)
-                Text("Review now starts a read-only review of the latest commit. The result, its suggested comments and a chat about it show here.")
+                Text(pr.role == .mine ? "Review my PR starts a read-only review for you only: the findings come back as a checklist, nothing is posted."
+                                      : "Review now starts a read-only review of the latest commit. The result, its suggested comments and a chat about it show here.")
                     .font(Typo.label()).foregroundStyle(Palette.ink3).multilineTextAlignment(.center)
             case .queued?, .reviewing?:
                 ProgressView().controlSize(.small)
@@ -438,14 +491,19 @@ struct PRReviewDetail: View {
         let record = found?.record
         let active = record?.isActive == true
         let pipeline = PRReviewBadge.pipeline(pr)
+        let own = pr.role == .mine || record?.own == true
         return VStack(alignment: .leading, spacing: 6) {
             Text(pr.title).font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
                 .lineLimit(2).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             PRReviewFlow(spacing: 10, rowSpacing: 3) {
-                Text("\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
-                Text(pr.author.name).font(Typo.label()).foregroundStyle(Palette.ink2)
+                Text(pr.ref.id < 0 ? pr.ref.repo : "\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
+                if pr.ref.id > 0 { Text(pr.author.name).font(Typo.label()).foregroundStyle(Palette.ink2) }
+                if own {
+                    Text("For you only").font(Typo.label(.medium)).foregroundStyle(Palette.claude)
+                        .help("Your own work: nothing is posted, approved or requested from here. The findings are a checklist.")
+                }
                 Text("\(pr.source ?? "—") → \(pr.destination ?? "—")").font(Typo.label(mono: true)).foregroundStyle(Palette.ink3).lineLimit(1).truncationMode(.middle)
-                Text(pipeline.text).font(Typo.label(.medium)).foregroundStyle(pipeline.color)
+                if pr.ref.id > 0 { Text(pipeline.text).font(Typo.label(.medium)).foregroundStyle(pipeline.color) }
                 if let head = pr.head { Text(String(head.prefix(7))).font(Typo.label(mono: true)).foregroundStyle(Palette.ink3).help("Head commit") }
                 if let found { PRReviewChip(pr: pr, store: store).fixedSize(horizontal: false, vertical: true).id(found.record.phase) }
             }
@@ -458,7 +516,7 @@ struct PRReviewDetail: View {
             if let text = model.behind[id], found?.outdated == true {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.triangle.2.circlepath").font(Typo.micro(.bold)).decorative()
-                    Text(text + ". Re-review to cover them.").font(Typo.label(.medium)).fixedSize(horizontal: false, vertical: true)
+                    Text(text + (record?.verdict != nil ? ". A follow-up covers just them." : ". Re-review to cover them.")).font(Typo.label(.medium)).fixedSize(horizontal: false, vertical: true)
                 }
                 .foregroundStyle(Palette.waiting)
             }
@@ -466,7 +524,7 @@ struct PRReviewDetail: View {
                 Text("Limited: the review was refused \(denied.joined(separator: ", ")) and could not read everything, so Approve is off.")
                     .font(Typo.label()).foregroundStyle(Palette.waiting).fixedSize(horizontal: false, vertical: true)
             }
-            actions(id: id, found: found, active: active)
+            actions(id: id, found: found, active: active, own: own)
             if let line = statusLine(found: found) {
                 Text(line.text).font(Typo.label(.medium)).foregroundStyle(line.color).fixedSize(horizontal: false, vertical: true)
                     .onTapGesture { store.clearNotice(id) }
@@ -477,22 +535,31 @@ struct PRReviewDetail: View {
         .background(Palette.panel)
     }
 
-    private func actions(id: String, found: (record: ReviewRecord, outdated: Bool)?, active: Bool) -> some View {
+    private func actions(id: String, found: (record: ReviewRecord, outdated: Bool)?, active: Bool, own: Bool) -> some View {
         let report = found.flatMap { store.reportURL($0.record) }
         let approve = store.gate(.approve, for: pr)
         let changes = store.gate(.requestChanges, for: pr)
+        let followUp = found?.outdated == true && found?.record.verdict != nil
+        let reviewTitle = found == nil ? (own ? "Review my PR" : "Review now") : followUp ? "Follow-up review" : "Re-review"
         return PRReviewFlow(spacing: 6, rowSpacing: 6) {
             if active {
                 PRReviewPill(title: "Cancel review", symbol: "xmark") { store.cancel(pr) }
             } else {
-                PRReviewPill(title: found == nil ? "Review now" : "Re-review", symbol: "arrow.clockwise") { store.reviewNow(pr) }
+                PRReviewPill(title: reviewTitle, symbol: "arrow.clockwise") { model.reReview(pr) }
+                    .help(followUp ? "Reviews only the new commits against the earlier findings: much faster than a full review. ⌘R" : "Starts a read-only review of the latest commit. ⌘R")
+                if followUp {
+                    PRReviewPill(title: "Full re-review", symbol: "arrow.triangle.2.circlepath") { store.reviewNow(pr, full: true) }
+                        .help("Reviews the whole pull request again, as the first review did.")
+                }
             }
             if let report { PRReviewPill(title: "View report", symbol: "doc.text") { NSWorkspace.shared.open(report) } }
-            PRReviewPill(title: "Open on Bitbucket", symbol: "arrow.up.right.square") { SafeLink.open(pr.url, for: .bitbucket) }
-            PRReviewPill(title: "Request changes", destructive: true, enabled: changes.isAllowed && store.acting[id] == nil) { model.overlay = .action(.requestChanges) }
-                .help(changes.isAllowed ? "Asks the author for changes, after a confirm." : "Off: \(Self.reason(changes))")
-            PRReviewPill(title: "Approve", symbol: "checkmark", prominent: true, enabled: approve.isAllowed && store.acting[id] == nil) { model.overlay = .action(.approve) }
-                .help(approve.isAllowed ? "Approves the pull request, after a confirm." : "Off: \(Self.reason(approve))")
+            if pr.ref.id > 0 { PRReviewPill(title: "Open on Bitbucket", symbol: "arrow.up.right.square") { SafeLink.open(pr.url, for: .bitbucket) } }
+            if !own {
+                PRReviewPill(title: "Request changes", destructive: true, enabled: changes.isAllowed && store.acting[id] == nil) { model.overlay = .action(.requestChanges) }
+                    .help(changes.isAllowed ? "Asks the author for changes, after a confirm." : "Off: \(Self.reason(changes))")
+                PRReviewPill(title: "Approve", symbol: "checkmark", prominent: true, enabled: approve.isAllowed && store.acting[id] == nil) { model.overlay = .action(.approve) }
+                    .help(approve.isAllowed ? "Approves the pull request, after a confirm." : "Off: \(Self.reason(approve))")
+            }
         }
     }
 
@@ -501,7 +568,7 @@ struct PRReviewDetail: View {
         let id = pr.id
         if let acting = store.acting[id] { return (acting, Palette.ink2) }
         if let notice = store.notices[id] { return (notice, notice.hasPrefix("Not") || notice.hasPrefix("Needs") ? Palette.waiting : Palette.done) }
-        guard let record = found?.record, record.phase == .done, let verdict = record.verdict else { return nil }
+        guard let record = found?.record, record.phase == .done, let verdict = record.verdict, record.own != true, pr.role != .mine else { return nil }
         let gate = store.gate(verdict == .approve ? .approve : .requestChanges, for: pr)
         if case .blocked(let why) = gate { return ((verdict == .approve ? "Approve is off: " : "Request changes is off: ") + why, Palette.ink3) }
         return nil
@@ -530,6 +597,9 @@ struct PRReviewConfirm: View {
                 switch overlay {
                 case .post: postBody
                 case .action(let action): actionBody(action)
+                case .combined(let action): combinedBody(action)
+                case .resolve(let id): resolveBody(id)
+                case .branch: EmptyView()
                 }
             }
             .padding(16)
@@ -556,19 +626,7 @@ struct PRReviewConfirm: View {
                     .font(Typo.label(.medium)).foregroundStyle(Palette.waiting).fixedSize(horizontal: false, vertical: true)
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(pending) { card in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                PRReviewSeverityChip(severity: card.severity)
-                                Text(card.location ?? "General comment").font(Typo.label(mono: true)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.middle)
-                            }
-                            Text(card.body).font(Typo.label()).foregroundStyle(Palette.ink).lineLimit(4).fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
-                    }
-                }
+                VStack(alignment: .leading, spacing: 6) { ForEach(pending) { cardRow($0) } }
             }
             .frame(maxHeight: 260)
             buttons(confirm: "Post \(pending.count) comment\(pending.count == 1 ? "" : "s")", enabled: !pending.isEmpty && !session.posting) {
@@ -595,11 +653,176 @@ struct PRReviewConfirm: View {
         }
     }
 
+    /// What a card will put on the pull request: the comment, a suggested change, a task.
+    private func cardRow(_ card: SuggestedComment) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                PRReviewSeverityChip(severity: card.severity)
+                Text(card.location ?? "General comment").font(Typo.label(mono: true)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.middle)
+                if card.postsAsSuggestion { Text("suggested change").font(Typo.label(.medium)).foregroundStyle(Palette.bitbucket) }
+                if card.wantsTask { Text("+ task").font(Typo.label(.medium)).foregroundStyle(Palette.ink3) }
+            }
+            Text(card.body).font(Typo.label()).foregroundStyle(Palette.ink).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
+    }
+
+    @ViewBuilder private func combinedBody(_ action: CombinedAction) -> some View {
+        if let session = model.session(for: pr) {
+            let pending = PostPlan.pending(session.cards)
+            let tasks = pending.filter(\.wantsTask).count
+            let record = found?.record
+            let approve = action.final == .approve
+            Text(action.title(count: pending.count) + " on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+            Text("In this order, all as you on Bitbucket:").font(Typo.label()).foregroundStyle(Palette.ink3)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("1. Post \(pending.count) comment\(pending.count == 1 ? "" : "s")" + (tasks > 0 ? " and \(tasks) task\(tasks == 1 ? "" : "s")" : ""))
+                    .font(Typo.label(.semibold)).foregroundStyle(Palette.ink)
+                Text("2. " + (approve ? "Approve the pull request" : "Mark the pull request as needing changes"))
+                    .font(Typo.label(.semibold)).foregroundStyle(Palette.ink)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) { ForEach(pending) { cardRow($0) } }
+            }
+            .frame(maxHeight: 220)
+            Text("Verdict \(record?.verdict?.rawValue ?? "none") · \(record?.findings?.text ?? "") · \(PRReviewBadge.pipeline(pr).text.lowercased()) · commit \(String(pr.head?.prefix(7) ?? "—"))")
+                .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
+            Text("If a comment fails to post, nothing after it is sent.").font(Typo.caption()).foregroundStyle(Palette.ink3)
+            buttons(confirm: action.title(count: pending.count), enabled: !pending.isEmpty && !session.posting && store.acting[pr.id] == nil) {
+                model.overlay = nil
+                store.performCombined(action, on: pr, session: session)
+            }
+        }
+    }
+
+    @ViewBuilder private func resolveBody(_ id: String) -> some View {
+        if let session = model.session(for: pr), let card = session.card(id) {
+            Text("Resolve this thread?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+            Text("The follow-up found it fixed. This marks the comment thread resolved on Bitbucket, as you.").font(Typo.label()).foregroundStyle(Palette.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+            cardRow(card)
+            if let reason = card.statusReason { Text(reason).font(Typo.label()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true) }
+            buttons(confirm: "Resolve", enabled: !session.posting) {
+                model.overlay = nil
+                Task { await session.resolve(id) }
+            }
+        }
+    }
+
     private func buttons(confirm: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             Spacer(minLength: 0)
             PRReviewPill(title: "Cancel") { model.overlay = nil }
             PRReviewPill(title: confirm, prominent: true, enabled: enabled, action: action)
+        }
+    }
+}
+
+// MARK: Review a branch
+
+/// A known repository, one of its branches and the branch it would merge into; the review is for me only.
+@MainActor
+final class PRBranchPickerModel: ObservableObject {
+    @Published var repos: [String] = []
+    @Published var repo = ""
+    @Published var branches: [PRReviewAPI.BranchInfo] = []
+    @Published var branch: PRReviewAPI.BranchInfo?
+    @Published var target = ""
+    @Published var loading = false
+    @Published var failed = false
+
+    init() {
+        repos = BitbucketConfig.loadRepos(scan: false).filter { repo in
+            guard let path = repo.path else { return false }
+            return FileManager.default.fileExists(atPath: (path as NSString).expandingTildeInPath)
+        }.map(\.key).sorted()
+        if let first = repos.first { select(first) }
+    }
+
+    func select(_ key: String) {
+        repo = key
+        branches = []
+        branch = nil
+        failed = false
+        loading = true
+        Task { @MainActor in
+            let list = await PRReviewAPI.branches(repoKey: key)
+            guard repo == key else { return }
+            loading = false
+            guard let list else { failed = true; return }
+            branches = list.branches
+            target = list.main ?? list.branches.first { ["main", "master", "develop"].contains($0.name) }?.name ?? ""
+            branch = list.branches.first { $0.name != target }
+        }
+    }
+
+    var valid: Bool { branch != nil && !target.isEmpty && branch?.name != target }
+}
+
+struct PRReviewBranchPicker: View {
+    @ObservedObject var model: PRReviewWindowModel
+    @ObservedObject var store: PRReviewStore
+    @StateObject private var picker = PRBranchPickerModel()
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4).ignoresSafeArea().onTapGesture { model.overlay = nil }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 4) {
+                    Text("Review a branch").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+                    InfoMark(text: "For repositories with a local clone. The branch is reviewed against the one it would merge into. The result is for you only: nothing is posted, approved or requested.")
+                }
+                if picker.repos.isEmpty {
+                    Text("No repository with a local clone is known yet (Setup, Pull requests).").font(Typo.label()).foregroundStyle(Palette.ink3)
+                } else {
+                    row("Repository") {
+                        Picker("Repository", selection: Binding(get: { picker.repo }, set: { picker.select($0) })) {
+                            ForEach(picker.repos, id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
+                    }
+                    if picker.loading {
+                        ProgressView().controlSize(.small)
+                    } else if picker.failed || picker.branches.isEmpty {
+                        Text("Could not read the branches.").font(Typo.label()).foregroundStyle(Palette.waiting)
+                    } else {
+                        row("Branch") {
+                            Picker("Branch", selection: $picker.branch) {
+                                ForEach(picker.branches, id: \.self) { Text($0.name).tag(Optional($0)) }
+                            }.labelsHidden()
+                        }
+                        row("Against") {
+                            Picker("Against", selection: $picker.target) {
+                                ForEach(picker.branches.map(\.name), id: \.self) { Text($0).tag($0) }
+                            }.labelsHidden()
+                        }
+                    }
+                }
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    PRReviewPill(title: "Cancel") { model.overlay = nil }
+                    PRReviewPill(title: "Review branch", prominent: true, enabled: picker.valid) {
+                        guard let branch = picker.branch, let ref = store.reviewBranch(repoKey: picker.repo, branch: branch.name, target: picker.target, head: branch.head) else { return }
+                        model.overlay = nil
+                        model.selected = ref.key
+                    }
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: 420)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.surface))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.ink3.opacity(0.35), lineWidth: 1))
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
+            .padding(20)
+        }
+        .transition(.opacity)
+    }
+
+    private func row<V: View>(_ title: String, @ViewBuilder _ content: () -> V) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(Typo.label(.medium)).foregroundStyle(Palette.ink2).frame(width: 80, alignment: .leading)
+            content().frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

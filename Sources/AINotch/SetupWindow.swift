@@ -1055,6 +1055,9 @@ struct SetupView: View {
                         Toggle("Merged or declined", isOn: Binding(get: { notify.closed }, set: { var next = notify; next.closed = $0; model.setPRNotify(next) }))
                         Toggle("Ready to merge", isOn: Binding(get: { notify.ready }, set: { var next = notify; next.ready = $0; model.setPRNotify(next) }))
                     }
+                    HStack(spacing: 10) {
+                        Toggle("Review done", isOn: Binding(get: { notify.reviewDone }, set: { var next = notify; next.reviewDone = $0; model.setPRNotify(next) }))
+                    }
                 }
                 .toggleStyle(.checkbox).font(Typo.subtitle()).fixedSize()
             }

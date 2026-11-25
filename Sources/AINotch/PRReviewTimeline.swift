@@ -188,30 +188,85 @@ private struct AddSkipSwitch: View {
     }
 }
 
+/// "Fixed" / "Still open" / "Unclear": what the follow-up found about a comment.
+struct PRFollowUpBadge: View {
+    var status: FollowUpStatus
+    var reason: String?
+
+    private var color: Color {
+        switch status {
+        case .fixed: return Palette.done
+        case .stillOpen: return Palette.waiting
+        case .unclear: return Palette.ink3
+        }
+    }
+
+    var body: some View {
+        Text(status.badge).font(Typo.caption(.semibold)).foregroundStyle(color)
+            .padding(.horizontal, 5).padding(.vertical, 1).background(Capsule().fill(color.opacity(0.16)))
+            .help(reason ?? "")
+            .ax("Follow-up: \(status.badge)", value: reason ?? "")
+    }
+}
+
+/// A small on/off pill under a card: "Post as suggestion", "Also add a task".
+private struct CardOption: View {
+    var title: String
+    var on: Bool
+    var help: String
+    var set: (Bool) -> Void
+
+    var body: some View {
+        Button { set(!on) } label: {
+            HStack(spacing: 4) {
+                Image(systemName: on ? "checkmark.square.fill" : "square").font(Typo.label()).foregroundStyle(on ? Palette.bitbucket : Palette.ink3).decorative()
+                Text(title).font(Typo.label(.medium)).foregroundStyle(on ? Palette.ink : Palette.ink3)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .ax(title, value: on ? "on" : "off")
+    }
+}
+
 struct PRCommentCard: View {
     var card: SuggestedComment
     @ObservedObject var session: PRChatSession
     var pr: PullRequest
+    var own = false
+    var focused = false
+    @ObservedObject var model: PRReviewWindowModel
     @State private var draft = ""
     @State private var editing = false
-    @FocusState private var focused: Bool
+    @FocusState private var textFocused: Bool
 
     var body: some View {
         let duplicate = session.duplicate(of: card)
         let problems = CommentPolicy.problems(in: card.body)
-        let dimmed = !card.include && !card.isPosted
+        let dimmed = !card.include && !card.isPosted && card.status != .fixed || (card.status == .fixed && !card.isPosted)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 PRReviewSeverityChip(severity: card.severity)
                 if let location = card.location { locationLink(location) } else {
                     Text("General comment").font(Typo.label()).foregroundStyle(Palette.ink3)
                 }
+                if let status = card.status { PRFollowUpBadge(status: status, reason: card.statusReason) }
                 if let badge = card.badge, !card.isPosted {
                     Text(badge).font(Typo.caption(.semibold)).foregroundStyle(Palette.claude)
                         .padding(.horizontal, 5).padding(.vertical, 1).background(Capsule().fill(Palette.claudeHue.opacity(0.16)))
                 }
                 Spacer(minLength: 0)
-                if card.isPosted {
+                if own {
+                    CardOption(title: "Done", on: card.done == true, help: "Tick it off when you have fixed it.") { session.setDone(card.id, $0) }
+                } else if card.isPosted {
+                    if card.status == .fixed, card.resolved != true {
+                        PRReviewPill(title: "Resolve", symbol: "checkmark.bubble", enabled: !session.posting) { model.overlay = .resolve(card.id) }
+                            .help("Marks this comment thread resolved on Bitbucket, after a confirm.")
+                    }
+                    if card.resolved == true {
+                        Label("Resolved", systemImage: "checkmark.bubble.fill").font(Typo.label(.semibold)).foregroundStyle(Palette.done).labelStyle(.titleAndIcon)
+                    }
                     Label("Posted", systemImage: "checkmark.circle.fill").font(Typo.label(.semibold)).foregroundStyle(Palette.done).labelStyle(.titleAndIcon)
                 } else {
                     AddSkipSwitch(include: card.include) { session.setInclude(card.id, $0) }
@@ -221,22 +276,48 @@ struct PRCommentCard: View {
             if let title = card.title, !title.isEmpty, !card.isPosted {
                 Text(title).font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.tail)
             }
-            if card.isPosted {
-                Text(card.body).font(Typo.body()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            if card.isPosted || own {
+                Text(card.body).font(Typo.body()).foregroundStyle(card.done == true ? Palette.ink3 : Palette.ink2)
+                    .strikethrough(card.done == true).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             } else {
                 TextField("Comment", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain).font(Typo.body()).foregroundStyle(Palette.ink)
                     .lineLimit(1...12)
-                    .focused($focused)
+                    .focused($textFocused)
                     .padding(6)
                     .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.inset))
-                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(focused ? Palette.bitbucket.opacity(0.7) : Color.clear, lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(textFocused ? Palette.bitbucket.opacity(0.7) : Color.clear, lineWidth: 1))
                     .onAppear { draft = card.body }
                     .onChange(of: draft) { if draft != card.body { session.setBody(card.id, draft) } }
                     .onChange(of: card.body) { if draft != card.body { draft = card.body } }
                     .ax("Comment text", value: card.body)
             }
-            if !problems.isEmpty, !card.isPosted {
+            if let code = card.suggestion, !own {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(code).font(Typo.label(mono: true)).foregroundStyle(Palette.ink).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.inset))
+                    if !card.isPosted {
+                        HStack(spacing: 10) {
+                            if card.canSuggest {
+                                CardOption(title: "Post as suggestion", on: card.asSuggestion ?? true,
+                                           help: "Posts the code as a suggested change the author can apply with one click. Off: the code is left out of the comment.") { session.setSuggestionOn(card.id, $0) }
+                            } else {
+                                Text("Needs a file and line to post as a suggestion").font(Typo.label()).foregroundStyle(Palette.ink3)
+                            }
+                        }
+                    }
+                }
+            }
+            if !card.isPosted, !own, card.severity == .blocking {
+                CardOption(title: "Also add a task", on: card.wantsTask,
+                           help: "After the comment posts, adds a Bitbucket task linked to it, so the pull request cannot merge until it is done.") { session.setTask(card.id, $0) }
+            }
+            if card.isPosted, card.taskID != nil {
+                Label("Task added", systemImage: "checklist").font(Typo.label()).foregroundStyle(Palette.ink3)
+            }
+            if !problems.isEmpty, !card.isPosted, !own {
                 Label("Reword before posting: \(problems.joined(separator: ", ")).", systemImage: "exclamationmark.triangle")
                     .font(Typo.label(.medium)).foregroundStyle(Palette.failed).fixedSize(horizontal: false, vertical: true)
             }
@@ -249,8 +330,10 @@ struct PRCommentCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.card))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .strokeBorder(card.isPosted ? Palette.done.opacity(0.4) : PRReviewSeverityChip.color(card.severity).opacity(card.include ? 0.45 : 0.15), lineWidth: 1))
-        .opacity(dimmed ? 0.62 : 1)
+            .strokeBorder(focused ? Palette.bitbucket : card.isPosted ? Palette.done.opacity(0.4) : PRReviewSeverityChip.color(card.severity).opacity(card.include || own ? 0.45 : 0.15), lineWidth: focused ? 2 : 1))
+        .opacity(dimmed && !own ? 0.62 : 1)
+        .id("card-" + card.id)
+        .onTapGesture { model.focusedCard = card.id }
     }
 
     private func locationLink(_ location: String) -> some View {
@@ -279,6 +362,13 @@ struct PRReviewTimeline: View {
     @State private var input = ""
     @State private var fullReport = false
     @State private var showExisting = false
+    @FocusState private var listFocused: Bool
+    @FocusState private var inputFocused: Bool
+
+    private var own: Bool { pr.role == .mine || store.record(for: pr)?.record.own == true }
+
+    /// The cards in the order they show, for the arrow keys.
+    private var shownCards: [SuggestedComment] { session.cards.filter { c in !session.log.messages.contains { $0.newCards.contains(c.id) } } }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -286,6 +376,7 @@ struct PRReviewTimeline: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         reviewMessage
+                        followUpNotes
                         existingSection
                         cardsSection
                         ForEach(session.log.messages) { message in messageView(message) }
@@ -298,10 +389,59 @@ struct PRReviewTimeline: View {
                 .onAppear { if !session.log.messages.isEmpty { DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) } } }
                 .onChange(of: session.log.messages.count) { withAnimation(Motion.ease(0.2)) { proxy.scrollTo("bottom", anchor: .bottom) } }
                 .onChange(of: session.streaming) { proxy.scrollTo("bottom", anchor: .bottom) }
+                .focusable()
+                .focused($listFocused)
+                .focusEffectDisabled()
+                .onKeyPress(phases: .down) { press in handle(press, proxy: proxy) }
             }
             Divider()
             footer
         }
+        .background(shortcutButtons)
+        .onAppear { DispatchQueue.main.async { listFocused = true } }
+        .onChange(of: model.focusChat) { inputFocused = true }
+    }
+
+    // MARK: Keyboard
+
+    private func handle(_ press: KeyPress, proxy: ScrollViewProxy) -> KeyPress.Result {
+        guard !press.modifiers.contains(.command) else { return .ignored }
+        let key: String
+        switch press.key {
+        case .upArrow: key = "up"
+        case .downArrow: key = "down"
+        default: key = press.characters
+        }
+        guard let action = ReviewKeys.action(key: key, command: false, typing: inputFocused) else { return .ignored }
+        perform(action, proxy: proxy)
+        return .handled
+    }
+
+    private func perform(_ action: ReviewKeyAction, proxy: ScrollViewProxy? = nil) {
+        let ids = shownCards.map(\.id)
+        switch action {
+        case .previousCard, .nextCard:
+            model.focusedCard = ReviewKeys.move(current: model.focusedCard, ids: ids, by: action == .nextCard ? 1 : -1)
+            if let id = model.focusedCard { withAnimation(Motion.ease(0.15)) { proxy?.scrollTo("card-" + id, anchor: .center) } }
+        case .add, .skip:
+            if let id = model.focusedCard, !own { session.setInclude(id, action == .add) }
+        case .post:
+            if !own, !PostPlan.pending(session.cards).isEmpty, PostPlan.blocked(session.cards).isEmpty, !session.posting { model.overlay = .post }
+        case .reReview:
+            model.reReview(pr)
+        case .focusChat:
+            inputFocused = true
+        }
+    }
+
+    /// ⌘↩, ⌘R and ⌘L work wherever the focus is (also in the text boxes).
+    private var shortcutButtons: some View {
+        ZStack {
+            Button("Post") { perform(.post) }.keyboardShortcut(.return, modifiers: .command)
+            Button("Re-review") { perform(.reReview) }.keyboardShortcut("r", modifiers: .command)
+            Button("Chat") { perform(.focusChat) }.keyboardShortcut("l", modifiers: .command)
+        }
+        .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true)
     }
 
     // MARK: Messages
@@ -314,7 +454,7 @@ struct PRReviewTimeline: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text("Claude").font(Typo.label(.semibold)).foregroundStyle(Palette.claude)
-                Text("review of \(String((record?.head ?? "").prefix(7)))").font(Typo.label()).foregroundStyle(Palette.ink3)
+                Text(record?.baseHead != nil ? "follow-up on \(String((record?.head ?? "").prefix(7)))" : "review of \(String((record?.head ?? "").prefix(7)))").font(Typo.label()).foregroundStyle(Palette.ink3)
                 if let verdict = record?.verdict {
                     Text(verdict.rawValue).font(Typo.label(.semibold)).foregroundStyle(verdict == .approve ? Palette.done : Palette.waiting)
                 }
@@ -328,6 +468,25 @@ struct PRReviewTimeline: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.panel))
+    }
+
+    /// "Follow-up on 3 new commits": what the quick pass over the new commits found.
+    @ViewBuilder private var followUpNotes: some View {
+        ForEach(session.log.followUps) { note in
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.2.circlepath").font(Typo.micro(.bold)).foregroundStyle(Palette.claude).decorative()
+                    Text(note.title).font(Typo.label(.semibold)).foregroundStyle(Palette.claude)
+                    Text("\(note.fromHead.prefix(7)) → \(note.toHead.prefix(7))").font(Typo.label(mono: true)).foregroundStyle(Palette.ink3)
+                    Text(note.verdict.rawValue).font(Typo.label(.semibold)).foregroundStyle(note.verdict == .approve ? Palette.done : Palette.waiting)
+                }
+                Text(note.counts).font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
+                if !note.summary.isEmpty { Text(note.summary).font(Typo.body()).foregroundStyle(Palette.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled) }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.panel))
+        }
     }
 
     @ViewBuilder private var existingSection: some View {
@@ -360,9 +519,9 @@ struct PRReviewTimeline: View {
         let toAdd = PostPlan.pending(cards).count
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("Suggested comments").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
-                Text(cards.isEmpty ? "" : "\(toAdd) to add · \(cards.count) total").font(Typo.label()).foregroundStyle(Palette.ink3)
-                InfoMark(text: "Pick the ones to post under your name: Add is on for blocking and should-fix findings, off for nits. Edit the text, or ask in the chat to draft or soften one. Nothing is posted until you confirm.")
+                Text(own ? "To fix" : "Suggested comments").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
+                Text(cards.isEmpty ? "" : own ? "\(cards.filter { $0.done == true }.count) of \(cards.count) done" : "\(toAdd) to add · \(cards.count) total").font(Typo.label()).foregroundStyle(Palette.ink3)
+                InfoMark(text: own ? "The findings as a checklist for you. Nothing here is posted anywhere." : "Pick the ones to post under your name: Add is on for blocking and should-fix findings, off for nits. Edit the text, or ask in the chat to draft or soften one. Nothing is posted until you confirm.")
                 Spacer(minLength: 0)
                 if session.needsDraft {
                     PRReviewPill(title: session.drafting ? "Drafting…" : "Draft comments", symbol: "text.badge.plus", enabled: !session.running) { session.draftComments() }
@@ -372,8 +531,8 @@ struct PRReviewTimeline: View {
                 Text(session.needsDraft ? "This review has no comments drafted yet." : "No comments to post. Ask in the chat to draft one.")
                     .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
             }
-            ForEach(cards.filter { c in !session.log.messages.contains { $0.newCards.contains(c.id) } }) { card in
-                PRCommentCard(card: card, session: session, pr: pr)
+            ForEach(shownCards) { card in
+                PRCommentCard(card: card, session: session, pr: pr, own: own, focused: model.focusedCard == card.id, model: model)
             }
         }
     }
@@ -400,7 +559,7 @@ struct PRReviewTimeline: View {
                         .font(Typo.label(.medium)).foregroundStyle(Palette.claude)
                 }
                 ForEach(message.newCards, id: \.self) { id in
-                    if let card = session.card(id) { PRCommentCard(card: card, session: session, pr: pr) }
+                    if let card = session.card(id) { PRCommentCard(card: card, session: session, pr: pr, own: own, focused: model.focusedCard == card.id, model: model) }
                 }
             }
         }
@@ -423,7 +582,9 @@ struct PRReviewTimeline: View {
         let pending = PostPlan.pending(session.cards)
         let blocked = PostPlan.blocked(session.cards)
         return VStack(alignment: .leading, spacing: 6) {
-            if !session.cards.isEmpty {
+            if !session.cards.isEmpty, own {
+                Text("For you only: nothing is posted from here.").font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
+            } else if !session.cards.isEmpty {
                 HStack(spacing: 8) {
                     let posted = session.cards.filter(\.isPosted).count
                     Text(pending.isEmpty ? (posted > 0 ? "\(posted) posted" : "Nothing switched on") : "\(pending.count) switched on" + (posted > 0 ? " · \(posted) posted" : ""))
@@ -432,7 +593,18 @@ struct PRReviewTimeline: View {
                     Spacer(minLength: 0)
                     PRReviewPill(title: session.posting ? "Posting…" : "Post \(pending.count) comment\(pending.count == 1 ? "" : "s")", symbol: "paperplane", prominent: true,
                                  enabled: !pending.isEmpty && blocked.isEmpty && !session.posting) { model.overlay = .post }
-                        .help(blocked.isEmpty ? "Posts the switched-on comments after a confirm." : "Reword the flagged comments first.")
+                        .help(blocked.isEmpty ? "Posts the switched-on comments after a confirm. ⌘↩" : "Reword the flagged comments first.")
+                }
+                let options = store.combinedOptions(for: pr, pending: pending)
+                if !options.isEmpty {
+                    PRReviewFlow(spacing: 6, rowSpacing: 6) {
+                        ForEach(options, id: \.action) { option in
+                            PRReviewPill(title: option.action.title(count: pending.count), symbol: option.action.final == .approve ? "checkmark" : nil,
+                                         destructive: option.action.final == .requestChanges,
+                                         enabled: option.gate.isAllowed && blocked.isEmpty && !session.posting && store.acting[pr.id] == nil) { model.overlay = .combined(option.action) }
+                                .help(option.gate.isAllowed ? "Posts the comments, then \(option.action.final == .approve ? "approves" : "asks for changes"), after one confirm that lists both." : "Off: \(PRReviewDetail.reason(option.gate))")
+                        }
+                    }
                 }
             } else if let notice = session.notice {
                 Text(notice).font(Typo.label()).foregroundStyle(Palette.waiting)
@@ -443,6 +615,7 @@ struct PRReviewTimeline: View {
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.inset))
                     .disabled(!session.canChat)
+                    .focused($inputFocused)
                     .onSubmit(send)
                     .ax("Message")
                 if session.running {
@@ -451,10 +624,34 @@ struct PRReviewTimeline: View {
                     PRReviewPill(title: "Send", symbol: "arrow.up", prominent: true, enabled: session.canChat && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, action: send)
                 }
             }
-            Text("Read only: the chat can read the code and say things; only you post.").font(Typo.caption()).foregroundStyle(Palette.ink3)
+            HStack(spacing: 6) {
+                Text("Read only: the chat can read the code and say things; only you post.").font(Typo.caption()).foregroundStyle(Palette.ink3)
+                Spacer(minLength: 0)
+                Button { model.showKeys.toggle() } label: {
+                    Label("Shortcuts", systemImage: "keyboard").font(Typo.caption(.medium)).foregroundStyle(Palette.ink3).labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $model.showKeys, arrowEdge: .top) { shortcutsHelp }
+                .ax("Keyboard shortcuts")
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(Palette.panel)
+    }
+
+    private var shortcutsHelp: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Keyboard").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
+            ForEach(ReviewKeys.help, id: \.keys) { item in
+                HStack(spacing: 10) {
+                    Text(item.keys).font(Typo.label(.semibold, mono: true)).foregroundStyle(Palette.ink).frame(width: 36, alignment: .leading)
+                    Text(item.what).font(Typo.label()).foregroundStyle(Palette.ink2)
+                }
+            }
+            Text("A and S, and the arrows, work when no text box is being typed in.").font(Typo.caption()).foregroundStyle(Palette.ink3)
+        }
+        .padding(12)
+        .frame(width: 330, alignment: .leading)
     }
 
     private func send() {

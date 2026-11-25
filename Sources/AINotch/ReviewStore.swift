@@ -1,4 +1,6 @@
+import Combine
 import Foundation
+import ReviewCore
 
 /// Pull requests for the panel, on the main thread: mine and the ones waiting for my review,
 /// split into the rows that need something (shown inline) and a count of the quiet ones. Fed by
@@ -14,6 +16,9 @@ final class ReviewStore: ObservableObject {
     @Published private(set) var toReview: [PullRequest] = []
     /// The rows to show: what needs something (PRNeed), most urgent first, then newest.
     @Published private(set) var attention: [PullRequest] = []
+    /// Pull requests whose review is done and wait for my call (approve, request changes or post).
+    @Published private(set) var waitingCount = 0
+    private var waitingSink: AnyCancellable?
     /// The quiet ones, only counted.
     @Published private(set) var quietCount = 0
     /// Why nothing new shows (nil while all is well). `isSetup` ones are quiet: "needs
@@ -75,6 +80,8 @@ final class ReviewStore: ObservableObject {
         var closed = true
         /// One of mine went from blocked to every merge check passing.
         var ready = true
+        /// A review or follow-up of mine finished.
+        var reviewDone = true
 
         private static let key = "prs.notify"
 
@@ -88,12 +95,13 @@ final class ReviewStore: ObservableObject {
             prefs.builds = object["builds"] as? Bool ?? true
             prefs.closed = object["closed"] as? Bool ?? true
             prefs.ready = object["ready"] as? Bool ?? true
+            prefs.reviewDone = object["reviewDone"] as? Bool ?? true
             return prefs
         }
 
         func save() {
             UserDefaults.standard.set(["approved": approved, "changes": changes, "comments": comments, "reviews": reviews, "builds": builds,
-                                          "closed": closed, "ready": ready], forKey: Self.key)
+                                          "closed": closed, "ready": ready, "reviewDone": reviewDone], forKey: Self.key)
         }
 
         func allows(_ kind: PREvent.Kind) -> Bool {
@@ -120,6 +128,8 @@ final class ReviewStore: ObservableObject {
         seenNews = Set(UserDefaults.standard.stringArray(forKey: Self.seenKey) ?? [])
         sessionLinks.onWatched = { [weak self] keys in self?.setWatched(keys) }
         autoReview.meUUID = { [weak self] in self?.me?.uuid }
+        waitingSink = autoReview.$ledger.sink { [weak self] ledger in self?.recountWaiting(ledger) }
+        autoReview.onFinished = { [weak self] ref, record in self?.reviewFinished(ref, record) }
         sessionLinks.feedback = { [weak self] pr, build, comments in
             await self?.feedback(for: pr, build: build, comments: comments) ?? PRFeedbackData()
         }
@@ -216,6 +226,7 @@ final class ReviewStore: ObservableObject {
         if mine != self.mine { self.mine = mine }
         if toReview != self.toReview { self.toReview = toReview }
         sessionLinks.setMine(mine)
+        defer { recountWaiting(autoReview.ledger) }
         autoReview.observe(toReview: toReview, healthy: snapshot.status == nil && snapshot.mineFetchedAt > 0)
         // A muted pull request that closed is forgotten (only from a healthy, read answer).
         if snapshot.status == nil, snapshot.mineFetchedAt > 0, !muted.isEmpty {
@@ -320,6 +331,25 @@ final class ReviewStore: ObservableObject {
     private func setMuted(_ next: Set<String>) {
         muted = next
         UserDefaults.standard.set(Array(next).sorted(), forKey: Self.mutedKey)
+    }
+
+    /// Counts from the emitted ledger (a @Published emits before it is set).
+    private func recountWaiting(_ ledger: ReviewLedger) {
+        let prs = all.filter { $0.role == .reviewing }
+        let keys = ReviewWaiting.keys(prs.map {
+            WaitingInput(key: $0.ref.key, head: $0.head, decided: $0.myReview != .none, muted: muted.contains($0.id))
+        }, ledger: ledger)
+        if keys.count != waitingCount { waitingCount = keys.count }
+    }
+
+    /// A review or follow-up finished: the alert (muted pull requests and the Setup tick respected;
+    /// Notifier posts it only while the screen is locked).
+    private func reviewFinished(_ ref: PullRequestRef, _ record: ReviewRecord) {
+        recountWaiting(autoReview.ledger)
+        guard notify.reviewDone, !muted.contains(ref.key) else { return }
+        let body = ReviewWaiting.notificationText(id: ref.id, repo: ref.repo, record: record)
+        Notifier.shared.postReviewDone(prID: ref.key, title: record.baseHead != nil ? "Follow-up done" : "Review done", body: body)
+        SoundPlayer.shared.play(.prNews)
     }
 
     func setNotify(_ prefs: NotifyPrefs) {

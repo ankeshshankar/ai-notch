@@ -38,14 +38,16 @@ struct PRReviewChip: View {
         let older = outdated ? " · older commit" : ""
         switch record.phase {
         case .queued: return ("Review queued", Palette.ink3, "Waits for the review in progress; one runs at a time.")
-        case .reviewing: return ("Reviewing…", Palette.claude, "Claude is reviewing this pull request (headless, read only).")
+        case .reviewing:
+            return record.baseHead != nil ? ("Follow-up…", Palette.claude, "Claude is checking the new commits against the earlier findings (headless, read only).")
+                                          : ("Reviewing…", Palette.claude, "Claude is reviewing this pull request (headless, read only).")
         case .cancelled: return ("Review cancelled", Palette.ink3, "Cancelled. Use Review now to start it again.")
         case .failed: return ("Review failed", Palette.failed, record.error ?? "The review did not finish.")
         case .done:
             let verdict = record.verdict ?? .requestChanges
             let posted = record.posted.map { " · \($0)" } ?? ""
             let limited = (record.denied ?? []).isEmpty ? "" : " · limited"
-            let text = (verdict == .approve ? "APPROVE" : "REQUEST CHANGES") + " · " + (record.findings?.text ?? "") + limited + older + posted
+            let text = (record.baseHead != nil ? "FOLLOW-UP " : "") + (verdict == .approve ? "APPROVE" : "REQUEST CHANGES") + " · " + (record.findings?.text ?? "") + limited + older + posted
             return (text, verdict == .approve ? Palette.done : Palette.waiting,
                     "Claude's verdict on the commit \(record.head.prefix(7)). Open it for the findings, the suggested comments and a chat; nothing was posted."
                     + ((record.denied ?? []).isEmpty ? "" : " The review was refused \(record.denied!.joined(separator: ", ")) and could not read everything, so Approve is off."))

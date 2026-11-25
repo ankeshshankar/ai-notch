@@ -19,6 +19,8 @@ final class Notifier: NSObject {
     var onMachine: (() -> Void)?
     /// A VPN notification's Open: the notch on its VPN panel.
     var onVPN: (() -> Void)?
+    /// A review-done notification was clicked: open the review window on that pull request.
+    var onReviewOpen: ((String) -> Void)?
     /// A Datadog notification's Snooze 1 h.
     var onProdSnooze: (() -> Void)?
 
@@ -257,12 +259,14 @@ extension Notifier: UNUserNotificationCenterDelegate {
         let url = (info["url"] as? String).flatMap(URL.init(string:))
         let machine = info["machine"] != nil
         let vpn = info["vpn"] != nil
+        let review = info["review"] as? String
         let prod = info["prod"] != nil
         let action = response.actionIdentifier
         // Marked before anything else: macOS may tell the app to "reopen" around the same moment,
         // and that must not open Setup (see AppDelegate.applicationShouldHandleReopen).
         Notifier.markResponse()
         let kind = prod ? "prod" : machine ? "machine" : vpn ? "vpn" : session != nil ? "session"
+            : review != nil ? "review"
             : build != nil ? "build" : url != nil ? "pull request" : "other"
         Task { @MainActor in
             Notifier.shared.note("notification click: \(kind), action \(action)")
@@ -279,9 +283,26 @@ extension Notifier: UNUserNotificationCenterDelegate {
             SafeLink.open(url, for: .anyKnown)
             if machine, action != UNNotificationDismissActionIdentifier { Notifier.shared.onMachine?() }
             if vpn, action != UNNotificationDismissActionIdentifier { Notifier.shared.onVPN?() }
+            if let review { Notifier.shared.onReviewOpen?(review) }
             if let session { Notifier.shared.onOpen?(session) }
             if let build { Notifier.shared.onBuild?(build, action == "copy" ? .copy : .open) }
             completionHandler()
+        }
+    }
+}
+
+extension Notifier {
+    /// A review or follow-up finished ("#214 web-app · Request changes · 1 blocking"); a click opens the window on it.
+    func postReviewDone(prID: String, title: String, body: String) {
+        guard isAvailable, Self.mayPostAlerts else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.userInfo = ["review": prID]
+        content.sound = systemSound
+        let request = UNNotificationRequest(identifier: "review-\(prID)-\(Int(Date().timeIntervalSince1970))", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in self.note("posted review done \(prID)\(error.map { " failed: \($0.localizedDescription)" } ?? "")") }
         }
     }
 }

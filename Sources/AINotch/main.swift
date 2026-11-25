@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SetupWindowController.shared.vpn = vpn
         SetupWindowController.shared.reviews = reviews
         PRReviewWindowController.shared.reviews = reviews
+        Notifier.shared.onReviewOpen = { id in PRReviewWindowController.shared.show(id) }
         controller = NotchController(store: store, builds: builds, prod: prod, machine: machine, vpn: vpn, reviews: reviews)
         if let controller, !args.contains("--preview") { Hotkeys.shared.start(controller: controller, store: store) }
         if !args.contains("--preview") { Dictation.shared.start() }

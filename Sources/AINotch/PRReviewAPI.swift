@@ -28,7 +28,7 @@ enum PRReviewAPI {
     static let saveCommand = "security add-generic-password -U -s \(writeService) -a api-token -j \"expires YYYY-MM-DD\" -w \"$(pbpaste)\" && pbcopy < /dev/null"
 
     /// Whether the write token is stored (off the main thread: `security` runs).
-    static func hasWriteToken() -> Bool { KeychainItem.read(service: writeService) != nil }
+    static func hasWriteToken() -> Bool { dryRun || KeychainItem.read(service: writeService) != nil }
 
     /// What Bitbucket says now, right before a click is carried out.
     struct Fresh: Equatable {
@@ -39,7 +39,11 @@ enum PRReviewAPI {
     }
 
     /// The pull request and its builds, read now with the read token (never the write one).
+    /// A preview or check answers with this instead of reading Bitbucket.
+    nonisolated(unsafe) static var fixtureFresh: Fresh?
+
     static func fresh(_ ref: PullRequestRef, me: String?) async -> Fresh? {
+        if let fixtureFresh { return fixtureFresh }
         guard let read = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else { return nil }
         let base = "\(BitbucketConfig.apiBase)/repositories/\(ref.workspace)/\(ref.repo)/pullrequests/\(ref.id)"
         guard let prURL = BuildHTTP.url(base, [("fields", "state,source.commit.hash,participants.state,participants.approved,participants.user.uuid")]),
@@ -166,6 +170,96 @@ enum PRReviewAPI {
 }
 
 extension PRReviewAPI {
+    struct BranchInfo: Equatable, Sendable, Hashable {
+        var name: String
+        var head: String
+    }
+
+    struct BranchList: Equatable, Sendable {
+        var branches: [BranchInfo]
+        var main: String?
+    }
+
+    /// A preview or check answers with this instead of reading Bitbucket.
+    nonisolated(unsafe) static var fixtureBranches: BranchList?
+
+    /// The newest branches of a repository (at most 100) and its main branch, read with the read token.
+    static func branches(repoKey: String) async -> BranchList? {
+        if let fixtureBranches { return fixtureBranches }
+        guard let read = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else { return nil }
+        let base = "\(BitbucketConfig.apiBase)/repositories/\(repoKey)"
+        guard let listURL = BuildHTTP.url(base + "/refs/branches", [("pagelen", "100"), ("sort", "-target.date"), ("fields", "values.name,values.target.hash")]),
+              let repoURL = BuildHTTP.url(base, [("fields", "mainbranch.name")]),
+              let list = await getJSON(listURL, token: read) else { return nil }
+        let main = (await getJSON(repoURL, token: read))?["mainbranch"] as? [String: Any]
+        let branches: [BranchInfo] = (list["values"] as? [[String: Any]] ?? []).compactMap { value in
+            guard let name = value["name"] as? String, let hash = (value["target"] as? [String: Any])?["hash"] as? String, ReviewBranch.isValid(name) else { return nil }
+            return BranchInfo(name: name, head: hash)
+        }
+        return BranchList(branches: branches, main: main?["name"] as? String)
+    }
+
+    enum TaskResult: Equatable {
+        case created(Int)
+        case failed(String)
+    }
+
+    /// A task linked to a comment I just posted (`POST …/tasks`, `pullrequest:write`; the endpoint and body are from
+    /// Atlassian's OpenAPI: `{"content": {"raw": …}, "comment": {"id": …}}`). Only after the same confirm as the comment.
+    static func createTask(for card: SuggestedComment, commentID: Int, to ref: PullRequestRef) async -> TaskResult {
+        let body = TaskPayload.json(for: card, commentID: commentID)
+        let endpoint = TaskPayload.endpoint(apiBase: BitbucketConfig.apiBase, workspace: ref.workspace, repo: ref.repo, id: ref.id)
+        if dryRun {
+            sent.append(Sent(method: "POST", url: endpoint, body: String(decoding: body, as: UTF8.self)))
+            return .created(800_000 + sent.count)
+        }
+        switch await write(endpoint, body: body) {
+        case .failure(let why): return .failed(why.text)
+        case .success(let data): return CommentPayload.createdID(data).map { .created($0) } ?? .failed("Bitbucket did not return the task")
+        }
+    }
+
+    /// Resolves a comment thread (`POST …/comments/{id}/resolve`, no body): only from the Resolve button, after a confirm.
+    /// 409 means it was already resolved, which is what was asked for.
+    static func resolve(commentID: Int, on ref: PullRequestRef) async -> SendResult {
+        let endpoint = ResolvePayload.endpoint(apiBase: BitbucketConfig.apiBase, workspace: ref.workspace, repo: ref.repo, id: ref.id, commentID: commentID)
+        if dryRun {
+            sent.append(Sent(method: "POST", url: endpoint, body: ""))
+            return .done
+        }
+        switch await write(endpoint, body: nil, okStatus: [200, 201, 204, 409]) {
+        case .failure(let why): return .failed(why.text == "Bitbucket answered 403" ? "only a comment thread's first comment can be resolved" : why.text)
+        case .success: return .done
+        }
+    }
+
+    private static func write(_ endpoint: String, body: Data?, okStatus: Set<Int> = [200, 201, 204]) async -> Result<Data, WriteFailure> {
+        guard let write = KeychainItem.read(service: writeService)?.secret else { return .failure(WriteFailure("no write token: add it in Setup → Pull requests")) }
+        guard let url = URL(string: endpoint) else { return .failure(WriteFailure("bad address")) }
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("Bearer \(write)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        guard let (data, response) = try? await BuildHTTP.session.data(for: request), let http = response as? HTTPURLResponse else {
+            return .failure(WriteFailure("no answer from Bitbucket"))
+        }
+        if okStatus.contains(http.statusCode) { return .success(data) }
+        switch http.statusCode {
+        case 401: return .failure(WriteFailure("the write token was rejected"))
+        case 403 where PRParse.isScopeError(data): return .failure(WriteFailure("the write token lacks the pullrequest:write scope"))
+        case 404: return .failure(WriteFailure("not found"))
+        default: return .failure(WriteFailure("Bitbucket answered \(http.statusCode)"))
+        }
+    }
+
+    /// A failed write's reason, as an Error for `Result`.
+    struct WriteFailure: Error, Equatable {
+        var text: String
+        init(_ text: String) { self.text = text }
+    }
+
     /// A preview or check answers with this instead of counting commits on Bitbucket.
     nonisolated(unsafe) static var fixtureBehind: Int?
 
