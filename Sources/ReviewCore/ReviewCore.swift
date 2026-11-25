@@ -347,13 +347,29 @@ public enum ReviewCommand {
         [scratch, home + "/.claude/skills/homes-pr-review"]
     }
 
+    /// The notch's hook on the events that only report (the notch folds them into the session's
+    /// row); `--settings` adds nothing else, so the review's permissions stay the allow-list. Not
+    /// included, because the hook can answer them: PreToolUse (pause, notes, context) and
+    /// PermissionRequest (an approval). The hook prints nothing on any of these events.
+    public static let observedEvents = ["SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure",
+                                        "SubagentStart", "SubagentStop", "Stop", "StopFailure", "SessionEnd"]
+
+    public static func observeHooksJSON(command: String) -> String {
+        var hooks: [String: Any] = [:]
+        for event in observedEvents {
+            hooks[event] = [["hooks": [["type": "command", "command": command, "timeout": 5]]]]
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: ["hooks": hooks], options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
     /// `--setting-sources ""` loads none of the user's, project's or local settings: the user's
     /// own allow rules (git commit, checkout, MCP writes, Edit on skill files) must not widen a
     /// review that reads other people's code. `--agents` supplies the lens and verifier
     /// subagents, which user-level discovery would otherwise have provided.
-    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, home: String = NSHomeDirectory()) -> [String] {
+    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory()) -> [String] {
         ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill),
-         "--setting-sources", "",
+         "--setting-sources", ""] + (hookCommand.map { ["--settings", observeHooksJSON(command: $0)] } ?? []) + [
          "--agents", agentsJSON,
          "--add-dir"] + extraDirectories(scratch: scratch, home: home) + [
          "--output-format", "json",
@@ -396,7 +412,7 @@ public enum ReviewAgents {
             if let model = meta["model"] { agent["model"] = model }
             agents[name] = agent
         }
-        let data = (try? JSONSerialization.data(withJSONObject: agents, options: [.sortedKeys])) ?? Data("{}".utf8)
+        let data = (try? JSONSerialization.data(withJSONObject: agents, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
         return String(decoding: data, as: UTF8.self)
     }
 }

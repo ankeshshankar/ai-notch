@@ -158,6 +158,22 @@ final class ReviewCommandTests: XCTestCase {
     }
 }
 
+final class ReviewHooksTests: XCTestCase {
+    func testObserveOnlyHooks() throws {
+        let args = ReviewCommand.arguments(prNumber: 42, scratch: "/s/r1", skill: "x", agentsJSON: "{}", hookCommand: "/h/ai-notch-hook")
+        XCTAssertEqual(args[args.firstIndex(of: "--setting-sources")! + 1], "")
+        let json = args[args.firstIndex(of: "--settings")! + 1]
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertEqual(Array(object.keys), ["hooks"], "hooks only, no permissions")
+        let hooks = try XCTUnwrap(object["hooks"] as? [String: Any])
+        for banned in ["PreToolUse", "PermissionRequest", "PermissionDenied"] { XCTAssertNil(hooks[banned], banned) }
+        XCTAssertTrue(hooks.keys.contains("SubagentStart") && hooks.keys.contains("Stop") && hooks.keys.contains("SessionStart"))
+        XCTAssertTrue(json.contains("/h/ai-notch-hook"))
+        XCTAssertFalse(ReviewCommand.arguments(prNumber: 1, scratch: "/s", skill: "x", agentsJSON: "{}").contains("--settings"))
+        XCTAssertEqual(args[args.firstIndex(of: "--permission-mode")! + 1], "dontAsk")
+    }
+}
+
 final class ReviewAgentsTests: XCTestCase {
     func testFrontMatterAndJSON() {
         let file = "---\nname: lens\ndescription: One lens: of a PR\nmodel: claude-opus-5-5\ntools: Read, Grep, Bash\n---\n\nYou review.\n"

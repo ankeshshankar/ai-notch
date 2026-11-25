@@ -78,9 +78,9 @@ final class PRReviewRunner: @unchecked Sendable {
         }
         let agents = ["homes-pr-lens", "homes-pr-verifier"].compactMap { try? String(contentsOfFile: home + "/.claude/agents/\($0).md", encoding: .utf8) }
         guard agents.count == 2 else { return .failed("the homes-pr-lens or homes-pr-verifier agent is missing") }
-        process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents))
+        process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents), hookCommand: Self.hookCommand())
         process.currentDirectoryURL = URL(fileURLWithPath: job.repoPath, isDirectory: true)
-        process.environment = Self.environment(token: job.token)
+        process.environment = Self.environment(token: job.token, title: "PR review #\(job.ref.id) · \(job.ref.repo)")
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = outHandle
         process.standardError = errHandle
@@ -116,7 +116,14 @@ final class PRReviewRunner: @unchecked Sendable {
 
     /// The child's environment: ours without API keys, a PATH that finds git and curl, the
     /// read token, and the markers the hook looks for.
-    static func environment(token: String) -> [String: String] {
+    /// The hook beside this app's executable (the installed one when run from a build folder).
+    static func hookCommand() -> String? {
+        let beside = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("ai-notch-hook").path
+        let installed = NSHomeDirectory() + "/Applications/AINotch.app/Contents/MacOS/ai-notch-hook"
+        return [beside, installed].compactMap { $0 }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    static func environment(token: String, title: String = "PR review") -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] { env[key] = nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -124,6 +131,7 @@ final class PRReviewRunner: @unchecked Sendable {
         env["BB_API_TOKEN"] = token
         env["AI_NOTCH_NO_APPROVALS"] = "1"
         env["AI_NOTCH_REVIEW"] = "1"
+        env["AI_NOTCH_REVIEW_TITLE"] = title
         return env
     }
 

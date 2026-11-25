@@ -309,6 +309,9 @@ if state.tty == nil, let pid = state.pid { state.tty = terminal(of: pid) }
 if state.tmuxPane == nil, env["TMUX"] != nil, let pane = env["TMUX_PANE"], !pane.isEmpty { state.tmuxPane = pane }
 // A rename: every event carries the name as it is now.
 if let title = string("session_title") { state.sessionTitle = oneLine(title, max: 120) }
+// A review the notch started itself names its row ("PR review #n · repo"); it never routes to approvals or control.
+let isReview = env["AI_NOTCH_REVIEW"] == "1"
+if isReview, let title = env["AI_NOTCH_REVIEW_TITLE"], !title.isEmpty { state.sessionTitle = oneLine(title, max: 120) }
 
 let agentId = string("agent_id")
 let tool = string("tool_name")
@@ -649,7 +652,7 @@ case "PreToolUse":
 case "PermissionRequest":
     // Headless runs (AI_NOTCH_NO_APPROVALS=1) have nobody to answer: record nothing, ask the
     // app nothing, and let Claude Code's own permission handling decide at once.
-    if env["AI_NOTCH_NO_APPROVALS"] == "1" { break }
+    if env["AI_NOTCH_NO_APPROVALS"] == "1" || isReview { break }
     // A question or a plan raises a permission request too, but it is not yes-or-no.
     // The main thread's or a subagent's: each is its own wait and its own prompt.
     if tool == "AskUserQuestion" {
@@ -941,7 +944,7 @@ func applyControl() {
 
 // Stop, pause or a note from the notch (Claude Code only). A turn's end clears what was asked;
 // otherwise a stop or a note is acted on at the next tool call, a pause holds it.
-if isClaude {
+if isClaude, !isReview {
     if name == "SessionEnd" {
         SessionControl.write(nil, for: sessionId)
     } else if name == "Stop" {
