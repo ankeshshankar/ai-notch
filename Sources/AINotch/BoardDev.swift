@@ -61,8 +61,12 @@ enum BoardFixtures {
     ]
     /// Ones waiting for my review, for the PRs panel's second column.
     static let toReview: [PullRequest] = [
-        { var p = pr(61, "Rework the notification settings", comments: 2); p.role = .reviewing; p.myReview = .none; p.author = person("Dana"); return p }(),
-        { var p = pr(62, "Bump the SDK and fix the lint errors", approved: 1); p.role = .reviewing; p.author = person("Eli"); return p }(),
+        { var p = pr(61, "Rework the notification settings", comments: 2); p.role = .reviewing; p.myReview = .none; p.author = person("Dana")
+            p.ref = PullRequestRef(workspace: "asbl-dev", repo: "homes-api-app", id: 61); p.head = "aaaaaaaaaaaa"; return p }(),
+        { var p = pr(62, "Bump the SDK and fix the lint errors", approved: 1); p.role = .reviewing; p.myReview = .none; p.author = person("Eli")
+            p.ref = PullRequestRef(workspace: "asbl-dev", repo: "homes-api-app", id: 62); p.head = "bbbbbbbbbbbb"; return p }(),
+        { var p = pr(63, "Add the members endpoint"); p.role = .reviewing; p.myReview = .none; p.author = person("Fay")
+            p.ref = PullRequestRef(workspace: "asbl-dev", repo: "homes-ecosystem", id: 63); p.head = "cccccccccccc"; return p }(),
     ]
 }
 
