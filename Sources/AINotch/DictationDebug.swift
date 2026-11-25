@@ -5,7 +5,7 @@ import Foundation
 import Speech
 
 // Dev entry points for dictation, never the app (see scripts/dev/README.md):
-//   AINotch --dictation-transcribe <audio file> [--locale en-IN]
+//   AINotch --dictation-transcribe <audio file> [--locale en-IN] [--engine dictation|speech] [--vocab builtin|"a,b,c"]
 //       the file through the same AudioPump and SpeechAnalyzer path the microphone uses; prints
 //       the raw transcript and the rule-cleaned one.
 //   AINotch --dictation-clean "<text>" --endpoint <url> [--style keep|english] [--app <name>]
@@ -33,7 +33,8 @@ enum DictationDebug {
         if let file = value("--dictation-transcribe") {
             let semaphore = DispatchSemaphore(value: 0)
             Task.detached {
-                await transcribeFile(file, locale: value("--locale") ?? "en-IN")
+                await transcribeFile(file, locale: value("--locale") ?? "en-IN", engine: value("--engine").flatMap(SpeechEngine.init(rawValue:)),
+                                     vocabulary: value("--vocab").map { $0 == "builtin" ? DictationVocabulary.merged() : DictationVocabulary.merged(user: DictationVocabulary.parse($0)) } ?? [])
                 semaphore.signal()
             }
             semaphore.wait()
@@ -227,12 +228,12 @@ enum DictationDebug {
         app.run()
     }
 
-    static func transcribeFile(_ path: String, locale: String) async {
+    static func transcribeFile(_ path: String, locale: String, engine: SpeechEngine?, vocabulary: [String]) async {
         guard #available(macOS 26.0, *) else { print("needs macOS 26"); return }
         do {
             let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
             let pump = AudioPump()
-            let session = try await SpeechDictation.start(localeIdentifier: locale, source: file.processingFormat, pump: pump)
+            let session = try await SpeechDictation.start(localeIdentifier: locale, source: file.processingFormat, pump: pump, vocabulary: vocabulary, prefer: engine, fallback: false)
             let chunk: AVAudioFrameCount = 4096
             while file.framePosition < file.length {
                 guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: chunk) else { break }
@@ -242,7 +243,7 @@ enum DictationDebug {
             }
             let raw = try await session.finish()
             if CommandLine.arguments.contains("--dictation-trace") { FileHandle.standardError.write(Data("fed \(pump.frames) frames at target rate\n".utf8)) }
-            print("locale:  \(locale)")
+            print("locale:  \(locale)  engine: \(session.engine.rawValue)  terms: \(vocabulary.count)")
             print("raw:     \(raw)")
             print("rules:   \(RuleCleaner.clean(raw))")
         } catch {

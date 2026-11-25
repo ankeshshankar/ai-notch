@@ -34,6 +34,8 @@ final class Dictation: ObservableObject {
     private var levelClock: Date = .distantPast
     private var maxLength: DispatchWorkItem?
     private var front: (name: String?, bundle: String?) = (nil, nil)
+    /// The words hinted for the current dictation (engine and clean-up), set when recording starts.
+    private var vocabulary: [String] = []
     private var askedInputMonitoring = false
     /// Type-as-I-speak's typer for the dictation in progress, and which dictation that is (late
     /// results of an ended one are ignored).
@@ -93,24 +95,26 @@ final class Dictation: ObservableObject {
         guard #available(macOS 26.0, *) else { localeInstalled = nil; return }
         let id = prefs.locale
         Task { [weak self] in
-            guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: id)) else {
+            let prefer = await self?.prefs.enginePreference(for: id)
+            guard let found = await SpeechDictation.resolve(id, prefer: prefer) else {
                 await MainActor.run { self?.localeInstalled = nil; self?.lastNote = "Language not supported" }
                 return
             }
-            let installed = await SpeechDictation.isInstalled(locale)
+            let locale = found.locale
+            let installed = await SpeechDictation.isInstalled(locale, engine: found.engine)
             DictationLog.log.info("locale \(id, privacy: .public) -> \(locale.identifier, privacy: .public); installedLocales has it: \(installed, privacy: .public)")
             await MainActor.run { self?.localeInstalled = installed }
             guard self?.prefs.enabled == true else { return }
             // Even an installed model must be reserved for this app (no download then).
-            await self?.downloadLocale(locale, show: !installed)
+            await self?.downloadLocale(locale, prefer: prefer, show: !installed)
         }
     }
 
     @available(macOS 26.0, *)
-    private func downloadLocale(_ locale: Locale, show: Bool) async {
+    private func downloadLocale(_ locale: Locale, prefer: SpeechEngine?, show: Bool) async {
         if show { downloadProgress = 0 }
         do {
-            try await SpeechDictation.ensureAssets(for: locale) { fraction in
+            try await SpeechDictation.ensureAssets(for: locale, prefer: prefer) { fraction in
                 guard show else { return }
                 Task { @MainActor in Dictation.shared.downloadProgress = fraction }
             }
@@ -197,14 +201,17 @@ final class Dictation: ObservableObject {
         }
         let source = recorder!.format
         let id = prefs.locale
+        let prefer = prefs.enginePreference(for: id)
         var phraseHandler: (@Sendable (String) -> Void)?
         if typing { phraseHandler = { phrase in Dictation.deliver(phrase: phrase, session: session) } }
         let updateHandler: @Sendable (String, String) -> Void = { final, volatile in
             Dictation.deliver(final: final, volatile: volatile, session: session)
         }
+        let vocabulary = DictationHints.vocabulary(frontApp: front.name, bundleID: front.bundle, user: prefs.userTerms)
+        self.vocabulary = vocabulary
         speech = Task {
             let started = try await SpeechDictation.start(
-                localeIdentifier: id, source: source, pump: pump,
+                localeIdentifier: id, source: source, pump: pump, vocabulary: vocabulary, prefer: prefer,
                 onUpdate: updateHandler, onPhrase: phraseHandler)
             return SpeechSessionBox(started)
         }
@@ -349,7 +356,8 @@ final class Dictation: ObservableObject {
         pill.show(phase)
         let cleanup = endpointOverride.map { ClaudeCleanup(endpoint: $0) } ?? ClaudeCleanup()
         let result = await cleanup.clean(transcript: rules, fallback: rules, apiKey: key, style: style,
-                                         context: AppContext.of(appName: app.name, bundleID: app.bundle), appName: app.name)
+                                         context: AppContext.of(appName: app.name, bundleID: app.bundle), appName: app.name,
+                                         vocabulary: vocabulary)
         if let failure = result.failure { lastNote = "AI clean-up skipped: \(failure)" }
         // Never Devanagari when the words are kept, whatever the model sent.
         return style == .keepMyWords ? LatinScript.transliterateDevanagari(result.text) : result.text
