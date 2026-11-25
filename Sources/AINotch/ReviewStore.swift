@@ -342,8 +342,8 @@ final class ReviewStore: ObservableObject {
         if keys.count != waitingCount { waitingCount = keys.count }
     }
 
-    /// A review or follow-up finished: the alert (muted pull requests and the Setup tick respected;
-    /// Notifier posts it only while the screen is locked).
+    /// A review or follow-up finished: the alert, locked or not (muted pull requests and the Setup
+    /// tick respected).
     private func reviewFinished(_ ref: PullRequestRef, _ record: ReviewRecord) {
         recountWaiting(autoReview.ledger)
         guard notify.reviewDone, !muted.contains(ref.key) else { return }

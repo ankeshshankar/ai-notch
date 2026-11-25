@@ -293,8 +293,10 @@ extension Notifier: UNUserNotificationCenterDelegate {
 
 extension Notifier {
     /// A review or follow-up finished ("#214 web-app · Request changes · 1 blocking"); a click opens the window on it.
+    /// Unlike status news, a finished review notifies while the screen is unlocked too: it asks
+    /// for a decision, and reviews finish a few times a day at most. Setup's "Review done" turns it off.
     func postReviewDone(prID: String, title: String, body: String) {
-        guard isAvailable, Self.mayPostAlerts else { return }
+        guard isAvailable else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
