@@ -148,7 +148,7 @@ final class ReviewResumeTests: XCTestCase {
 
     func testInterruptedRunResumesOnceOnTheSameHead() {
         func go(_ r: ReviewRecord?, head: String? = "abcdef123456", draft: Bool = false, mine: Bool = false, auto: Bool = true) -> Bool {
-            ReviewLedger.shouldResume(r, head: head, isDraft: draft, iReview: true, myReviewDone: mine, autoOn: auto)
+            ReviewLedger.shouldResume(r, head: head, isDraft: draft, iReview: true, myReviewDone: mine, autoOn: auto, repos: ReviewRepos(entries: ["a"]))
         }
         XCTAssertEqual(interrupted().error, ReviewLedger.interruptedMessage)
         XCTAssertTrue(go(interrupted()))

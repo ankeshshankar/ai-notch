@@ -129,6 +129,8 @@ public struct ReviewOutput: Equatable, Sendable {
     public var durationSeconds: Double?
     /// The tools Claude Code refused (not in the allowed list): a review that needed one failed.
     public var denied: [String]
+    /// The session to resume for the chat (the id stays the same across `--resume`).
+    public var sessionID: String? = nil
 
     public static func parse(_ data: Data) -> ReviewOutput? {
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
@@ -138,7 +140,7 @@ public struct ReviewOutput: Equatable, Sendable {
         return ReviewOutput(text: object["result"] as? String ?? "", isError: object["is_error"] as? Bool ?? false,
                             costUSD: (object["total_cost_usd"] as? NSNumber)?.doubleValue,
                             durationSeconds: (object["duration_ms"] as? NSNumber).map { $0.doubleValue / 1000 },
-                            denied: names)
+                            denied: names, sessionID: object["session_id"] as? String)
     }
 }
 
@@ -168,6 +170,8 @@ public struct ReviewRecord: Codable, Sendable, Equatable {
     public var denied: [String]?
     /// This run is the one automatic retry of an interrupted run: if it is interrupted too, it stays failed.
     public var resumed: Bool?
+    /// The Claude Code session of the run, which the review window's chat continues.
+    public var sessionID: String?
 
     public init(key: String, head: String, phase: ReviewPhase, auto: Bool, queuedAt: Double) {
         self.key = key
@@ -371,6 +375,8 @@ public enum ReviewCommand {
         ---
         INPUT: PR number \(prNumber).
         Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(bbget ?? scratch + "/bbget") <url> [file-name]`, which sends the token itself; with a plain file name (no folder) the response is saved in \(scratch) under that name, to Read. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
+
+        \(ReviewChat.commentsInstruction(scratch: scratch))
         """
     }
 
