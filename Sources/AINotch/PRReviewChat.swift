@@ -20,7 +20,8 @@ final class PRChatRunner: @unchecked Sendable {
         var sessionID: String
         var prompt: String
         var system: String
-        var token: String
+        /// Read in the background: the Keychain lookup runs a child process.
+        var token: @Sendable () -> String
     }
 
     enum Outcome: Sendable {
@@ -71,7 +72,7 @@ final class PRChatRunner: @unchecked Sendable {
         process.arguments = ReviewChat.arguments(sessionID: job.sessionID, scratch: job.dir.path, systemPrompt: job.system, agentsJSON: agentsJSON,
                                                  hookCommand: PRReviewRunner.hookCommand(), skillName: names.skill)
         process.currentDirectoryURL = URL(fileURLWithPath: job.repoPath, isDirectory: true)
-        process.environment = PRReviewRunner.environment(token: job.token, dir: job.dir.path, title: "PR chat #\(job.ref.id) · \(job.ref.repo)")
+        process.environment = PRReviewRunner.environment(token: job.token(), dir: job.dir.path, title: "PR chat #\(job.ref.id) · \(job.ref.repo)")
         let input = Pipe(), output = Pipe()
         process.standardInput = input
         process.standardOutput = output
@@ -174,7 +175,7 @@ final class PRChatSession: ObservableObject {
 
     /// Where the repository is cloned (nil: the chat cannot run, the cards still work).
     var repoPath: () -> String? = { nil }
-    var token: () -> String = { KeychainItem.read(service: BitbucketConfig.tokenService)?.secret ?? "" }
+    var token: @Sendable () -> String = { KeychainItem.read(service: BitbucketConfig.tokenService)?.secret ?? "" }
 
     init(ref: PullRequestRef, head: String, folder: URL) {
         self.ref = ref
@@ -306,7 +307,7 @@ final class PRChatSession: ObservableObject {
 
     private func turn(prompt: String, drafting: Bool) {
         guard let sessionID = log.sessionID else { notice = "No session to continue: use Re-review"; return }
-        guard let repo = repoPath() else { notice = "No local clone of \(ref.repo) in builds.json"; return }
+        guard let repo = repoPath() else { notice = "No local clone of \(ref.repo) in the repositories list"; return }
         running = true
         self.drafting = drafting
         stopped = false
@@ -316,7 +317,7 @@ final class PRChatSession: ObservableObject {
         rawStream = ""
         activity = "Thinking…"
         let system = ReviewChat.systemPrompt(cards: log.cards, existing: existing, head: head, scratch: folder.path)
-        let job = PRChatRunner.Job(ref: ref, head: head, repoPath: repo, dir: folder, sessionID: sessionID, prompt: prompt, system: system, token: token())
+        let job = PRChatRunner.Job(ref: ref, head: head, repoPath: repo, dir: folder, sessionID: sessionID, prompt: drafting ? prompt : ReviewChat.turnPrompt(prompt), system: system, token: token)
         let runner = PRChatRunner()
         self.runner = runner
         runner.start(job, onEvent: { [weak self] event in

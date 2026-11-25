@@ -80,6 +80,14 @@
   show sample pull requests linked to sessions named `alpha` to `epsilon` (make them with the hook
   as `scripts/dev/ci-screenshots.sh` does) instead of the real ones. Set
   `CLAUDE_NOTCH_BUILDS_CONFIG` to a file holding `{}` to keep the preview off Datadog's Keychain item.
+- `AINotch --review-selfcheck` — the review window's posting and cards on a dry run (nothing is
+  sent): inline and general comment requests, the card defaults, a duplicate on the same line,
+  blocked wording, one post per card, the approve request; exits 1 on any failure.
+  `AINotch --review-window-preview [--select N] [--overlay post|approve|changes] [--size WxH]`
+  opens the review window on made-up pull requests; it refuses to run unless
+  `CLAUDE_NOTCH_REVIEWS` and `CLAUDE_NOTCH_REVIEW_LEDGER` point at a scratch folder and
+  `AI_NOTCH_REVIEW_DRYRUN=1`. `AINotch --review-chat-live <ws/repo#id> <folder> <message> [--draft]`
+  runs one real chat turn (or the comment draft) on an existing review folder; posts are dry runs.
 - `AINotch --pr-selfcheck` — the pull-request data layer's pure parts (parsing, what needs you,
   events and the seen-state, merged, declined and ready-to-merge news and their dedup, the budget
   split, a session's pull request: Bitbucket remotes, the link by branch (including `git` in a

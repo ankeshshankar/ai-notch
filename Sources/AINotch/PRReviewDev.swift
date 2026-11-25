@@ -10,6 +10,9 @@ import SwiftUI
 enum PRReviewDev {
     static func runIfAsked(_ arguments: [String]) {
         if arguments.contains("--review-selfcheck") { exit(selfCheck()) }
+        if let at = arguments.firstIndex(of: "--review-chat-live"), at + 3 < arguments.count {
+            exit(liveChat(workspace: arguments[at + 1], folder: arguments[at + 2], message: arguments[at + 3], draft: arguments.contains("--draft")))
+        }
     }
 
     // MARK: Self-check
@@ -90,6 +93,30 @@ enum PRReviewDev {
         PRReviewAPI.fixtureComments = nil
         print(failures == 0 ? "review selfcheck ok (\(checks) checks)" : "review selfcheck FAILED (\(failures) of \(checks))")
         return failures == 0 ? 0 : 1
+    }
+
+    /// One real turn on an existing review folder (`<ws>/<repo>#<id> <folder> <message>`); every post is a dry run.
+    static func liveChat(workspace key: String, folder: String, message: String, draft: Bool) -> Int32 {
+        PRReviewAPI.forceDryRun = true
+        guard let hash = key.firstIndex(of: "#"), let slash = key.firstIndex(of: "/"), let id = Int(key[key.index(after: hash)...]) else { print("bad key"); return 2 }
+        let ref = PullRequestRef(workspace: String(key[..<slash]), repo: String(key[key.index(after: slash)..<hash]), id: id)
+        let url = URL(fileURLWithPath: folder, isDirectory: true)
+        var finished = false
+        Task { @MainActor in
+            let session = PRChatSession(ref: ref, head: "live", folder: url)
+            session.repoPath = { PRReviewStore.repoPath(ref) }
+            print("session \(session.sessionID ?? "none"), cards \(session.cards.count), canChat \(session.canChat)")
+            if draft { session.draftComments() } else { session.send(message) }
+            if let n = session.notice { print("notice: \(n)") }
+            while session.running { try? await Task.sleep(nanoseconds: 200_000_000) }
+            print("after: notice \(session.notice ?? "-"), denied \(session.denied)")
+            for m in session.log.messages.suffix(2) { print("[\(m.role.rawValue)\(m.isError ? " ERROR" : "")] \(m.text.prefix(600))") }
+            print("cards now \(session.cards.count): \(session.cards.map { "\($0.id) \($0.severity.rawValue) \($0.path ?? "-"):\($0.line ?? 0)" })")
+            finished = true
+        }
+        let limit = Date().addingTimeInterval(240)
+        while !finished, Date() < limit { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        return finished ? 0 : 1
     }
 
     // MARK: Preview
@@ -235,7 +262,7 @@ enum PRReviewDev {
           {"id":"n-4f2a1c","severity":"should-fix","path":"src/profile/photo.ts","line":42,"title":"Thumbnail cache","body":"Does removing the photo also need to clear the cached thumbnail? It looks like it is only dropped on the next upload.","include":true,"badge":"new"}
          ],
          "messages":[
-          {"id":"m1","role":"user","text":"Make the second one softer, and draft a comment about the thumbnail cache.","at":1},
+          {"id":"m1","role":"user","text":"Make the second one softer, and draft a comment about the thumbnail cache.","at":1,"newCards":[],"revisedCards":[],"isError":false},
           {"id":"m2","role":"assistant","text":"Softened the second one into a question. I also drafted a note on the thumbnail cache: `removePhoto` clears the stored file but `getThumbnail` still serves the cached copy until the next upload (`photo.ts:42`).","at":2,"newCards":["n-4f2a1c"],"revisedCards":["c2"],"isError":false}
          ]}
         """

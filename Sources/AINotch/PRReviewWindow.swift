@@ -107,6 +107,8 @@ final class PRReviewWindowController: NSObject, NSWindowDelegate {
         let window = self.window ?? makeWindow(model)
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        // No text field takes the focus (and selects its text) on open; the user clicks where to type.
+        DispatchQueue.main.async { window.makeFirstResponder(nil) }
     }
 
     private func makeWindow(_ model: PRReviewWindowModel) -> NSWindow {

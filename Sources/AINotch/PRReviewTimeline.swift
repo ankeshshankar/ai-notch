@@ -268,6 +268,7 @@ struct PRReviewTimeline: View {
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .onAppear { if !session.log.messages.isEmpty { DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) } } }
                 .onChange(of: session.log.messages.count) { withAnimation(Motion.ease(0.2)) { proxy.scrollTo("bottom", anchor: .bottom) } }
                 .onChange(of: session.streaming) { proxy.scrollTo("bottom", anchor: .bottom) }
             }

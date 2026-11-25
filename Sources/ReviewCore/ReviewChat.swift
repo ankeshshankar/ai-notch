@@ -428,13 +428,13 @@ public enum ReviewChat {
         var text = """
         You are continuing a pull request review with the person who owns it, in a chat. Answer briefly and concretely; cite file:line. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository; the only files you may write are inside \(scratch). Use the same read-only tools as during the review.
 
-        When the person asks you to draft, add, soften, reword or drop a review comment, propose it as a fenced block the app turns into a card they can switch on and post themselves. One block per comment, exactly this shape, with valid JSON on one or more lines:
+        When the person asks you to draft, add, soften, reword or drop a review comment, propose it as a fenced block the app turns into a card they can switch on and post themselves. Wording written outside a block changes nothing, so every reply that drafts or rewords a comment must contain the block. One block per comment, exactly this shape, with valid JSON on one or more lines:
 
         ```comment
         {"path": "src/a.ts", "line": 12, "severity": "should-fix", "body": "the comment", "replaces": "c2"}
         ```
 
-        severity is blocking, should-fix or nit. path and line may be left out for a general comment. Add "replaces" with the card id only when you revise that card. Say in one line outside the block what you changed.
+        severity is blocking, should-fix or nit. path and line may be left out for a general comment. Add "replaces" with the card id only when you revise that card. Say in one line outside the block what you changed. Never edit or rewrite comments.json (or any file) to change a comment: the cards live in the app, and only a block like this changes them.
 
         Comment wording: it is posted under the person's own name, so write it the way they would on a pull request: short, plain, specific, with the fix. No lens codes such as "C3 [B]" or "— security", and never mention AI, Claude, a bot or "the review".
 
@@ -465,6 +465,13 @@ public enum ReviewChat {
         """
         From the review you just did (its findings are also in \(scratch)/review.md), \(commentsInstruction(scratch: scratch).replacingOccurrences(of: "Besides the report, write", with: "write")) Answer with one line when it is written.
         """
+    }
+
+    /// What goes in on standard input for a typed message: the text plus a one-line reminder (not shown
+    /// in the chat) that a comment changes only through a block, since the session's own history says
+    /// the review wrote `comments.json` by hand.
+    public static func turnPrompt(_ message: String) -> String {
+        message + "\n\n[Reminder: to draft, add or reword a pull request comment, put a ```comment fenced block in your reply whose content is one JSON object, for example {\"path\": \"src/a.ts\", \"line\": 12, \"severity\": \"should-fix\", \"body\": \"the comment\", \"replaces\": \"c2\"} (replaces only when revising that card). Do not edit comments.json or any other file for that.]"
     }
 
     /// A user's message, with a turn's own limits kept out of the visible chat.
