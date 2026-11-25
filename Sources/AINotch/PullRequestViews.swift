@@ -416,10 +416,11 @@ struct PRPanelRowView: View {
                 }
             }
             HStack(spacing: 6) {
-                PRStatusGlyphs(pr: pr)
+                PRStatusGlyphs(pr: pr).layoutPriority(1)
                 if let review, PRReviewStore.supports(pr) { PRReviewChip(pr: pr, store: review) }
                 if pr.updatedAt > 0 {
                     Text(ago(now - pr.updatedAt)).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1).fixedSize()
+                        .layoutPriority(1)
                 }
                 Spacer(minLength: 0)
             }

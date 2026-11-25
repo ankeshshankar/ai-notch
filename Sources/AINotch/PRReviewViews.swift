@@ -16,10 +16,9 @@ struct PRReviewChip: View {
             let (text, color, help) = Self.describe(found.record, outdated: found.outdated)
             HStack(spacing: 3) {
                 Image(systemName: Self.symbol(found.record)).font(Typo.micro(.bold)).decorative()
-                Text(text).font(Typo.label(.medium)).lineLimit(1)
+                Text(text).font(Typo.label(.medium)).lineLimit(1).truncationMode(.tail)
             }
             .foregroundStyle(color)
-            .fixedSize()
             .help(help)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Review: \(text)")
@@ -68,37 +67,68 @@ struct PRReviewBar: View {
         let phase = found?.record.phase
         let active = phase == .queued || phase == .reviewing
         let id = pr.ref.key
-        HStack(spacing: 6) {
+        Group {
             if let acting = store.acting[id] {
                 Text(acting).font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
+                    .lineLimit(1).truncationMode(.tail).frame(maxWidth: .infinity, alignment: .leading)
             } else if let confirming {
-                Text(confirming == .approve ? "Approve #\(pr.ref.id)?" : "Request changes on #\(pr.ref.id)?")
+                let question = Text(confirming == .approve ? "Approve #\(pr.ref.id)?" : "Request changes on #\(pr.ref.id)?")
                     .font(Typo.label(.semibold)).foregroundStyle(Palette.ink)
-                pill(confirming == .approve ? "Confirm approve" : "Confirm request", prominent: true) {
-                    cancelConfirm()
-                    store.perform(confirming, on: pr)
+                let buttons = HStack(spacing: 6) {
+                    pill(confirming == .approve ? "Confirm approve" : "Confirm request", prominent: true) {
+                        cancelConfirm()
+                        store.perform(confirming, on: pr)
+                    }
+                    pill("Cancel") { cancelConfirm() }
                 }
-                pill("Cancel") { cancelConfirm() }
+                // One line when it fits, else the question over the buttons.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) { question.lineLimit(1).fixedSize(); Spacer(minLength: 0); buttons }
+                    VStack(alignment: .trailing, spacing: 4) {
+                        question.lineLimit(1).truncationMode(.tail).frame(maxWidth: .infinity, alignment: .leading)
+                        buttons
+                    }
+                }
             } else {
-                if let notice = store.notices[id] {
-                    Text(notice).font(Typo.label(.medium)).foregroundStyle(notice.hasPrefix("Not") || notice.hasPrefix("Needs") ? Palette.waiting : Palette.done)
+                let notice = store.notices[id].map { text in
+                    Text(text).font(Typo.label(.medium)).foregroundStyle(text.hasPrefix("Not") || text.hasPrefix("Needs") ? Palette.waiting : Palette.done)
                         .lineLimit(1).truncationMode(.tail)
                         .onTapGesture { store.clearNotice(id) }
                 }
-                Spacer(minLength: 0)
-                if let found, let url = store.reportURL(found.record) {
-                    pill("View report") { NSWorkspace.shared.open(url) }
+                let report: URL? = found.flatMap { store.reportURL($0.record) }
+                let viewReport = report.map { url in pill("View report") { NSWorkspace.shared.open(url) } }
+                let others = HStack(spacing: 6) {
+                    if active {
+                        pill("Cancel review") { store.cancel(pr) }
+                    } else {
+                        pill(found == nil ? "Review now" : "Re-review") { store.reviewNow(pr) }
+                    }
+                    if store.gate(.requestChanges, for: pr).isAllowed {
+                        pill("Request changes") { ask(.requestChanges) }
+                    }
+                    if store.gate(.approve, for: pr).isAllowed {
+                        pill("Approve", prominent: true) { ask(.approve) }
+                    }
                 }
-                if active {
-                    pill("Cancel review") { store.cancel(pr) }
-                } else {
-                    pill(found == nil ? "Review now" : "Re-review") { store.reviewNow(pr) }
-                }
-                if store.gate(.requestChanges, for: pr).isAllowed {
-                    pill("Request changes") { ask(.requestChanges) }
-                }
-                if store.gate(.approve, for: pr).isAllowed {
-                    pill("Approve", prominent: true) { ask(.approve) }
+                // Pills keep their full labels: on one line when they fit, else the notice and
+                // View report on the first line and the actions, right-aligned, on the second.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) {
+                        notice.fixedSize()
+                        Spacer(minLength: 0)
+                        viewReport
+                        others
+                    }
+                    VStack(alignment: .trailing, spacing: 4) {
+                        if notice != nil || viewReport != nil {
+                            HStack(spacing: 6) {
+                                notice
+                                Spacer(minLength: 0)
+                                viewReport
+                            }
+                        }
+                        others
+                    }
                 }
             }
         }
@@ -121,7 +151,7 @@ struct PRReviewBar: View {
 
     private func pill(_ title: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(Typo.label(.medium)).lineLimit(1)
+            Text(title).font(Typo.label(.medium)).lineLimit(1).fixedSize()
                 .foregroundStyle(prominent ? Palette.onDone : Palette.ink2)
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(Capsule().fill(prominent ? Palette.done : Palette.chip))
