@@ -549,6 +549,7 @@ enum PRReviewDev {
 
         let store = PRReviewStore()
         if args.contains("--replies") { replyFixtures(store: store, ref: web(214), head: heads[0]) }
+        if args.contains("--override") { overrideFixtures(store: store, ref: web(214), head: heads[0], resolved: !args.contains("--unresolved")) }
         let list = PRListSource()
         let jane = PRPerson(uuid: "u-jane", name: "Jane Doe"), john = PRPerson(uuid: "u-john", name: "John Roe"), sam = PRPerson(uuid: "u-sam", name: "Sam Poe")
         func people(_ id: Int) -> [PRParticipant] {
@@ -578,6 +579,7 @@ enum PRReviewDev {
         case "changes": model.overlay = .action(.requestChanges)
         case "combined": model.overlay = .combined(.postAndRequestChanges)
         case "thread": model.overlay = .thread(.replyAndResolve, 302)
+        case "override": model.overlay = .override
         case "keys": model.showKeys = true
         default: break
         }
@@ -597,6 +599,24 @@ enum PRReviewDev {
             }
             FileHandle.standardError.write(Data("review-window \(info.number) \(Int(info.frame.minX)) \(Int(info.frame.minY)) \(Int(info.frame.width)) \(Int(info.frame.height))\n".utf8))
         }
+    }
+
+    /// `--override`: two posted comments (threads resolved on Bitbucket unless `--unresolved`), a should-fix and a nit on Skip, a
+    /// REQUEST CHANGES review with one blocking finding in its count: "Approve anyway" is on offer.
+    @MainActor private static func overrideFixtures(store: PRReviewStore, ref: PullRequestRef, head: String, resolved: Bool) {
+        store.meUUID = { "u-me" }
+        let chat = """
+        {"version":1,"sessionID":"s","seeded":true,"cards":[
+         {"id":"c1","severity":"blocking","path":"src/profile/photo.service.ts","line":42,"title":"Delete by id","body":"No owner check on the delete.","include":true,"postedID":301,"postedAt":1,"status":"still_open"},
+         {"id":"c2","severity":"should-fix","path":"src/profile/photo.service.ts","line":77,"title":"Default avatar","body":"Set the default avatar instead of clearing.","include":true,"postedID":302,"postedAt":1,"status":"fixed"},
+         {"id":"c3","severity":"should-fix","path":"src/profile/photo.ts","line":9,"title":"Empty list test","body":"Add a test for the empty list.","include":false,"status":"unclear"},
+         {"id":"c4","severity":"nit","body":"Rename x to count.","include":false}],"messages":[]}
+        """
+        try? Data(chat.utf8).write(to: PRReviewStore.folder(ref, head: head).appendingPathComponent("chat.json"))
+        PRReviewAPI.fixtureRaw = [
+            RawComment(id: 301, author: "Sam Poe", authorUUID: "u-me", path: "src/profile/photo.service.ts", line: 42, text: "No owner check on the delete.", createdOn: "2026-11-20T10:00:00Z", resolved: resolved),
+            RawComment(id: 302, author: "Sam Poe", authorUUID: "u-me", path: "src/profile/photo.service.ts", line: 77, text: "Set the default avatar.", createdOn: "2026-11-20T10:05:00Z", resolved: true),
+        ]
     }
 
     /// `--replies`: authors answered my two posted comments (one with a long reply), plus a comment I wrote by hand; the AI's

@@ -731,7 +731,7 @@ struct PRReviewConfirm: View {
             }
             .padding(8).frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
-            Text("All your threads are resolved and nothing is switched on. Pipeline \(PRReviewBadge.pipeline(pr).text.lowercased()) · commit \(String(pr.head?.prefix(7) ?? "—")).")
+            Text("All your threads are resolved and nothing is switched on. \(PRReviewBadge.pipeline(pr).text) · commit \(String(pr.head?.prefix(7) ?? "—")).")
                 .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
         } else {
             Text("Not available now: " + (session.map { PRReviewDetail.reason(.blocked(reasonText(store.overrideGate(for: pr, session: $0)))) } ?? "no review")).font(Typo.label(.medium)).foregroundStyle(Palette.waiting)
