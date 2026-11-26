@@ -42,6 +42,9 @@ final class PRReviewWindowModel: ObservableObject {
     @Published var showKeys = false
     /// Bumped by ⌘L: the chat box takes the focus.
     @Published var focusChat = 0
+    /// The manual Refresh (nil in a preview on fixtures): its state and the read.
+    var refresh: PRRefreshState?
+    var refreshAction: ((String?) -> Void)?
     private var sessions: [String: PRChatSession] = [:]
 
     init(store: PRReviewStore, list: PRListSource) {
@@ -130,6 +133,8 @@ final class PRReviewWindowController: NSObject, NSWindowDelegate {
             list.branches = PRReviewStore.branchPRs(in: ledger)
         }
         let model = PRReviewWindowModel(store: reviews.autoReview, list: list)
+        model.refresh = reviews.refresh
+        model.refreshAction = { [weak reviews] repoKey in reviews?.refreshNow(repoKey: repoKey) }
         self.model = model
         return model
     }
@@ -221,7 +226,15 @@ struct PRReviewWindowView: View {
             }
         }
         .frame(minWidth: 480, minHeight: 420)
+        .background(refreshShortcut)
         .onAppear { if model.selected == nil { model.selected = model.prs.first?.id } }
+    }
+
+    /// ⌘⇧R refreshes the lists (⌘R stays Re-review).
+    private var refreshShortcut: some View {
+        Button("Refresh pull requests") { model.refreshAction?(model.current?.ref.repoKey) }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true)
     }
 
     private var emptyState: some View {
@@ -252,7 +265,14 @@ struct PRReviewWindowView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    sectionTitle("To review · \(list.prs.count)")
+                    HStack(spacing: 0) {
+                        sectionTitle("To review · \(list.prs.count)")
+                        Spacer(minLength: 4)
+                        if let state = model.refresh {
+                            PRRefreshButton(state: state, updatedAt: state.updatedAt, now: Date().timeIntervalSince1970) { model.refreshAction?(model.current?.ref.repoKey) }
+                                .padding(.top, 6)
+                        }
+                    }
                     rows(list.prs)
                     sectionTitle("Mine · \(list.mine.count)", info: "Your own open pull requests. Review one by hand: the result is for you only, nothing is posted, approved or requested.")
                     rows(list.mine)

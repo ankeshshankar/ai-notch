@@ -648,3 +648,29 @@ enum PRBudget {
         return mine + review
     }
 }
+
+
+/// The manual refresh's rule: a minute between two, and the whole read only while the lane has room
+/// for it under its hourly target; else Mine and one repository.
+enum PRRefresh {
+    static let cooldown: Double = 60
+    /// The notch opening reads the review lists when the oldest is older than this.
+    static let openStale: Double = 300
+
+    enum Plan: Equatable, Sendable {
+        case cooldown(remaining: Double)
+        case all
+        case limited
+    }
+
+    /// `used` requests in the lane in the last hour, `cost` of the whole read (Mine per workspace plus each repository).
+    static func plan(now: Double, lastManual: Double, used: Int, target: Double, cost: Int) -> Plan {
+        if now - lastManual < cooldown { return .cooldown(remaining: cooldown - (now - lastManual)) }
+        return Double(used + cost) <= target ? .all : .limited
+    }
+
+    /// Whether the notch opening should read now: the oldest review list is stale (never read counts).
+    static func readsOnOpen(now: Double, oldestReview: Double, lastManual: Double) -> Bool {
+        now - lastManual >= cooldown && now - oldestReview > openStale
+    }
+}

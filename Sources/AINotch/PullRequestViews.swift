@@ -259,6 +259,7 @@ struct PullRequestsNeedYou: View {
                     Text("\(reviews.attention.count) need\(reviews.attention.count == 1 ? "s" : "") you")
                         .font(Typo.label(.medium)).foregroundStyle(Palette.waiting).lineLimit(1)
                         .help(PRCounts.text(need: reviews.attention.count, ready: reviews.waitingCount))
+                    PRRefreshButton(state: reviews.refresh, updatedAt: reviews.updatedAt, now: now) { reviews.refreshNow(repoKey: nil) }
                 }
                 .padding(.top, 4)
             }
@@ -361,10 +362,9 @@ struct PullRequestsPanel: View {
                 if let status = reviews.status {
                     Text(status.text).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
                     InfoMark(text: status.help)
-                } else if reviews.updatedAt > 0 {
-                    Text("read \(ago(now - reviews.updatedAt))").font(Typo.label()).foregroundStyle(Palette.ink3)
                 }
                 Spacer()
+                PRRefreshButton(state: reviews.refresh, updatedAt: reviews.updatedAt, now: now, showsLabel: true) { reviews.refreshNow(repoKey: nil) }
                 if reviews.status == nil, !reviews.attention.isEmpty {
                     Text("\(reviews.attention.count) need\(reviews.attention.count == 1 ? "s" : "") you")
                         .font(Typo.label(.medium)).foregroundStyle(Palette.waiting)
@@ -789,4 +789,40 @@ struct PRRowActions: View {
 extension PullRequestRef {
     /// "acme-api #3524": a plain number, never "3,524" (a Text built from an Int groups digits).
     var label: String { "\(repo) #\(id)" }
+}
+
+/// The manual Refresh: an arrow that spins while the lists are read, disabled for 60 s after.
+/// `updatedAt` (when given) adds a muted "Updated 2m ago" label; the tooltip carries the same.
+struct PRRefreshButton: View {
+    @ObservedObject var state: PRRefreshState
+    var updatedAt: Double = 0
+    var now: Double = Date().timeIntervalSince1970
+    var showsLabel = false
+    var action: () -> Void
+
+    var body: some View {
+        let updated = updatedAt > 0 ? "Updated \(ago(max(0, now - updatedAt)))" : nil
+        let help = [state.help(cooldown: state.cooling), state.refreshing || state.note != nil ? nil : updated].compactMap { $0 }.joined(separator: " · ")
+        HStack(spacing: 4) {
+            if showsLabel, let updated, state.note == nil {
+                Text(updated).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
+            } else if showsLabel, let note = state.note {
+                Text(note).font(Typo.label()).foregroundStyle(Palette.waiting).lineLimit(1)
+            }
+            Button(action: action) {
+                ZStack {
+                    if state.spinning {
+                        Spinner(color: adaptiveNS(light: gray(0, 0.58), dark: gray(1, 0.5)), size: 10)
+                    } else {
+                        Image(systemName: "arrow.clockwise").font(Typo.micro(.bold)).foregroundStyle(state.cooling ? Palette.ink3.opacity(0.5) : Palette.ink3)
+                    }
+                }
+                .frame(width: 18, height: 18).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(state.spinning || state.cooling)
+            .help(help)
+            .ax("Refresh pull requests", value: help)
+        }
+    }
 }

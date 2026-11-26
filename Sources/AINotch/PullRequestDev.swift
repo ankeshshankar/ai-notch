@@ -260,6 +260,23 @@ enum PullRequestDev {
                    && PullRequestsNeedYou.rowLimit(maxRows: 6, pipelineRows: 6, hasPipelines: true) == 2 && PullRequestsNeedYou.rowLimit(maxRows: 8, pipelineRows: 1, hasPipelines: true) == 5, "rows: up to five, two at least, pipelines first")
         }
 
+        // The manual refresh: cooldown, the lane budget, the notch opening (fixture clock, no network).
+        do {
+            let t: Double = 10_000
+            if case .cooldown(let left) = PRRefresh.plan(now: t, lastManual: t - 20, used: 0, target: 120, cost: 10) {
+                expect(abs(left - 40) < 0.001, "refresh: 20 s after the last, 40 s remain")
+            } else { expect(false, "refresh: inside the cooldown it waits") }
+            expect(PRRefresh.plan(now: t, lastManual: t - 61, used: 0, target: 120, cost: 10) == .all, "refresh: after the cooldown, under budget, reads everything")
+            expect(PRRefresh.plan(now: t, lastManual: -.infinity, used: 110, target: 120, cost: 10) == .all, "refresh: exactly at the target still reads everything")
+            expect(PRRefresh.plan(now: t, lastManual: t - 61, used: 111, target: 120, cost: 10) == .limited, "refresh: over the target reads Mine and one repository only")
+            expect(PRRefresh.plan(now: t, lastManual: t - 59.9, used: 500, target: 120, cost: 10) != .all && PRRefresh.plan(now: t, lastManual: t - 59.9, used: 500, target: 120, cost: 10) != .limited, "refresh: the cooldown wins over the budget")
+            expect(PRRefresh.readsOnOpen(now: t, oldestReview: t - 301, lastManual: -.infinity), "open: lists older than 5 minutes are read")
+            expect(!PRRefresh.readsOnOpen(now: t, oldestReview: t - 299, lastManual: -.infinity), "open: fresher lists are not")
+            expect(PRRefresh.readsOnOpen(now: t, oldestReview: 0, lastManual: -.infinity), "open: never-read lists are read")
+            expect(!PRRefresh.readsOnOpen(now: t, oldestReview: t - 900, lastManual: t - 30), "open: the cooldown holds it back")
+            expect(ReviewKeys.help.contains { $0.keys == "⌘⇧R" }, "refresh: the shortcut is in the keys list")
+        }
+
         // The review hash.
         expect(PREvents.hash(["a": "approved", "b": "changes_requested"]) == PREvents.hash(["b": "changes_requested", "a": "approved"]), "hash: order does not matter")
         expect(PREvents.hash(["a": "approved"]) != PREvents.hash(["a": "changes_requested"]), "hash: a changed review changes it")

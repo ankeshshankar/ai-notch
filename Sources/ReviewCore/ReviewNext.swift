@@ -514,6 +514,7 @@ public enum ReviewKeys {
         ("⌘↩", "Post the added comments (asks first)"),
         ("⌘R", "Re-review (follow-up when there are new commits)"),
         ("⌘L", "Focus the chat box"),
+        ("⌘⇧R", "Refresh the pull request lists"),
     ]
 }
 

@@ -461,6 +461,7 @@ private struct SessionList: View {
                 Spacer(minLength: 4)
                 Text("\(reviews.attention.count) need\(reviews.attention.count == 1 ? "s" : "") you")
                     .font(Typo.label(.medium)).foregroundStyle(Palette.waiting).lineLimit(1)
+                PRRefreshButton(state: reviews.refresh, updatedAt: reviews.updatedAt, now: store.now) { reviews.refreshNow(repoKey: nil) }
             }
         }
     }

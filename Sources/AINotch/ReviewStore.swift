@@ -55,6 +55,11 @@ final class ReviewStore: ObservableObject {
     let autoReview = PRReviewStore()
     private var watchedKeys: Set<String> = []
 
+    /// The manual Refresh's state (button spin, cooldown, the last note).
+    let refresh = PRRefreshState()
+    /// When the review lists were last all read (0: not yet), from the source.
+    private var reviewOldestAt: Double = 0
+
     private var source: PullRequestSource?
     private var timer: Timer?
     /// The last snapshot's pull requests, before muting.
@@ -146,7 +151,8 @@ final class ReviewStore: ObservableObject {
             all = mine + toReview
             autoReview.injectLedgerForCheck(BoardFixtures.ledger)
             refreshAttention()
-            updatedAt = Date().timeIntervalSince1970
+            updatedAt = Date().timeIntervalSince1970 - 130
+            refresh.updatedAt = updatedAt
             return
         }
         startConfigured()
@@ -196,6 +202,23 @@ final class ReviewStore: ObservableObject {
     /// The notch opened: mine is read if older than a minute.
     func panelOpened() {
         if let source { Task { await source.refreshSoon() } }
+        // The review lists last read more than 5 minutes ago: one manual-style read (same cooldown and budget rule).
+        let now = Date().timeIntervalSince1970
+        if isOn, PRRefresh.readsOnOpen(now: now, oldestReview: reviewOldestAt, lastManual: refresh.lastRunAt) {
+            refreshNow(repoKey: nil)
+        }
+    }
+
+    /// The Refresh button (and the notch opening): reads Mine and To review now, bypassing the
+    /// intervals; the lane budget decides whether that is every repository or Mine plus `repoKey`.
+    func refreshNow(repoKey: String?) {
+        guard let source, !refresh.refreshing, !refresh.coolingDown() else { return }
+        let started = Date().timeIntervalSince1970
+        refresh.begin(at: started)
+        Task { @MainActor in
+            let plan = await source.refreshNow(repoKey: repoKey)
+            if case .cooldown = plan { refresh.cancel() }
+        }
     }
 
     /// One of my pipelines is running (BuildStore knows): the review lists slow to every 20 min.
@@ -239,6 +262,9 @@ final class ReviewStore: ObservableObject {
         if snapshot.status != status { status = snapshot.status }
         if snapshot.me != me { me = snapshot.me }
         if snapshot.mineFetchedAt != updatedAt { updatedAt = snapshot.mineFetchedAt }
+        reviewOldestAt = snapshot.reviewOldestAt
+        if refresh.updatedAt != snapshot.mineFetchedAt { refresh.updatedAt = snapshot.mineFetchedAt }
+        refresh.observe(doneAt: snapshot.manualDoneAt, note: snapshot.manualNote)
         if let source {
             Task {
                 let (count, notModified) = await source.debugCounts()
@@ -421,5 +447,70 @@ final class ReviewStore: ObservableObject {
         let parts = order.compactMap { kind in count.byKind[kind].flatMap { $0 > 0 ? "\(kind) \($0)" : nil } }
         return "\(count.total) in the last hour" + (parts.isEmpty ? "" : " (" + parts.joined(separator: ", ") + ")")
             + (notModified > 0 ? ", \(notModified) unchanged" : "")
+    }
+}
+
+
+/// The manual Refresh's state, shared by its three buttons: spinning while the read runs, a
+/// 60 s cooldown after it (PRRefresh.cooldown), a short note when it failed or was cut down.
+@MainActor
+final class PRRefreshState: ObservableObject {
+    @Published private(set) var refreshing = false
+    @Published private(set) var note: String?
+    @Published private(set) var cooling = false
+    /// When Mine was last read (for the "Updated 2m ago" label of the window's button).
+    @Published var updatedAt: Double = 0
+    private(set) var lastRunAt: Double = -.infinity
+    private var timeout: Task<Void, Never>?
+    private var coolTask: Task<Void, Never>?
+
+    /// Dev: the spinner stays on (`--prs-refreshing`) so a preview can show it.
+    static var pinnedSpin: Bool { CommandLine.arguments.contains("--prs-refreshing") }
+    var spinning: Bool { refreshing || Self.pinnedSpin }
+
+    func coolingDown(now: Double = Date().timeIntervalSince1970) -> Bool { now - lastRunAt < PRRefresh.cooldown }
+
+    func begin(at now: Double) {
+        lastRunAt = now
+        refreshing = true
+        note = nil
+        cooling = true
+        coolTask?.cancel()
+        coolTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(PRRefresh.cooldown * 1_000_000_000))
+            if !Task.isCancelled { self?.cooling = false }
+        }
+        // The read never answered (no source tick): stop spinning after a while.
+        timeout?.cancel()
+        timeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            if !Task.isCancelled { self?.refreshing = false }
+        }
+    }
+
+    /// The source said "cooldown": nothing was read.
+    func cancel() {
+        refreshing = false
+        timeout?.cancel()
+    }
+
+    /// A snapshot arrived: the manual read finished when its stamp is not older than the start.
+    func observe(doneAt: Double, note newNote: String?) {
+        guard refreshing, doneAt >= lastRunAt, doneAt > 0 else { return }
+        refreshing = false
+        timeout?.cancel()
+        note = newNote
+        guard newNote != nil else { return }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            self?.note = nil
+        }
+    }
+
+    func help(cooldown: Bool) -> String {
+        if let note { return note }
+        if refreshing { return "Reading pull requests…" }
+        if cooldown { return "Refreshed just now" }
+        return "Read Mine and To review now"
     }
 }

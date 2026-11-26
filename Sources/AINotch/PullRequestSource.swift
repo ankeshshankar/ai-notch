@@ -36,8 +36,13 @@ struct PullRequestSnapshot: Equatable, Sendable {
     /// When mine and the review lists were last read.
     var mineFetchedAt: Double = 0
     var reviewFetchedAt: Double = 0
+    /// The oldest review list's read time (0: a repository not read yet).
+    var reviewOldestAt: Double = 0
     var repoCount = 0
     var me: BitbucketOwner?
+    /// When the last manual refresh ended, and what to say about it (nil: all read, nothing wrong).
+    var manualDoneAt: Double = 0
+    var manualNote: String?
     /// Whether the combined author-or-reviewer query works (nil: not tried yet).
     var combinedQuery: Bool?
 }
@@ -131,6 +136,31 @@ actor PullRequestSource {
     /// The notch opened: mine is read if older than a minute, and a missing token looked for.
     func refreshSoon() { wantsNow = true }
 
+    /// A manual refresh: Mine and To review are read at the next poll whatever their intervals, then
+    /// the usual details for what changed. Held off for a minute after the last one, and cut down to
+    /// Mine plus `repoKey` when the lane is over its hourly target (the lane's count and the plan's
+    /// cost decide, see PRRefresh.plan).
+    @discardableResult
+    func refreshNow(repoKey: String?) async -> PRRefresh.Plan {
+        let now = self.now
+        let workspaces = max(1, Set(repos.map(\.workspace)).count)
+        let plan = PRRefresh.plan(now: now, lastManual: lastManualAt, used: await client.count(Self.lane),
+                                  target: Self.lane.hourlyTarget, cost: workspaces + repos.count)
+        switch plan {
+        case .cooldown: break
+        case .all, .limited:
+            lastManualAt = now
+            manual = ManualRead(limited: plan == .limited, repoKey: repoKey)
+            wantsNow = true
+        }
+        return plan
+    }
+
+    struct ManualRead { var limited: Bool; var repoKey: String? }
+    private var manual: ManualRead?
+    private var activeManual: ManualRead?
+    private var lastManualAt: Double = -.infinity
+
     /// One of my pipelines runs: the review lists are read every 20 minutes instead of 10.
     func setMyPipelineRunning(_ running: Bool) { myPipelineRunning = running }
 
@@ -157,6 +187,24 @@ actor PullRequestSource {
     // MARK: The schedule
 
     private func tick() async {
+        activeManual = manual
+        manual = nil
+        await tickBody()
+        if let done = activeManual {
+            activeManual = nil
+            manualDoneAt = now
+            if let status { manualNote = "Could not read: \(status.text)" }
+            else if !mineFailed.isEmpty { manualNote = "Could not read Mine; showing the last read" }
+            else if done.limited { manualNote = "Busy: read Mine" + (done.repoKey.map { " and \($0.split(separator: "/").last.map(String.init) ?? $0) only" } ?? " only") }
+            else { manualNote = nil }
+            publish()
+        }
+    }
+
+    private var manualDoneAt: Double = 0
+    private var manualNote: String?
+
+    private func tickBody() async {
         let now = self.now
         let config = BuildsConfig.current?.bitbucket
         if config != reposConfig || now - reposReadAt > 300 || repos.isEmpty && now - reposReadAt > 60 {
@@ -219,7 +267,7 @@ actor PullRequestSource {
         let mineEvery = PRBudget.mineInterval(workspaces: workspaces.count, locked: locked) * slow
         for workspace in workspaces {
             let since = now - (mineAt[workspace] ?? 0)
-            guard since >= mineEvery || (opened && since > PRBudget.openRefresh) else { continue }
+            guard since >= mineEvery || (opened && since > PRBudget.openRefresh) || activeManual != nil else { continue }
             guard await room(1) else { break }
             if await !fetchMine(workspace, me: uuid) { mineFailed.insert(workspace) }
         }
@@ -229,7 +277,8 @@ actor PullRequestSource {
         for repo in repos {
             guard await client.hasToken(for: Self.lane), await Date().timeIntervalSince1970 >= client.pauseUntil(Self.lane) else { break }
             if let skip = skipUntil[repo.key], now < skip { continue }
-            guard now - (reviewAt[repo.key] ?? 0) >= interval else { continue }
+            let forced = activeManual.map { !$0.limited || $0.repoKey == repo.key } ?? false
+            guard forced || now - (reviewAt[repo.key] ?? 0) >= interval else { continue }
             guard await room(1) else { break }
             await fetchRepo(repo, me: uuid)
         }
@@ -665,11 +714,14 @@ actor PullRequestSource {
         }
         prs.sort { $0.updatedAt > $1.updatedAt }
         let snapshot = PullRequestSnapshot(prs: prs, status: status, mineFetchedAt: mineAt.values.max() ?? 0,
-                                           reviewFetchedAt: reviewAt.values.max() ?? 0, repoCount: repos.count, me: me,
-                                           combinedQuery: combined)
+                                           reviewFetchedAt: reviewAt.values.max() ?? 0,
+                                           reviewOldestAt: repos.contains { reviewAt[$0.key] == nil } ? 0 : (reviewAt.values.min() ?? 0),
+                                           repoCount: repos.count, me: me,
+                                           manualDoneAt: manualDoneAt, manualNote: manualNote, combinedQuery: combined)
         var compare = snapshot
         compare.mineFetchedAt = last.mineFetchedAt
         compare.reviewFetchedAt = last.reviewFetchedAt
+        compare.reviewOldestAt = last.reviewOldestAt
         guard compare != last || !lastSent else { return }
         last = snapshot
         lastSent = true
