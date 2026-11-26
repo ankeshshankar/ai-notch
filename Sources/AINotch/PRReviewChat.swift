@@ -169,6 +169,15 @@ final class PRChatSession: ObservableObject {
     /// The review had its tools refused during a chat turn.
     @Published private(set) var denied: [String] = []
 
+    /// The reply threads under my comments (`replies.json`), the unseen ones as last loaded, and the AI read in progress.
+    @Published private(set) var replies = RepliesFile()
+    @Published private(set) var newReplyIDs: Set<Int> = []
+    @Published private(set) var readingReplies = false
+    /// Reply text being edited, by my comment's id (a draft from the AI read seeds it).
+    @Published private(set) var replyDrafts: [Int: String] = [:]
+    private var loadingExisting = false
+    private var readRunner: PRReviewRunner?
+
     private var rawStream = ""
     private var runner: PRChatRunner?
     private var stopped = false
@@ -177,6 +186,9 @@ final class PRChatSession: ObservableObject {
     var repoPath: () -> String? = { nil }
     /// Told how many comments a posting run made (the review stops waiting for my call).
     var onPosted: (Int) -> Void = { _ in }
+    /// The signed-in user's uuid (to tell my replies from theirs) and the unseen-reply count after each load.
+    var me: () -> String? = { nil }
+    var onRepliesChanged: (Int) -> Void = { _ in }
     var token: @Sendable () -> String = { KeychainItem.read(service: BitbucketConfig.tokenService)?.secret ?? "" }
 
     init(ref: PullRequestRef, head: String, folder: URL) {
@@ -202,6 +214,8 @@ final class PRChatSession: ObservableObject {
         if log.sessionID == nil, let data = try? Data(contentsOf: folder.appendingPathComponent("out.json")),
            let id = ReviewOutput.parse(data)?.sessionID { log.sessionID = id }
         readComments()
+        replies = ReplyFiles.load(folder)
+        newReplyIDs = ReplySeen.unseenIDs(replies.threads, seen: ReplyFiles.seen(ref))
         if log.messages.contains(where: { $0.isError && $0.text == Self.interruptedText }) == false,
            let last = log.messages.last, last.role == .user, !running {
             // A turn the notch quit in the middle of: say so, the question stays.
@@ -228,9 +242,135 @@ final class PRChatSession: ObservableObject {
 
     // MARK: Existing comments
 
-    func loadExisting() {
+    /// Reads the pull request's comments (and with them the reply threads). `maxAge`: skip when read that recently.
+    func loadExisting(maxAge: Double = 0) {
+        guard !loadingExisting, Date().timeIntervalSince1970 - replies.fetchedAt >= maxAge else { return }
+        loadingExisting = true
         Task { @MainActor in
-            if let comments = await PRReviewAPI.comments(ref) { existing = comments; existingLoaded = true }
+            defer { loadingExisting = false }
+            if let raw = await PRReviewAPI.rawComments(ref) {
+                existing = raw.map(\.existing)
+                existingLoaded = true
+                applyReplies(ReplyFiles.update(raw: raw, ref: ref, folder: folder, me: me(), posted: ReplyFiles.postedIDs(log)))
+            } else if let comments = await PRReviewAPI.comments(ref) { existing = comments; existingLoaded = true }
+        }
+    }
+
+    // MARK: Replies
+
+    private func applyReplies(_ file: RepliesFile) {
+        replies = file
+        let seen = ReplyFiles.seen(ref)
+        newReplyIDs = ReplySeen.unseenIDs(file.threads, seen: seen)
+        onRepliesChanged(newReplyIDs.count)
+    }
+
+    func thread(forCard card: SuggestedComment) -> ReplyThread? { card.postedID.flatMap { replies.thread($0) } }
+
+    /// Threads of mine that are not one of the cards (comments I wrote on the pull request myself).
+    var otherThreads: [ReplyThread] {
+        let posted = ReplyFiles.postedIDs(log)
+        return replies.threads.filter { !posted.contains($0.id) }
+    }
+
+    /// The unseen replies were shown: they count as seen from now on.
+    func markRepliesSeen() {
+        let ids = ReplySeen.allIDs(replies.threads)
+        guard !ids.isEmpty else { return }
+        ReplyFiles.markSeen(ref, ids: ids)
+        onRepliesChanged(0)
+    }
+
+    func replyDraft(_ root: Int) -> String { replyDrafts[root] ?? replies.analyses[root]?.draft ?? "" }
+
+    func setReplyDraft(_ root: Int, _ text: String) {
+        replyDrafts[root] = text
+        if replies.analyses[root] != nil {
+            replies.analyses[root]?.draft = text
+            ReplyFiles.save(replies, folder: folder)
+        }
+    }
+
+    /// Threads waiting for me that the AI has not read at their newest reply.
+    var unreadThreads: [ReplyThread] { replies.threads.filter { replies.needsAttention($0) && replies.analysis($0) == nil } }
+
+    /// One headless, read-only pass over the threads (a fresh session, the code at the reviewed head).
+    func readReplies() {
+        guard !readingReplies, !running else { return }
+        let todo = unreadThreads
+        guard !todo.isEmpty else { notice = "No reply thread to read"; return }
+        guard let repo = repoPath() else { notice = "No local clone of \(ref.repo) in the repositories list"; return }
+        guard let secret = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else { notice = "No Bitbucket read token"; return }
+        readingReplies = true
+        notice = nil
+        let job = PRReviewRunner.Job(ref: ref, head: head, repoPath: repo, dir: folder, token: secret,
+                                     replyRead: .init(inputJSON: ReplyRead.inputJSON(head: head, threads: todo)))
+        let runner = PRReviewRunner()
+        readRunner = runner
+        runner.start(job) { [weak self] outcome in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.finishRead(outcome) } }
+        }
+    }
+
+    private func finishRead(_ outcome: PRReviewRunner.Outcome) {
+        readingReplies = false
+        readRunner = nil
+        switch outcome {
+        case .finished(let out):
+            let parsed = ReplyBlocks.parse(out.text)
+            replies = ReplyFiles.load(folder)
+            replies.apply(parsed.analyses)
+            ReplyFiles.save(replies, folder: folder)
+            for a in parsed.analyses { replyDrafts[a.commentID] = nil }
+            notice = parsed.analyses.isEmpty ? "The read gave no result" : "Read \(parsed.analyses.count) thread\(parsed.analyses.count == 1 ? "" : "s")"
+                + (out.costUSD.map { String(format: " · $%.2f", $0) } ?? "")
+        case .failed(let why): notice = "Reading replies failed: \(why)"
+        case .cancelled: notice = "Stopped"
+        case .timedOut: notice = "Reading replies timed out"
+        }
+    }
+
+    /// A click on one of a thread's four buttons, after the confirm. Reply sends the draft as a reply under my comment.
+    func perform(_ action: ThreadAction, root: Int) async {
+        guard !posting, let thread = replies.thread(root) else { return }
+        if action == .keepOpen {
+            replies.kept[root] = thread.replies.last?.id ?? 0
+            ReplyFiles.save(replies, folder: folder)
+            notice = "Kept open"
+            return
+        }
+        posting = true
+        defer { posting = false }
+        if action.sendsReply {
+            let text = replyDraft(root).trimmingCharacters(in: .whitespacesAndNewlines)
+            let problems = ReplyPayload.problems(text)
+            guard problems.isEmpty else { notice = "Not sent: the reply \(problems.joined(separator: ", "))"; return }
+            switch await PRReviewAPI.reply(to: root, text: text, on: ref) {
+            case .posted(let id):
+                var file = ReplyFiles.load(folder)
+                if let index = file.threads.firstIndex(where: { $0.id == root }) {
+                    file.threads[index].replies.append(ThreadReply(id: id, parentID: root, author: "You", byMe: true, text: text, createdOn: ISO8601DateFormatter().string(from: Date())))
+                }
+                replies = file
+                replyDrafts[root] = nil
+                replies.analyses[root]?.draft = nil
+                ReplyFiles.save(replies, folder: folder)
+                notice = "Reply posted"
+            case .failed(let why):
+                notice = "Not sent: \(why)"
+                return
+            }
+        }
+        if action.resolves {
+            switch await PRReviewAPI.resolve(commentID: root, on: ref) {
+            case .done:
+                if !replies.resolved.contains(root) { replies.resolved.append(root) }
+                if let index = log.cards.firstIndex(where: { $0.postedID == root }) { log.cards[index].resolved = true; save() }
+                ReplyFiles.save(replies, folder: folder)
+                notice = action.sendsReply ? "Replied and resolved" : "Thread resolved"
+            case .failed(let why):
+                notice = action.sendsReply ? "Replied, not resolved: \(why)" : "Not resolved: \(why)"
+            }
         }
     }
 
@@ -368,7 +508,8 @@ final class PRChatSession: ObservableObject {
         streaming = ""
         rawStream = ""
         activity = "Thinking…"
-        let system = ReviewChat.systemPrompt(cards: log.cards, existing: existing, head: head, scratch: folder.path)
+        let system = ReviewChat.systemPrompt(cards: log.cards, existing: existing, head: head, scratch: folder.path,
+                                             replies: ReplyRead.digest(replies.threads, analyses: replies.analyses))
         let job = PRChatRunner.Job(ref: ref, head: head, repoPath: repo, dir: folder, sessionID: sessionID, prompt: drafting ? prompt : ReviewChat.turnPrompt(prompt), system: system, token: token)
         let runner = PRChatRunner()
         self.runner = runner

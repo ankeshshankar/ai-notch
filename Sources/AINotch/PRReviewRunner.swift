@@ -23,12 +23,20 @@ final class PRReviewRunner: @unchecked Sendable {
         var followUp: FollowUpJob? = nil
         /// A branch with no pull request yet.
         var branch: BranchTarget? = nil
+        /// A read of the author's replies (one fresh read-only pass in the review's folder, output kept apart from the review's).
+        var replyRead: ReplyReadJob? = nil
+    }
+
+    struct ReplyReadJob: Sendable {
+        var inputJSON: Data
     }
 
     /// What a follow-up pass is given: the commit the last review covered and the input file's content.
     struct FollowUpJob: Sendable {
         var baseHead: String
         var inputJSON: Data
+        /// The input carries reply threads: the pass is asked to read them too.
+        var readReplies = false
     }
 
     enum Outcome: Sendable {
@@ -73,7 +81,8 @@ final class PRReviewRunner: @unchecked Sendable {
         let fm = FileManager.default
         try? fm.createDirectory(at: job.dir, withIntermediateDirectories: true)
         Self.installHelper()
-        let out = job.dir.appendingPathComponent("out.json"), err = job.dir.appendingPathComponent("err.log")
+        let prefix = job.replyRead != nil ? "reply-" : ""
+        let out = job.dir.appendingPathComponent(prefix + "out.json"), err = job.dir.appendingPathComponent(prefix + "err.log")
         fm.createFile(atPath: out.path, contents: nil)
         fm.createFile(atPath: err.path, contents: nil)
         guard let outHandle = try? FileHandle(forWritingTo: out), let errHandle = try? FileHandle(forWritingTo: err) else {
@@ -85,7 +94,12 @@ final class PRReviewRunner: @unchecked Sendable {
         process.executableURL = URL(fileURLWithPath: claude)
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let names = ReviewNames.load()
-        if let followUp = job.followUp {
+        var madeWorktree = false
+        if let read = job.replyRead {
+            do { try read.inputJSON.write(to: job.dir.appendingPathComponent("reply-input.json")) } catch { return .failed("cannot write in \(job.dir.path)") }
+            madeWorktree = PRChatRunner.ensureWorktree(repo: job.repoPath, dir: job.dir, head: job.head)
+            process.arguments = FollowUp.arguments(scratch: job.dir.path, hookCommand: Self.hookCommand(), prompt: ReplyRead.prompt(scratch: job.dir.path, head: job.head))
+        } else if let followUp = job.followUp {
             switch Self.prepareFollowUp(job, followUp) {
             case .success(let prompt):
                 process.arguments = FollowUp.arguments(scratch: job.dir.path, hookCommand: Self.hookCommand(), prompt: prompt)
@@ -122,7 +136,7 @@ final class PRReviewRunner: @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + limit, execute: watchdog)
         process.waitUntilExit()
         watchdog.cancel()
-        Self.removeWorktree(repo: job.repoPath, dir: job.dir)
+        if job.replyRead == nil || madeWorktree { Self.removeWorktree(repo: job.repoPath, dir: job.dir) }
 
         lock.lock()
         let wasCancelled = cancelled, wasTimedOut = timedOut
@@ -154,7 +168,7 @@ final class PRReviewRunner: @unchecked Sendable {
             try followUp.inputJSON.write(to: job.dir.appendingPathComponent("followup-input.json"))
         } catch { return .failure(FailText("cannot write in \(job.dir.path)")) }
         _ = PRChatRunner.ensureWorktree(repo: repo, dir: job.dir, head: job.head)
-        return .success(FollowUp.prompt(scratch: job.dir.path, previousHead: followUp.baseHead, newHead: job.head, diffCut: cut))
+        return .success(FollowUp.prompt(scratch: job.dir.path, previousHead: followUp.baseHead, newHead: job.head, diffCut: cut, readReplies: followUp.readReplies))
     }
 
     struct FailText: Error { var message: String; init(_ message: String) { self.message = message } }

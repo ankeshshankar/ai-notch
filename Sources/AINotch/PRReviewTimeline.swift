@@ -377,6 +377,7 @@ struct PRReviewTimeline: View {
                     VStack(alignment: .leading, spacing: 12) {
                         reviewMessage
                         followUpNotes
+                        if !own { repliesBar }
                         existingSection
                         cardsSection
                         ForEach(session.log.messages) { message in messageView(message) }
@@ -398,7 +399,7 @@ struct PRReviewTimeline: View {
             footer
         }
         .background(shortcutButtons)
-        .onAppear { DispatchQueue.main.async { listFocused = true } }
+        .onAppear { DispatchQueue.main.async { listFocused = true }; if !own { session.loadExisting(maxAge: 30) } }
         .onChange(of: model.focusChat) { inputFocused = true }
     }
 
@@ -489,6 +490,26 @@ struct PRReviewTimeline: View {
         }
     }
 
+    /// Replies under my comments that are not cards, and the bar to refresh them and have them read.
+    @ViewBuilder private var repliesBar: some View {
+        let threads = session.replies.threads
+        if !threads.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text("Replies").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
+                    Text(session.newReplyIDs.isEmpty ? ReplySeen.label(threads.reduce(0) { $0 + $1.replies.count }) : "\(session.newReplyIDs.count) new").font(Typo.label()).foregroundStyle(Palette.ink3)
+                    InfoMark(text: "What the authors answered under the comments you posted. Read replies has Claude check each thread against the code (read only) and draft an answer; nothing is posted or resolved until you click and confirm.")
+                    Spacer(minLength: 0)
+                    if !session.unreadThreads.isEmpty {
+                        PRReviewPill(title: session.readingReplies ? "Reading…" : "Read replies", symbol: "text.magnifyingglass", enabled: !session.readingReplies && !session.running) { session.readReplies() }
+                    }
+                    PRReviewPill(title: "Refresh", symbol: "arrow.clockwise") { session.loadExisting() }
+                }
+                ForEach(session.otherThreads) { thread in PRReplyThreadView(thread: thread, session: session, model: model, showsRoot: true) }
+            }
+        }
+    }
+
     @ViewBuilder private var existingSection: some View {
         if !session.existing.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
@@ -532,7 +553,12 @@ struct PRReviewTimeline: View {
                     .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
             }
             ForEach(shownCards) { card in
-                PRCommentCard(card: card, session: session, pr: pr, own: own, focused: model.focusedCard == card.id, model: model)
+                VStack(alignment: .leading, spacing: 4) {
+                    PRCommentCard(card: card, session: session, pr: pr, own: own, focused: model.focusedCard == card.id, model: model)
+                    if !own, let thread = session.thread(forCard: card) {
+                        PRReplyThreadView(thread: thread, session: session, model: model).padding(.leading, 14)
+                    }
+                }
             }
         }
     }
