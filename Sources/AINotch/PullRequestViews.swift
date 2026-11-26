@@ -19,10 +19,12 @@ private func countsText(_ reviews: ReviewStore) -> String {
 /// new comments, the build as a dot, draft.
 struct PRStatusGlyphs: View {
     var pr: PullRequest
+    /// One I review: the review state is the row's badge, the new-comments marker is quiet.
+    var compact = false
 
     var body: some View {
         HStack(spacing: 8) {
-            if pr.needs.contains(.reviewRequested) {
+            if pr.needs.contains(.reviewRequested), !compact {
                 glyph("hourglass", "Review" + (pr.requester.map { " · \($0.name)" } ?? ""), Palette.waiting)
                     .help("\(pr.requester?.name ?? "The author") asked for your review")
             }
@@ -35,7 +37,7 @@ struct PRStatusGlyphs: View {
                     .help("Changes requested by " + pr.changesRequestedBy.joined(separator: ", "))
             }
             if pr.newComments > 0 {
-                glyph("bubble.left.fill", "\(pr.newComments) new", Palette.bitbucket)
+                glyph("bubble.left.fill", "\(pr.newComments) new", compact ? Palette.ink3 : Palette.bitbucket)
                     .help("\(pr.newComments) new comment\(pr.newComments == 1 ? "" : "s") since you last looked")
             }
             if let build = pr.build {
@@ -134,7 +136,7 @@ struct PRsChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .ax("Pull requests", value: quiet || reviews.attention.isEmpty ? "none need you" : "\(reviews.attention.count) need you", selected: isOpen)
+        .ax("Pull requests", value: quiet || reviews.attention.isEmpty ? "none need you" : PRCounts.text(need: reviews.attention.count, ready: reviews.waitingCount), selected: isOpen)
         .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { frame in
             hover.zones[Self.zone] = frame
             if chipHeight != frame.height { chipHeight = frame.height }
@@ -169,14 +171,26 @@ extension PRsChip {
                     .background(Capsule().fill(isOpen ? Palette.onDone : Palette.bitbucket))
             }
             if !quiet, reviews.waitingCount > 0 {
-                Text("\(reviews.waitingCount)").font(Typo.caption(.bold).monospacedDigit())
-                    .foregroundStyle(isOpen ? Palette.done : Palette.onDone)
-                    .padding(.horizontal, 4).padding(.vertical, 0.5)
-                    .background(Capsule().fill(isOpen ? Palette.onDone : Palette.done))
-                    .help("Reviews done, waiting for your call")
+                HStack(spacing: 2) {
+                    Image(systemName: "checkmark").font(Typo.micro(.bold)).decorative()
+                    Text("\(reviews.waitingCount)").font(Typo.caption(.bold).monospacedDigit())
+                }
+                .foregroundStyle(isOpen ? Palette.done : Palette.onDone)
+                .padding(.horizontal, 4).padding(.vertical, 0.5)
+                .background(Capsule().fill(isOpen ? Palette.onDone : Palette.done))
+                .help("\(reviews.waitingCount) with a finished review, ready for your decision")
+                .accessibilityHidden(true)
             }
         }
         .lineLimit(1).fixedSize()
+        .help(quiet ? "" : PRCounts.text(need: reviews.attention.count, ready: reviews.waitingCount))
+    }
+}
+
+/// How the counts read: "25 need you, 3 ready for your decision".
+enum PRCounts {
+    static func text(need: Int, ready: Int) -> String {
+        "\(need) need\(need == 1 ? "s" : "") you" + (ready > 0 ? ", \(ready) ready for your decision" : "")
     }
 }
 
@@ -202,7 +216,7 @@ private struct PRsCard: View {
                 }
             } else {
                 Text("Pull requests · \(countsText(reviews))").font(Typo.body(.semibold)).foregroundStyle(Palette.ink)
-                Text(reviews.attention.isEmpty ? "Nothing needs you now." : "\(reviews.attention.count) need\(reviews.attention.count == 1 ? "s" : "") you.")
+                Text(reviews.attention.isEmpty ? "Nothing needs you now." : PRCounts.text(need: reviews.attention.count, ready: reviews.waitingCount) + ".")
                     .font(Typo.label()).foregroundStyle(Palette.ink2)
                 if reviews.updatedAt > 0 {
                     Text("Read \(ago(Date().timeIntervalSince1970 - reviews.updatedAt)) · \(reviews.requestSummary)")
@@ -229,6 +243,12 @@ struct PullRequestsNeedYou: View {
     /// Its own title line, when pipelines share the column.
     var header: Bool
 
+    /// How many rows the column shows: up to five, fewer when pipelines or sessions already fill it.
+    static func rowLimit(maxRows: Int, pipelineRows: Int, hasPipelines: Bool) -> Int {
+        guard hasPipelines else { return min(5, max(2, maxRows)) }
+        return min(5, max(2, maxRows - pipelineRows))
+    }
+
     var body: some View {
         let shown = Array(reviews.attention.prefix(max(1, limit)))
         VStack(alignment: .leading, spacing: 8) {
@@ -238,29 +258,12 @@ struct PullRequestsNeedYou: View {
                     Spacer(minLength: 4)
                     Text("\(reviews.attention.count) need\(reviews.attention.count == 1 ? "s" : "") you")
                         .font(Typo.label(.medium)).foregroundStyle(Palette.waiting).lineLimit(1)
+                        .help(PRCounts.text(need: reviews.attention.count, ready: reviews.waitingCount))
                 }
                 .padding(.top, 4)
             }
-            ForEach(shown) { pr in
-                let open = {
-                    guard let url = pr.url else { return }
-                    controller.collapse()
-                    SafeLink.open(url, for: .bitbucket)
-                }
-                Button {
-                    if PRReviewStore.supports(pr) {
-                        controller.collapse()
-                        PRReviewWindowController.shared.show(pr.id)
-                    } else {
-                        open()
-                    }
-                } label: {
-                    PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: false, merge: nil, review: reviews.autoReview)
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(RowButtonStyle())
-                .help(PRReviewStore.supports(pr) ? "Open the review window" : "Open on bitbucket.org")
-                .contextMenu { PRMenu(pr: pr, reviews: reviews, open: open) }
+            ForEach(Array(shown.enumerated()), id: \.element.id) { index, pr in
+                PRNeedRow(pr: pr, reviews: reviews, controller: controller, now: now, pinnedHover: index == 0 && PRRowActions.pinned)
             }
             if reviews.attention.count > shown.count {
                 Button {
@@ -269,6 +272,47 @@ struct PullRequestsNeedYou: View {
                     Text("+\(reviews.attention.count - shown.count) more").font(Typo.label()).foregroundStyle(Palette.ink3).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .ax("\(reviews.attention.count - shown.count) more pull requests", hint: "Opens the pull requests list")
+            }
+        }
+    }
+}
+
+/// One row of the main view's column: the click, the context menu and the hover actions.
+private struct PRNeedRow: View {
+    var pr: PullRequest
+    @ObservedObject var reviews: ReviewStore
+    var controller: NotchController
+    var now: Double
+    var pinnedHover: Bool
+
+    var body: some View {
+        let open = {
+            guard let url = pr.url else { return }
+            controller.collapse()
+            SafeLink.open(url, for: .bitbucket)
+        }
+        let key = "pr-need-" + pr.id
+        PRRowHover(key: key) { hovered in
+            ZStack(alignment: .bottomTrailing) {
+                Button {
+                    if PRReviewStore.supports(pr) {
+                        controller.collapse()
+                        PRReviewWindowController.shared.show(pr.id)
+                    } else {
+                        open()
+                    }
+                } label: {
+                    PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: false, merge: nil, stage: reviews.stages[pr.id], review: reviews.autoReview)
+                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(RowButtonStyle(hoverKey: key))
+                .help(PRReviewStore.supports(pr) ? "Open the review window" : "Open on bitbucket.org")
+                .contextMenu { PRMenu(pr: pr, reviews: reviews, open: open) }
+
+                if hovered || pinnedHover {
+                    PRRowActions(pr: pr, reviews: reviews, stage: reviews.stages[pr.id], controller: controller).padding(6)
+                }
             }
         }
     }
@@ -329,11 +373,11 @@ struct PullRequestsPanel: View {
             if isWide {
                 HStack(alignment: .top, spacing: 12) {
                     group("Mine", reviews.mine)
-                    group("To review", reviews.toReview)
+                    group("To review", reviews.toReviewSorted)
                 }
             } else {
                 group("Mine", reviews.mine)
-                group("To review", reviews.toReview)
+                group("To review", reviews.toReviewSorted)
             }
         }
         .padding(10)
@@ -372,16 +416,20 @@ struct PullRequestsPanel: View {
                 open()
             }
         }
+        let key = "pr-panel-" + pr.id
         return VStack(alignment: .leading, spacing: 4) {
+        PRRowHover(key: key) { hovered in
         ZStack(alignment: .bottomTrailing) {
             Button(action: click) {
-                PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: isOpen, merge: merge[pr.id], review: reviews.autoReview)
+                PRPanelRowView(pr: pr, now: now, isMuted: reviews.isMuted(pr), isDetailed: isOpen, merge: merge[pr.id], stage: reviews.stages[pr.id], review: reviews.autoReview)
                     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            .buttonStyle(RowButtonStyle())
+            .buttonStyle(RowButtonStyle(hoverKey: key))
             .help(PRReviewStore.supports(pr) ? "Open the review window" : "Open on bitbucket.org")
             .contextMenu { PRMenu(pr: pr, reviews: reviews, open: open) }
 
+            HStack(spacing: 6) {
+            if hovered || (PRRowActions.pinned && reviews.toReviewSorted.first?.id == pr.id), !isOpen { PRRowActions(pr: pr, reviews: reviews, stage: reviews.stages[pr.id], controller: controller) }
             Button {
                 withAnimation(Motion.slide) { detailId = isOpen ? nil : pr.id }
                 if !isOpen, merge[pr.id] == nil || merge[pr.id] == .unknown { loadMerge(pr) }
@@ -396,10 +444,12 @@ struct PullRequestsPanel: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .padding(6)
             .ax(isOpen ? "Hide details" : "Show details", value: pr.title)
+            }
+            .padding(6)
         }
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.bitbucket, lineWidth: highlighted == pr.id ? 2 : 0).allowsHitTesting(false))
+        }
         }
         .id(pr.id)
     }
@@ -415,7 +465,8 @@ struct PullRequestsPanel: View {
     }
 }
 
-/// A row of the PRs panel: repo #id and title, the glyphs and its age; with Details, the rest.
+/// A row of the PRs panel: repo #id and one status badge, the full title (two lines), then who and
+/// what at a glance (author, approvals, new comments, build, age); with Details, the rest.
 struct PRPanelRowView: View {
     var pr: PullRequest
     var now: Double
@@ -423,24 +474,30 @@ struct PRPanelRowView: View {
     var isDetailed: Bool
     @Environment(\.notchGlass) private var glass
     var merge: PullRequestsPanel.MergeState?
-    /// The automatic review's chip on a row I review.
+    /// Where a pull request I review stands (nil on mine).
+    var stage: PRStage? = nil
+    /// The automatic review's ledger on a row I review, for the badge.
     var review: PRReviewStore? = nil
 
     var body: some View {
+        let badge = PRBadge.make(pr: pr, stage: stage, record: review?.record(for: pr)?.record, now: now)
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text(verbatim: "\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
-                    .lineLimit(1).fixedSize()
-                Text(pr.title).font(Typo.subtitle(.medium)).foregroundStyle(Palette.ink)
+                Text(verbatim: pr.ref.label).font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
                     .lineLimit(1).truncationMode(.tail)
-                Spacer(minLength: 0)
                 if isMuted {
                     Image(systemName: "bell.slash").font(Typo.caption()).foregroundStyle(Palette.ink3).help("Muted").accessibilityLabel("Muted")
                 }
+                Spacer(minLength: 4)
+                if let badge { PRBadgeView(badge: badge).layoutPriority(1) }
             }
-            HStack(spacing: 6) {
-                PRStatusGlyphs(pr: pr).layoutPriority(1)
-                if let review, PRReviewStore.supports(pr) { PRReviewChip(pr: pr, store: review) }
+            Text(pr.title).font(Typo.subtitle(.medium)).foregroundStyle(Palette.ink)
+                .lineLimit(2).truncationMode(.tail).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                if pr.role == .reviewing {
+                    Text(pr.author.name).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1).truncationMode(.tail)
+                }
+                PRStatusGlyphs(pr: pr, compact: pr.role == .reviewing).layoutPriority(1)
                 if pr.updatedAt > 0 {
                     Text(ago(now - pr.updatedAt)).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1).fixedSize()
                         .layoutPriority(1)
@@ -454,9 +511,11 @@ struct PRPanelRowView: View {
             }
         }
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(pr.needsSomething && !isMuted ? glass.color(Palette.card) : glass.color(Palette.card).opacity(0.6)))
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(waits && !isMuted ? glass.color(Palette.card) : glass.color(Palette.card).opacity(0.6)))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(glass.color(Palette.hairline), lineWidth: 1))
     }
+
+    private var waits: Bool { stage.map(\.needsMe) ?? pr.needsSomething }
 
     private var details: some View {
         var rows: [(String, String, Color)] = []
@@ -563,4 +622,171 @@ struct SessionPRLine: View {
         }
         .fixedSize(horizontal: false, vertical: true)
     }
+}
+
+
+// MARK: Status badge and hover actions
+
+/// The one status a row shows, on its right: a short word and a number, one colour per state.
+struct PRBadge: Equatable {
+    var text: String
+    var symbol: String
+    var color: Color
+    var help: String
+
+    /// "now", "3m", "2h", "4d".
+    static func short(_ seconds: Double) -> String {
+        if seconds < 60 { return "now" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m" }
+        if seconds < 86_400 { return "\(Int(seconds / 3600))h" }
+        return "\(Int(seconds / 86_400))d"
+    }
+
+    /// Nil for one of mine (its glyphs say it) and for one with nothing to say.
+    static func make(pr: PullRequest, stage: PRStage?, record: ReviewRecord?, now: Double) -> PRBadge? {
+        guard let stage else { return nil }
+        switch stage {
+        case .ready(let verdict, let findings, let followUp, let commits):
+            let comments = findings.blocking + findings.shouldFix + findings.nits
+            let tone = verdict == .approve ? Palette.done : Palette.waiting
+            let text: String
+            if followUp {
+                text = commits.map { "Follow-up · \($0) new commit\($0 == 1 ? "" : "s")" } ?? "Follow-up · ready"
+            } else if verdict == .requestChanges {
+                text = "Ready · Request changes"
+            } else {
+                text = comments > 0 ? "Ready · \(comments) comment\(comments == 1 ? "" : "s")" : "Ready · Approve"
+            }
+            let what = verdict == .approve ? "Claude would approve" : "Claude would request changes"
+            return PRBadge(text: text, symbol: verdict == .approve ? "checkmark.seal" : "xmark.seal", color: followUp ? Palette.bitbucket : tone,
+                           help: "\(followUp ? "The follow-up review is done" : "The review is done"): \(what)" + (comments > 0 ? ", \(findings.text)" : "") + ". Nothing is posted until you decide.")
+        case .reviewing(let followUp, let since):
+            if record?.phase == .queued { return PRBadge(text: "Queued", symbol: "clock", color: Palette.ink3, help: "Waits for the review in progress; one runs at a time.") }
+            let age = since.map { " · " + short(max(0, now - $0)) } ?? ""
+            return PRBadge(text: (followUp ? "Follow-up" : "Reviewing") + age, symbol: "ellipsis", color: Palette.claude,
+                           help: followUp ? "Claude is checking the new commits against the earlier findings." : "Claude is reviewing this pull request (read only).")
+        case .newCommits:
+            return PRBadge(text: "Follow-up · new commits", symbol: "arrow.triangle.2.circlepath", color: Palette.bitbucket,
+                           help: "New commits since your decision. Open it to run a follow-up review.")
+        case .asked:
+            if record?.phase == .failed { return PRBadge(text: "Review failed", symbol: "exclamationmark.triangle", color: Palette.failed, help: record?.error ?? "The review did not finish.") }
+            return PRBadge(text: "To review", symbol: "hourglass", color: Palette.ink2, help: "\(pr.author.name) asked for your review.")
+        case .posted:
+            return PRBadge(text: "Posted", symbol: "paperplane", color: Palette.ink2, help: "You posted from the review. Bitbucket does not show your decision yet.")
+        case .waitingAuthor:
+            return PRBadge(text: "Waiting on author", symbol: "person", color: Palette.ink3, help: "You asked for changes and nothing was pushed since.")
+        case .approvedByMe:
+            return PRBadge(text: "Approved by you", symbol: "checkmark", color: Palette.done, help: "You approved and nothing was pushed since.")
+        case .draft:
+            return PRBadge(text: "Draft", symbol: "pencil", color: Palette.ink3, help: "A draft waits for the author.")
+        }
+    }
+}
+
+struct PRBadgeView: View {
+    var badge: PRBadge
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: badge.symbol).font(Typo.micro(.bold)).decorative()
+            Text(badge.text).font(Typo.label(.semibold)).lineLimit(1)
+        }
+        .foregroundStyle(badge.color)
+        .padding(.horizontal, 6).padding(.vertical, 1.5)
+        .background(Capsule().fill(badge.color.opacity(0.14)))
+        .fixedSize()
+        .help(badge.help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Status: \(badge.text)")
+        .accessibilityHint(badge.help)
+    }
+}
+
+/// Hover over a row, from the notch's pointer tick (HoverHub) or, outside the notch, onHover.
+struct PRRowHover<Content: View>: View {
+    var key: String
+    @Environment(\.hoverHub) private var hub
+    @State private var isHovered = false
+    @ViewBuilder var content: (Bool) -> Content
+
+    var body: some View {
+        if let hub {
+            HoverZone(hub: hub, key: key) { content($0) }
+        } else {
+            content(isHovered).onHover { isHovered = $0 }
+        }
+    }
+}
+
+/// The buttons a row shows under the pointer: the review window, Approve (only when Claude's verdict
+/// is approve, the write token is there and the gate is open; it opens the review window on its
+/// confirm, nothing is posted from here) and bitbucket.org.
+struct PRRowActions: View {
+    var pr: PullRequest
+    var reviews: ReviewStore
+    /// Watched, so Approve appears when the write-token check answers.
+    @ObservedObject private var auto: PRReviewStore
+    var stage: PRStage?
+    var controller: NotchController
+    init(pr: PullRequest, reviews: ReviewStore, stage: PRStage?, controller: NotchController) {
+        self.pr = pr
+        self.reviews = reviews
+        self.stage = stage
+        self.controller = controller
+        _auto = ObservedObject(wrappedValue: reviews.autoReview)
+    }
+    /// `--preview --prs-row-hover`: the first row of the main view shows them, for a screenshot.
+    static let pinned = CommandLine.arguments.contains("--preview") && CommandLine.arguments.contains("--prs-row-hover")
+
+    /// Whether Approve is offered on a row.
+    static func offersApprove(stage: PRStage?, hasWriteToken: Bool, gateAllows: Bool) -> Bool {
+        if case .ready(.approve, _, _, _)? = stage { return hasWriteToken && gateAllows }
+        return false
+    }
+
+    var body: some View {
+        let supports = PRReviewStore.supports(pr)
+        let approve = Self.offersApprove(stage: stage, hasWriteToken: auto.hasWriteToken, gateAllows: auto.gate(.approve, for: pr).isAllowed)
+        HStack(spacing: 4) {
+            if supports {
+                button("doc.text.magnifyingglass", "Open review", "Open the review window") {
+                    controller.collapse()
+                    PRReviewWindowController.shared.show(pr.id)
+                }
+            }
+            if approve {
+                button("checkmark", "Approve", "Opens the review window on the Approve confirm; nothing is sent until you confirm there", tint: Palette.done) {
+                    controller.collapse()
+                    PRReviewWindowController.shared.show(pr.id, confirm: .approve)
+                }
+            }
+            if let url = pr.url {
+                button("arrow.up.right.square", "Open on Bitbucket", "Open on bitbucket.org") {
+                    controller.collapse()
+                    SafeLink.open(url, for: .bitbucket)
+                }
+            }
+        }
+        .padding(.horizontal, 4).padding(.vertical, 2)
+        .background(Capsule().fill(Palette.card))
+        .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
+        .onAppear { if supports { auto.refreshWriteToken() } }
+    }
+
+    private func button(_ symbol: String, _ label: String, _ help: String, tint: Color = Palette.ink2, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(Typo.caption(.bold)).foregroundStyle(tint)
+                .frame(width: 22, height: 20)
+                .background(Capsule().fill(Palette.chip))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .ax(label, value: "\(pr.ref.repo) \(pr.ref.id)", hint: help)
+    }
+}
+
+extension PullRequestRef {
+    /// "acme-api #3524": a plain number, never "3,524" (a Text built from an Int groups digits).
+    var label: String { "\(repo) #\(id)" }
 }

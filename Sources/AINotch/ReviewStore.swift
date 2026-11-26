@@ -141,9 +141,10 @@ final class ReviewStore: ObservableObject {
         // `--preview --board-fixtures`: sample pull requests, no source (dev only).
         if BoardFixtures.isOn, CommandLine.arguments.contains("--preview") {
             isOn = true
-            mine = BoardFixtures.mine
+            mine = BoardFixtures.mine.enumerated().map { index, pr in var pr = pr; pr.updatedAt = Date().timeIntervalSince1970 - Double(index + 1) * 1500; return pr }
             toReview = BoardFixtures.toReview
             all = mine + toReview
+            autoReview.injectLedgerForCheck(BoardFixtures.ledger)
             refreshAttention()
             updatedAt = Date().timeIntervalSince1970
             return

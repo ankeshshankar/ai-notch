@@ -1,5 +1,6 @@
 import Foundation
 import NotchCore
+import ReviewCore
 
 // Dev side of the Board, never part of a normal run:
 //   --board-selfcheck           feeds sample sessions and pull requests through the sorting and
@@ -59,15 +60,62 @@ enum BoardFixtures {
         pr(46, "Update the onboarding copy", approved: 1, checks: true),
         pr(47, "Try out the new router", draft: true, build: nil),
     ]
-    /// Ones waiting for my review, for the PRs panel's second column.
+    /// One I review (generic names): its decision, head, comments and age in minutes.
+    static func reviewing(_ id: Int, _ title: String, by author: String, decision: PRReview = .none, comments: Int = 0, approved: Int = 0, ageMinutes: Double = 5,
+                          draft: Bool = false, build: BuildState? = .succeeded) -> PullRequest {
+        var p = pr(id, title, draft: draft, approved: approved, build: build)
+        p.role = .reviewing
+        p.myReview = decision
+        p.author = person(author)
+        p.ref = PullRequestRef(workspace: "acme", repo: id % 2 == 0 ? "acme-web" : "acme-api", id: id)
+        p.head = head(id)
+        p.newComments = comments
+        p.updatedAt = Date().timeIntervalSince1970 - ageMinutes * 60
+        p.participants = [PRParticipant(person: person("Sam Roe"), review: approved > 0 ? .approved : .none, isReviewer: true),
+                          PRParticipant(person: person("Kim Lee"), review: .none, isReviewer: true)]
+        return p
+    }
+
+    static func head(_ id: Int, _ tag: String = "a") -> String { String(repeating: tag, count: 11) + String(id % 10) }
+
+    /// Ones I review, one per state of the PRs list: ready (approve, comments, request changes), reviewing, a follow-up,
+    /// new commits after my approval, asked with nothing run, waiting on the author, approved by me, posted.
     static let toReview: [PullRequest] = [
-        { var p = pr(61, "Rework the notification settings", comments: 2); p.role = .reviewing; p.myReview = .none; p.author = person("Dana")
-            p.ref = PullRequestRef(workspace: "acme", repo: "api-service", id: 61); p.head = "aaaaaaaaaaaa"; return p }(),
-        { var p = pr(62, "Bump the SDK and fix the lint errors", approved: 1); p.role = .reviewing; p.myReview = .none; p.author = person("Eli")
-            p.ref = PullRequestRef(workspace: "acme", repo: "api-service", id: 62); p.head = "bbbbbbbbbbbb"; return p }(),
-        { var p = pr(63, "Add the members endpoint"); p.role = .reviewing; p.myReview = .none; p.author = person("Fay")
-            p.ref = PullRequestRef(workspace: "acme", repo: "mobile-app", id: 63); p.head = "cccccccccccc"; return p }(),
+        reviewing(3524, "fix(documents): open stored files from the public share link without a session, and keep the original name", by: "Alex Doe", ageMinutes: 3),
+        reviewing(3526, "feat(billing): add a retry queue for failed invoice exports", by: "Sam Roe", comments: 1, ageMinutes: 26),
+        reviewing(3527, "fix(auth): refresh the token before it expires", by: "Alex Doe", decision: .changesRequested, ageMinutes: 8),
+        reviewing(3528, "chore(deps): bump the SDK", by: "Kim Lee", ageMinutes: 40),
+        reviewing(3529, "refactor(search): split the query builder", by: "Jo Park", ageMinutes: 90),
+        reviewing(3530, "feat(reports): add a CSV export", by: "Sam Roe", decision: .approved, approved: 1, ageMinutes: 120),
+        reviewing(3531, "fix(notifications): stop duplicate pushes", by: "Alex Doe", decision: .changesRequested, comments: 2, ageMinutes: 200),
+        reviewing(3532, "fix(upload): reject empty files", by: "Jo Park", decision: .approved, approved: 2, ageMinutes: 300),
+        reviewing(3533, "feat(profile): let users remove their photo", by: "Kim Lee", ageMinutes: 15),
+        reviewing(3534, "docs: update the setup guide", by: "Sam Roe", comments: 3, ageMinutes: 600),
     ]
+
+    /// The review ledger that goes with `toReview` (heads from `head(_:)`).
+    static var ledger: ReviewLedger {
+        let now = Date().timeIntervalSince1970
+        var ledger = ReviewLedger()
+        func put(_ id: Int, _ phase: ReviewPhase, verdict: ReviewVerdict? = nil, findings: ReviewFindings? = nil, head tag: String = "a", base: String? = nil, commits: Int? = nil, posted: String? = nil, startedAgo: Double = 60) {
+            var r = ReviewRecord(key: "acme/\(id % 2 == 0 ? "acme-web" : "acme-api")#\(id)", head: head(id, tag), phase: phase, auto: true, queuedAt: now - startedAgo - 5)
+            r.verdict = verdict; r.findings = findings; r.baseHead = base; r.commitCount = commits; r.posted = posted
+            r.startedAt = now - startedAgo; r.finishedAt = phase == .done ? now - 10 : nil
+            ledger.set(r)
+        }
+        put(3524, .done, verdict: .approve, findings: ReviewFindings())
+        put(3526, .done, verdict: .approve, findings: ReviewFindings(shouldFix: 2, nits: 1))
+        // 3527: decided earlier on another commit, a follow-up of the new head is done.
+        put(3527, .done, verdict: .requestChanges, findings: ReviewFindings(blocking: 1), head: "c", posted: "changes requested")
+        put(3527, .done, verdict: .requestChanges, findings: ReviewFindings(blocking: 1), head: "a", base: head(3527, "c"), commits: 2)
+        put(3529, .reviewing, startedAgo: 180)
+        put(3530, .done, verdict: .approve, findings: ReviewFindings(), posted: "approved")
+        put(3531, .done, verdict: .requestChanges, findings: ReviewFindings(blocking: 1), posted: "changes requested")
+        // 3532: approved on an older commit, pushed since.
+        put(3532, .done, verdict: .approve, findings: ReviewFindings(), head: "d", posted: "approved")
+        put(3533, .done, verdict: .requestChanges, findings: ReviewFindings(blocking: 2, shouldFix: 1))
+        return ledger
+    }
 }
 
 enum BoardDev {

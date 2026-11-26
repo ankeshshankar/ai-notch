@@ -444,7 +444,8 @@ private struct SessionList: View {
             }
             if reviews.isOn, !reviews.attention.isEmpty {
                 PullRequestsNeedYou(reviews: reviews, controller: controller, now: store.now,
-                                    limit: builds.showsSection ? 2 : maxRows, header: builds.showsSection)
+                                    limit: PullRequestsNeedYou.rowLimit(maxRows: maxRows, pipelineRows: min(builds.rows.count, maxRows), hasPipelines: builds.showsSection),
+                                    header: builds.showsSection)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1304,8 +1305,11 @@ extension View {
 
 /// A row that lifts a little under the pointer and dips while pressed.
 struct RowButtonStyle: ButtonStyle {
+    /// A name for the row's hover zone, when something around the row needs to know the same hover.
+    var hoverKey: String? = nil
+
     func makeBody(configuration: Configuration) -> some View {
-        RowBody(label: configuration.label, isPressed: configuration.isPressed)
+        RowBody(label: configuration.label, isPressed: configuration.isPressed, keyOverride: hoverKey)
     }
 }
 
@@ -1314,8 +1318,10 @@ struct RowButtonStyle: ButtonStyle {
 struct RowBody<Label: View>: View {
     var label: Label
     var isPressed: Bool
+    var keyOverride: String? = nil
     @Environment(\.hoverHub) private var hub
-    @State private var key = "row-" + UUID().uuidString
+    @State private var ownKey = "row-" + UUID().uuidString
+    private var key: String { keyOverride ?? ownKey }
     @State private var isHovered = false
 
     var body: some View {

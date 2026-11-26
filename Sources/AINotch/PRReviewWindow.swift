@@ -103,10 +103,12 @@ final class PRReviewWindowController: NSObject, NSWindowDelegate {
     private var cancellable: AnyCancellable?
 
     /// Opens the window on a pull request (or the first one I review).
-    func show(_ id: String? = nil) {
+    func show(_ id: String? = nil, confirm: ReviewAction? = nil) {
         guard let reviews else { return }
         let model = self.model ?? makeModel(reviews)
         if let id { model.select(id) } else if model.selected == nil { model.selected = model.prs.first?.id }
+        // A row's Approve opens the window on its confirm; the click that sends is made there.
+        if let confirm, id != nil { model.overlay = .action(confirm) }
         present(model)
     }
 

@@ -212,7 +212,53 @@ enum PullRequestDev {
         let quiet = PRParse.pullRequest(object(id: 8, author: me, reviewers: ["{a}"]), me: me, repo: nil)!
         expect(quiet.needs.isEmpty, "needs: quiet")
         let order = ReviewStore.attention([quiet, mine!, changed, review!], ledger: ReviewLedger())
-        expect(order.map(\.ref.id) == [2, 7, 1], "attention: review request, changes, approved; quiet left out")
+        expect(order.map(\.ref.id) == [7, 1, 2], "attention: mine first by need (changes, approved), then the review to give; quiet left out")
+
+        // The rows of the list: need-you rule, order, badge, number format.
+        do {
+            let ledger = BoardFixtures.ledger
+            let fixtures = BoardFixtures.toReview
+            func fx(_ id: Int) -> PullRequest { fixtures.first { $0.ref.id == id }! }
+            let stages = ReviewStore.stages(fixtures, ledger: ledger)
+            func stage(_ id: Int) -> PRStage? { stages[fx(id).id] }
+            expect(stage(3524)?.isReady == true && stage(3526)?.isReady == true && stage(3533)?.isReady == true, "stage: finished reviews wait for my call")
+            expect(stage(3527)?.isReady == true, "stage: a follow-up done after my earlier decision waits for my call")
+            expect(stage(3529)?.needsMe == true && stage(3529)?.isReady == false, "stage: a review running still counts, not as ready")
+            expect(stage(3528) == .asked && stage(3528)?.needsMe == true, "stage: asked, nothing run, counts")
+            expect(stage(3530) == .approvedByMe && stage(3531) == .waitingAuthor, "stage: approved by me / changes requested, no push since: quiet")
+            expect(stage(3532) == .newCommits(commits: nil), "stage: new commits after my approval count")
+            let attention = ReviewStore.attention(fixtures, ledger: ledger).map(\.ref.id)
+            expect(Set(attention) == [3524, 3526, 3527, 3528, 3529, 3532, 3533, 3534], "need-you: only what waits on me (\(attention))")
+            expect(!attention.contains(3530) && !attention.contains(3531), "need-you: approved by me and changes-requested-no-push are out")
+            expect(fx(3531).newComments == 2 && !attention.contains(3531), "need-you: new comments on one I already decided do not count")
+            expect(attention.first.map { stage($0)?.isReady == true } == true, "order: ready for my decision first")
+            let sortedAll = ReviewStore.sorted(fixtures, stages: stages).map(\.ref.id)
+            let ranks = sortedAll.map { ReviewStore.rank(fx($0), stage: stage($0)) }
+            expect(ranks == ranks.sorted() && sortedAll.last == 3530, "order: ranks only go up, approved by me last")
+            expect(Set(sortedAll.prefix(4)) == [3524, 3526, 3527, 3533], "order: the first rows are the ready ones")
+            expect(sortedAll.firstIndex(of: 3529)! > sortedAll.firstIndex(of: 3533)! && sortedAll.firstIndex(of: 3529)! < sortedAll.firstIndex(of: 3531)!, "order: reviewing after ready, before waiting on the author")
+            expect(sortedAll.firstIndex(of: 3531)! < sortedAll.firstIndex(of: 3530)!, "order: waiting on the author before approved by me")
+            let now = Date().timeIntervalSince1970
+            func badge(_ id: Int) -> String? { PRBadge.make(pr: fx(id), stage: stage(id), record: nil, now: now)?.text }
+            expect(badge(3524) == "Ready · Approve", "badge: ready, approve (\(badge(3524) ?? "-"))")
+            expect(badge(3526) == "Ready · 3 comments", "badge: ready with comments (\(badge(3526) ?? "-"))")
+            expect(badge(3533) == "Ready · Request changes", "badge: ready, request changes")
+            expect(badge(3527) == "Follow-up · 2 new commits", "badge: follow-up with commits (\(badge(3527) ?? "-"))")
+            expect(badge(3529)?.hasPrefix("Reviewing · 3m") == true, "badge: reviewing with its age (\(badge(3529) ?? "-"))")
+            expect(badge(3530) == "Approved by you" && badge(3531) == "Waiting on author" && badge(3528) == "To review", "badge: approved, waiting on author, to review")
+            expect(badge(3532) == "Follow-up · new commits", "badge: new commits after my approval")
+            expect(PRBadge.make(pr: mine!, stage: nil, record: nil, now: now) == nil, "badge: none on one of mine")
+            expect(PRBadge.short(30) == "now" && PRBadge.short(185) == "3m" && PRBadge.short(7300) == "2h" && PRBadge.short(200_000) == "2d", "badge: short ages")
+            let big = PullRequestRef(workspace: "acme", repo: "acme-api", id: 3524)
+            expect(big.label == "acme-api #3524" && !big.label.contains(","), "number: plain 3524, no grouping")
+            let verdictApprove = PRStage.ready(verdict: .approve, findings: ReviewFindings(), followUp: false, commits: nil)
+            let verdictChanges = PRStage.ready(verdict: .requestChanges, findings: ReviewFindings(blocking: 1), followUp: false, commits: nil)
+            expect(PRRowActions.offersApprove(stage: verdictApprove, hasWriteToken: true, gateAllows: true), "hover: Approve offered on an approve verdict with the token")
+            expect(!PRRowActions.offersApprove(stage: verdictApprove, hasWriteToken: false, gateAllows: true) && !PRRowActions.offersApprove(stage: verdictApprove, hasWriteToken: true, gateAllows: false)
+                   && !PRRowActions.offersApprove(stage: verdictChanges, hasWriteToken: true, gateAllows: true) && !PRRowActions.offersApprove(stage: .asked, hasWriteToken: true, gateAllows: true), "hover: no Approve without the token, an open gate, or an approve verdict")
+            expect(PullRequestsNeedYou.rowLimit(maxRows: 6, pipelineRows: 0, hasPipelines: false) == 5 && PullRequestsNeedYou.rowLimit(maxRows: 6, pipelineRows: 2, hasPipelines: true) == 4
+                   && PullRequestsNeedYou.rowLimit(maxRows: 6, pipelineRows: 6, hasPipelines: true) == 2 && PullRequestsNeedYou.rowLimit(maxRows: 8, pipelineRows: 1, hasPipelines: true) == 5, "rows: up to five, two at least, pipelines first")
+        }
 
         // The review hash.
         expect(PREvents.hash(["a": "approved", "b": "changes_requested"]) == PREvents.hash(["b": "changes_requested", "a": "approved"]), "hash: order does not matter")
