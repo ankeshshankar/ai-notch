@@ -347,7 +347,7 @@ final class ReviewStore: ObservableObject {
     private func reviewFinished(_ ref: PullRequestRef, _ record: ReviewRecord) {
         recountWaiting(autoReview.ledger)
         guard notify.reviewDone, !muted.contains(ref.key) else { return }
-        let body = ReviewWaiting.notificationText(id: ref.id, repo: ref.repo, record: record)
+        let body = ReviewWaiting.notificationText(id: ref.id, repo: ref.repo, record: record, newReplies: autoReview.unseenReplies[ref.key] ?? 0)
         Notifier.shared.postReviewDone(prID: ref.key, title: record.baseHead != nil ? "Follow-up done" : "Review done", body: body)
         SoundPlayer.shared.play(.prNews)
     }

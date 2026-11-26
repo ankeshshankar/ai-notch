@@ -129,6 +129,30 @@ enum PRReviewAPI {
     /// A review window preview or check answers with these instead of reading Bitbucket.
     nonisolated(unsafe) static var fixtureComments: [ExistingComment]?
 
+    /// The comments with their parents and authors, for the reply threads (same read token, same paging).
+    /// A preview or check answers with `fixtureRaw`.
+    nonisolated(unsafe) static var fixtureRaw: [RawComment]?
+
+    static func rawComments(_ ref: PullRequestRef) async -> [RawComment]? {
+        if let fixtureRaw { return fixtureRaw }
+        guard fixtureComments == nil, let read = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else { return nil }
+        let base = CommentPayload.endpoint(apiBase: BitbucketConfig.apiBase, workspace: ref.workspace, repo: ref.repo, id: ref.id)
+        let query = [("pagelen", "100"), ("fields", CommentPages.fields)]
+        var url = BuildHTTP.url(base, query)
+        var all: [RawComment] = []
+        for _ in 0..<5 {
+            guard let current = url else { break }
+            var request = URLRequest(url: current, timeoutInterval: 30)
+            request.setValue("Bearer \(read)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            guard let (data, response) = try? await BuildHTTP.session.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200,
+                  let page = CommentPages.parse(data) else { return all.isEmpty ? nil : all }
+            all += page.comments
+            url = page.next.flatMap { BuildHTTP.next($0, keeping: query) }
+        }
+        return all
+    }
+
     enum PostResult: Equatable {
         case posted(Int)
         case failed(String)
@@ -230,6 +254,21 @@ extension PRReviewAPI {
         switch await write(endpoint, body: nil, okStatus: [200, 201, 204, 409]) {
         case .failure(let why): return .failed(why.text == "Bitbucket answered 403" ? "only a comment thread's first comment can be resolved" : why.text)
         case .success: return .done
+        }
+    }
+
+    /// Posts a reply under one of my comments (`POST …/comments` with a `parent`): only from the Reply buttons, after a confirm.
+    /// The id Bitbucket gave the new comment (the dry run answers 900_001 and up).
+    static func reply(to parent: Int, text: String, on ref: PullRequestRef) async -> PostResult {
+        let endpoint = CommentPayload.endpoint(apiBase: BitbucketConfig.apiBase, workspace: ref.workspace, repo: ref.repo, id: ref.id)
+        let body = ReplyPayload.json(parent: parent, body: text)
+        if dryRun {
+            sent.append(Sent(method: "POST", url: endpoint, body: String(decoding: body, as: UTF8.self)))
+            return .posted(900_001 + sent.count)
+        }
+        switch await write(endpoint, body: body) {
+        case .failure(let why): return .failed(why.text)
+        case .success(let data): return CommentPayload.createdID(data).map { .posted($0) } ?? .failed("Bitbucket did not return the reply")
         }
     }
 

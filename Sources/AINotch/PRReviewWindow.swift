@@ -27,6 +27,7 @@ final class PRReviewWindowModel: ObservableObject {
         case action(ReviewAction)
         case combined(CombinedAction)
         case resolve(String)
+        case thread(ThreadAction, Int)
         case branch
     }
 
@@ -67,6 +68,8 @@ final class PRReviewWindowModel: ObservableObject {
         session.repoPath = { PRReviewStore.repoPath(pr.ref) }
         let (rkey, head) = (pr.ref.key, found.record.head)
         session.onPosted = { [weak store] count in store?.notePosted(key: rkey, head: head, count: count) }
+        session.me = { [weak store] in store?.meUUID() }
+        session.onRepliesChanged = { [weak store] count in store?.setUnseenReplies(rkey, count) }
         session.loadExisting()
         sessions[key] = session
         return session
@@ -84,6 +87,15 @@ final class PRReviewWindowModel: ObservableObject {
     }
 
     func forgetBehind(_ id: String) { behind[id] = nil }
+
+    /// Reads the replies for the pull requests that have a review (the sidebar's "N replies"); the open one is read by its own session.
+    func refreshReplies() {
+        for pr in prs where pr.role != .mine {
+            guard let found = store.record(for: pr), found.record.phase == .done else { continue }
+            let (ref, head) = (pr.ref, found.record.head)
+            Task { @MainActor in await store.refreshReplies(ref, head: head) }
+        }
+    }
 
     /// ⌘R and the Re-review button: a follow-up when the pull request has new commits since a finished review.
     func reReview(_ pr: PullRequest) {
@@ -219,7 +231,7 @@ struct PRReviewWindowView: View {
             }
         }
         .frame(minWidth: 480, minHeight: 420)
-        .onAppear { if model.selected == nil { model.selected = model.prs.first?.id } }
+        .onAppear { if model.selected == nil { model.selected = model.prs.first?.id }; model.refreshReplies() }
     }
 
     private var emptyState: some View {
@@ -387,6 +399,10 @@ private struct PRReviewSidebarRow: View {
                 }
                 .foregroundStyle(badge.color)
                 Text(pipeline.text).font(Typo.label()).foregroundStyle(pipeline.color).lineLimit(1)
+            }
+            if let replies = store.unseenReplies[pr.ref.key], replies > 0 {
+                Label(ReplySeen.label(replies), systemImage: "arrowshape.turn.up.left.fill").font(Typo.label(.medium)).foregroundStyle(Palette.claude)
+                    .labelStyle(.titleAndIcon).lineLimit(1)
             }
             if !reviewers.text.isEmpty {
                 HStack(spacing: 4) {
@@ -599,6 +615,7 @@ struct PRReviewConfirm: View {
                 case .action(let action): actionBody(action)
                 case .combined(let action): combinedBody(action)
                 case .resolve(let id): resolveBody(id)
+                case .thread(let action, let id): threadBody(action, id)
                 case .branch: EmptyView()
                 }
             }
@@ -706,6 +723,30 @@ struct PRReviewConfirm: View {
             buttons(confirm: "Resolve", enabled: !session.posting) {
                 model.overlay = nil
                 Task { await session.resolve(id) }
+            }
+        }
+    }
+
+    @ViewBuilder private func threadBody(_ action: ThreadAction, _ id: Int) -> some View {
+        if let session = model.session(for: pr), let thread = session.replies.thread(id) {
+            let text = session.replyDraft(id).trimmingCharacters(in: .whitespacesAndNewlines)
+            Text(action.title + " on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+            Text(action == .resolve ? "This marks the comment thread resolved on Bitbucket, as you."
+                 : action == .reply ? "This posts the reply under your comment, as you."
+                 : "This posts the reply under your comment, then marks the thread resolved, as you.")
+                .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(thread.location ?? "General comment").font(Typo.label(mono: true)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.middle)
+                Text(thread.text).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                if action.sendsReply {
+                    Text(text).font(Typo.body()).foregroundStyle(Palette.ink).fixedSize(horizontal: false, vertical: true).padding(.top, 2)
+                }
+            }
+            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
+            buttons(confirm: action.title, enabled: !session.posting && (!action.sendsReply || ReplyPayload.problems(text).isEmpty)) {
+                model.overlay = nil
+                Task { await session.perform(action, root: id) }
             }
         }
     }

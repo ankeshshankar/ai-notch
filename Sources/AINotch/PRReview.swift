@@ -22,6 +22,8 @@ final class PRReviewStore: ObservableObject {
     @Published private(set) var notices: [String: String] = [:]
     @Published private(set) var autoOn: Bool
     @Published private(set) var hasWriteToken = false
+    /// Unseen developer replies under my comments, by pull request key.
+    @Published private(set) var unseenReplies: [String: Int] = [:]
 
     /// The signed-in user's uuid, for "already approved" (set by ReviewStore).
     var meUUID: () -> String? = { nil }
@@ -146,6 +148,21 @@ final class PRReviewStore: ObservableObject {
         return ReviewGate.combinedOptions(pending: pending, record: found.record, currentHead: pr.head, pipeline: pipelineState(pr), alreadyApproved: pr.myReview == .approved)
     }
 
+    // MARK: Replies
+
+    func setUnseenReplies(_ key: String, _ count: Int) {
+        if (unseenReplies[key] ?? 0) != count { unseenReplies[key] = count > 0 ? count : nil }
+    }
+
+    /// Reads the replies under my comments on a pull request into its review folder and counts the unseen ones.
+    func refreshReplies(_ ref: PullRequestRef, head: String) async {
+        guard let raw = await PRReviewAPI.rawComments(ref) else { return }
+        let folder = Self.folder(ref, head: head)
+        guard FileManager.default.fileExists(atPath: folder.path) else { return }
+        let file = ReplyFiles.update(raw: raw, ref: ref, folder: folder, me: meUUID(), posted: [])
+        setUnseenReplies(ref.key, file.unseen(ReplyFiles.seen(ref)))
+    }
+
     // MARK: Queueing
 
     /// Each healthy poll: queue what is new, forget what closed.
@@ -265,10 +282,18 @@ final class PRReviewStore: ObservableObject {
         // A follow-up: what the last review said and did, and the comments on the pull request now.
         Task { @MainActor in
             let (log, commits) = await self.followUpInput(job.ref, base: base, head: job.head)
-            let existing = await PRReviewAPI.comments(job.ref) ?? []
+            let raw = await PRReviewAPI.rawComments(job.ref)
+            var existing: [ExistingComment] = raw?.map(\.existing) ?? []
+            if raw == nil { existing = await PRReviewAPI.comments(job.ref) ?? [] }
+            var threads: [ReplyThread] = []
+            if let raw {
+                let file = ReplyFiles.update(raw: raw, ref: job.ref, folder: folder, me: self.meUUID(), posted: ReplyFiles.postedIDs(log))
+                self.setUnseenReplies(job.ref.key, file.unseen(ReplyFiles.seen(job.ref)))
+                threads = file.threads.filter { file.needsAttention($0) }
+            }
             if var current = self.ledger.record(job.ref.key, head: job.head) { current.commitCount = commits; self.ledger.set(current); self.save() }
-            let input = FollowUp.inputJSON(previousHead: base.head, newHead: job.head, previous: base, log: log, existing: existing)
-            spec.followUp = .init(baseHead: base.head, inputJSON: input)
+            let input = FollowUp.inputJSON(previousHead: base.head, newHead: job.head, previous: base, log: log, existing: existing, replyThreads: threads)
+            spec.followUp = .init(baseHead: base.head, inputJSON: input, readReplies: !threads.isEmpty)
             runner.start(spec, done: done)
         }
     }
@@ -300,7 +325,11 @@ final class PRReviewStore: ObservableObject {
             record.notified = true
             ledger.set(record)
             save()
-            onFinished(ref, record)
+            let finished = record
+            Task { @MainActor in
+                await self.refreshReplies(ref, head: finished.head)
+                self.onFinished(ref, finished)
+            }
             return
         }
         ledger.set(record)
@@ -314,6 +343,15 @@ final class PRReviewStore: ObservableObject {
         var record = settled
         record.sessionID = existing.sessionID
         let folder = Self.folder(ref, head: existing.head)
+        if case .finished(let output) = outcome {
+            // The read of the author's replies rides on the follow-up's report.
+            let parsed = ReplyBlocks.parse(output.text)
+            if !parsed.analyses.isEmpty {
+                var file = ReplyFiles.load(folder)
+                file.apply(parsed.analyses)
+                ReplyFiles.save(file, folder: folder)
+            }
+        }
         guard let data = try? Data(contentsOf: folder.appendingPathComponent("followup.json")), let result = FollowUp.parse(data) else {
             // No structured answer: the report's VERDICT line still counts, nothing is marked.
             return record
