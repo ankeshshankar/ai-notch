@@ -114,6 +114,7 @@ enum PRReviewDev {
             _ = await PRReviewAPI.send(.approve, to: ref)
             expect(PRReviewAPI.sent.last?.url == base + "/approve", "approve endpoint")
             await selfCheckNext(scratch: scratch, expect: expect)
+            await selfCheckReplies(ref: ref, base: base, expect: expect)
             done = true
         }
         let limit = Date().addingTimeInterval(20)
@@ -255,6 +256,67 @@ enum PRReviewDev {
         expect(queued?.baseHead == headA && queued?.sessionID == "sess-33", "re-review of a new head is a follow-up on the old one")
         store.reviewNow(pr33, full: true)
         expect(store.ledger.record("acme/web-app#33", head: headB)?.baseHead == nil, "Full re-review is a whole review")
+    }
+
+    /// Reply threads: by `parent.id`, unseen counting, the AI's read, and the reply request (dry run only).
+    @MainActor
+    private static func selfCheckReplies(ref: PullRequestRef, base: String, expect: (Bool, String) -> Void) async {
+        let folder = PRReviewStore.folder(ref, head: "eeeeeeeeeeee5555")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? Data(#"{"version":1,"sessionID":"s","seeded":true,"cards":[{"id":"k1","severity":"should-fix","path":"src/a.ts","line":2,"body":"Guard this.","include":true,"postedID":301},{"id":"k2","severity":"nit","body":"Rename.","include":true,"postedID":309}],"messages":[]}"#.utf8).write(to: folder.appendingPathComponent("chat.json"))
+        try? FileManager.default.removeItem(at: ReplyFiles.seenURL(ref))
+        PRReviewAPI.fixtureRaw = [
+            RawComment(id: 301, author: "Sam Poe", authorUUID: "u-me", path: "src/a.ts", line: 2, text: "Guard this.", createdOn: "2026-11-20T10:00:00+00:00"),
+            RawComment(id: 302, parentID: 301, author: "Alex Doe", authorUUID: "u-alex", text: "Done in the next commit.", createdOn: "2026-11-20T11:00:00+00:00"),
+            RawComment(id: 303, parentID: 302, author: "Alex Doe", authorUUID: "u-alex", text: "And the test is added.", createdOn: "2026-11-20T12:00:00+00:00"),
+            RawComment(id: 309, author: "Sam Poe", authorUUID: "u-me", text: "Rename.", createdOn: "2026-11-20T10:30:00+00:00"),
+            RawComment(id: 320, author: "Sam Poe", authorUUID: "u-me", text: "A note I wrote by hand.", createdOn: "2026-11-20T10:40:00+00:00"),
+            RawComment(id: 321, parentID: 320, author: "Alex Doe", authorUUID: "u-alex", text: "Which note?", createdOn: "2026-11-20T10:50:00+00:00"),
+        ]
+        defer { PRReviewAPI.fixtureRaw = nil }
+        let session = PRChatSession(ref: ref, head: "eeeeeeeeeeee5555", folder: folder)
+        session.me = { "u-me" }
+        var reported = -1
+        session.onRepliesChanged = { reported = $0 }
+        session.loadExisting()
+        for _ in 0..<40 where session.replies.threads.isEmpty { try? await Task.sleep(nanoseconds: 50_000_000) }
+        expect(session.replies.threads.map(\.id) == [301, 320], "threads by parent.id: \(session.replies.threads.map(\.id))")
+        expect(session.replies.thread(301)?.replies.map(\.id) == [302, 303], "a reply to a reply stays in the thread")
+        expect(session.thread(forCard: session.card("k1")!)?.id == 301 && session.thread(forCard: session.card("k2")!) == nil, "a card finds its own thread")
+        expect(session.otherThreads.map(\.id) == [320], "my own comment outside the cards gets its thread")
+        expect(session.newReplyIDs == [302, 303, 321] && reported == 3, "3 unseen: \(session.newReplyIDs) reported \(reported)")
+        session.markRepliesSeen()
+        expect(reported == 0 && ReplyFiles.seen(ref) == [302, 303, 321], "seen state stored per pull request")
+        session.loadExisting()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        expect(session.newReplyIDs.isEmpty, "nothing new after they were seen")
+        PRReviewAPI.fixtureRaw?.append(RawComment(id: 330, parentID: 301, author: "Alex Doe", authorUUID: "u-alex", text: "One more thing.", createdOn: "2026-11-21T10:00:00+00:00"))
+        session.loadExisting()
+        for _ in 0..<40 where session.newReplyIDs.isEmpty { try? await Task.sleep(nanoseconds: 50_000_000) }
+        expect(session.newReplyIDs == [330], "a later reply is the only new one: \(session.newReplyIDs)")
+
+        // The AI's read, parsed from fenced blocks and stored with the thread.
+        var file = ReplyFiles.load(folder)
+        file.apply(ReplyBlocks.parse("```reply\n{\"comment\":301,\"verdict\":\"explained\",\"reason\":\"holds\",\"draft\":\"Makes sense, thanks.\"}\n```").analyses)
+        ReplyFiles.save(file, folder: folder)
+        let again = PRChatSession(ref: ref, head: "eeeeeeeeeeee5555", folder: folder)
+        expect(again.replies.analysis(again.replies.thread(301)!)?.verdict == .explained && again.replyDraft(301) == "Makes sense, thanks.", "read and draft survive a restart")
+
+        // The reply request: one POST with the parent, nothing before the click, nothing for bad wording.
+        PRReviewAPI.sent = []
+        await again.perform(.keepOpen, root: 301)
+        expect(PRReviewAPI.sent.isEmpty && !again.replies.needsAttention(again.replies.thread(301)!), "keep open sends nothing")
+        again.setReplyDraft(320, "Claude says rename it.")
+        await again.perform(.reply, root: 320)
+        expect(PRReviewAPI.sent.isEmpty, "a reply that names the AI is not sent")
+        again.setReplyDraft(320, "This is the note about the retry count.")
+        await again.perform(.replyAndResolve, root: 320)
+        expect(PRReviewAPI.sent.map(\.url) == [base + "/comments", base + "/comments/320/resolve"], "reply, then resolve: \(PRReviewAPI.sent.map(\.url))")
+        expect(PRReviewAPI.sent.first?.body == #"{"content":{"raw":"This is the note about the retry count."},"parent":{"id":320}}"#, "reply body shape: \(PRReviewAPI.sent.first?.body ?? "")")
+        expect(again.replies.resolved == [320] && again.replies.thread(320)?.replies.last?.byMe == true, "the thread shows my reply and is resolved")
+        PRReviewAPI.sent = []
+        await again.perform(.resolve, root: 301)
+        expect(PRReviewAPI.sent.map(\.url) == [base + "/comments/301/resolve"] && again.card("k1")?.resolved == true, "resolve marks the card")
     }
 
     /// One real turn on an existing review folder (`<ws>/<repo>#<id> <folder> <message>`); every post is a dry run.
