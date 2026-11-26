@@ -55,8 +55,15 @@ final class PRReviewWindowModel: ObservableObject {
 
     func select(_ id: String) {
         guard selected != id else { return }
+        markCurrentSeen()
         selected = id
         overlay = nil
+    }
+
+    /// The replies on the open pull request were on screen: they count as seen (when leaving it or closing the window).
+    func markCurrentSeen() {
+        guard let pr = current, let found = store.record(for: pr) else { return }
+        sessions[pr.id + "@" + found.record.head]?.markRepliesSeen()
     }
 
     /// The chat of the review that counts for this pull request; none until a review finished.
@@ -180,6 +187,7 @@ final class PRReviewWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        model?.markCurrentSeen()
         if quitsOnClose { NSApp.terminate(nil) }
         // The window's tree goes; the model (and any chat turn running) stays for the next opening.
         DispatchQueue.main.async { [weak self] in

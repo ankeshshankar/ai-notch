@@ -400,7 +400,6 @@ struct PRReviewTimeline: View {
         }
         .background(shortcutButtons)
         .onAppear { DispatchQueue.main.async { listFocused = true }; if !own { session.loadExisting(maxAge: 30) } }
-        .onDisappear { session.markRepliesSeen() }
         .onChange(of: model.focusChat) { inputFocused = true }
     }
 
