@@ -249,11 +249,22 @@ extension PRReviewAPI {
         let endpoint = ResolvePayload.endpoint(apiBase: BitbucketConfig.apiBase, workspace: ref.workspace, repo: ref.repo, id: ref.id, commentID: commentID)
         if dryRun {
             sent.append(Sent(method: "POST", url: endpoint, body: ""))
+            if let fixtureResolveStatus { return Self.result(ResolveAll.answer(status: fixtureResolveStatus(commentID))) }
             return .done
         }
-        switch await write(endpoint, body: nil, okStatus: [200, 201, 204, 409]) {
-        case .failure(let why): return .failed(why.text == "Bitbucket answered 403" ? "only a comment thread's first comment can be resolved" : why.text)
-        case .success: return .done
+        switch await rawPost(endpoint, body: nil) {
+        case .failure(let why): return .failed(why.text)
+        case .success(let answer): return Self.result(ResolveAll.answer(status: answer.status, scopeError: PRParse.isScopeError(answer.data)))
+        }
+    }
+
+    /// A check answers a dry-run resolve with this status per comment id (409 = already resolved).
+    nonisolated(unsafe) static var fixtureResolveStatus: ((Int) -> Int)?
+
+    private static func result(_ answer: ResolveAll.Answer) -> SendResult {
+        switch answer {
+        case .done: return .done
+        case .failed(let why): return .failed(why)
         }
     }
 
@@ -272,7 +283,7 @@ extension PRReviewAPI {
         }
     }
 
-    private static func write(_ endpoint: String, body: Data?, okStatus: Set<Int> = [200, 201, 204]) async -> Result<Data, WriteFailure> {
+    private static func rawPost(_ endpoint: String, body: Data?) async -> Result<(status: Int, data: Data), WriteFailure> {
         guard let write = KeychainItem.read(service: writeService)?.secret else { return .failure(WriteFailure("no write token: add it in Setup → Pull requests")) }
         guard let url = URL(string: endpoint) else { return .failure(WriteFailure("bad address")) }
         var request = URLRequest(url: url, timeoutInterval: 30)
@@ -284,12 +295,20 @@ extension PRReviewAPI {
         guard let (data, response) = try? await BuildHTTP.session.data(for: request), let http = response as? HTTPURLResponse else {
             return .failure(WriteFailure("no answer from Bitbucket"))
         }
-        if okStatus.contains(http.statusCode) { return .success(data) }
-        switch http.statusCode {
-        case 401: return .failure(WriteFailure("the write token was rejected"))
-        case 403 where PRParse.isScopeError(data): return .failure(WriteFailure("the write token lacks the pullrequest:write scope"))
-        case 404: return .failure(WriteFailure("not found"))
-        default: return .failure(WriteFailure("Bitbucket answered \(http.statusCode)"))
+        return .success((http.statusCode, data))
+    }
+
+    private static func write(_ endpoint: String, body: Data?, okStatus: Set<Int> = [200, 201, 204]) async -> Result<Data, WriteFailure> {
+        switch await rawPost(endpoint, body: body) {
+        case .failure(let why): return .failure(why)
+        case .success(let answer):
+            if okStatus.contains(answer.status) { return .success(answer.data) }
+            switch answer.status {
+            case 401: return .failure(WriteFailure("the write token was rejected"))
+            case 403 where PRParse.isScopeError(answer.data): return .failure(WriteFailure("the write token lacks the pullrequest:write scope"))
+            case 404: return .failure(WriteFailure("not found"))
+            default: return .failure(WriteFailure("Bitbucket answered \(answer.status)"))
+            }
         }
     }
 
