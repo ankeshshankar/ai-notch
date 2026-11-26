@@ -140,6 +140,7 @@ enum PRReviewDev {
             await selfCheckNext(scratch: scratch, expect: expect)
             await selfCheckReplies(ref: ref, base: base, expect: expect)
             await selfCheckOverride(ref: ref, base: base, expect: expect)
+            await selfCheckResolveAll(ref: ref, base: base, expect: expect)
             done = true
         }
         let limit = Date().addingTimeInterval(20)
@@ -342,6 +343,161 @@ enum PRReviewDev {
         PRReviewAPI.sent = []
         await again.perform(.resolve, root: 301)
         expect(PRReviewAPI.sent.map(\.url) == [base + "/comments/301/resolve"] && again.card("k1")?.resolved == true, "resolve marks the card")
+    }
+
+    /// "Resolve N fixed": which threads count, the one confirm's list sent in order, 409, a partial failure, a thread that
+    /// changed since the confirm, and the override gate turning on once every thread is resolved (all on a dry run).
+    @MainActor
+    private static func selfCheckResolveAll(ref: PullRequestRef, base: String, expect: (Bool, String) -> Void) async {
+        func raw(resolved: Set<Int> = [68]) -> [RawComment] {
+            var list: [RawComment] = (61...70).map {
+                RawComment(id: $0, author: "Sam Poe", authorUUID: "u-me", path: "src/a.ts", line: $0 - 50, text: "Comment \($0)\nsecond line", createdOn: "2026-11-20T10:\($0 - 10):00Z", resolved: resolved.contains($0))
+            }
+            for parent in [64, 65, 66, 67, 69, 70] {
+                list.append(RawComment(id: parent + 100, parentID: parent, author: "Alex Doe", authorUUID: "u-alex", text: "Reply to \(parent).", createdOn: "2026-11-21T10:00:00Z"))
+            }
+            return list
+        }
+        func cardsJSON(only: [Int]? = nil) -> String {
+            let all: [(Int, String, String)] = [
+                (61, "blocking", #","status":"fixed","statusReason":"guard added at a.ts:12""#),
+                (62, "should-fix", #","status":"still_open","statusReason":"no test yet""#),
+                (63, "nit", #","status":"unclear""#),
+                (64, "should-fix", ""), (65, "should-fix", ""), (66, "blocking", ""), (67, "nit", ""),
+                (68, "should-fix", #","status":"fixed","statusReason":"done""#),
+                (69, "should-fix", #","status":"fixed","statusReason":"done""#),
+            ]
+            let cards = all.filter { only?.contains($0.0) ?? true }.map {
+                #"{"id":"c\#($0.0)","severity":"\#($0.1)","path":"src/a.ts","line":\#($0.0 - 50),"title":"Title \#($0.0)","body":"Body \#($0.0)","include":true,"postedID":\#($0.0),"postedAt":1\#($0.2)}"#
+            }
+            return #"{"version":1,"sessionID":"s","seeded":true,"cards":[\#(cards.joined(separator: ","))],"messages":[]}"#
+        }
+        let reads = """
+        ```reply
+        {"comment":64,"verdict":"fixed","reason":"null check added at a.ts:14"}
+        ```
+        ```reply
+        {"comment":65,"verdict":"explained","reason":"holds"}
+        ```
+        ```reply
+        {"comment":66,"verdict":"disagrees","reason":"pushes back"}
+        ```
+        ```reply
+        {"comment":67,"verdict":"question","reason":"asks why"}
+        ```
+        ```reply
+        {"comment":69,"verdict":"not_fixed","reason":"still reads null"}
+        ```
+        ```reply
+        {"comment":70,"verdict":"fixed","reason":"cache cleared at b.ts:47"}
+        ```
+        """
+        let heads = ["f6f6f6f6f6f6", "f7f7f7f7f7f7", "f8f8f8f8f8f8", "f9f9f9f9f9f9"]
+        func make(_ head: String, resolved: Set<Int> = [68], cards: String? = nil) async -> PRChatSession {
+            let folder = PRReviewStore.folder(ref, head: head)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? Data((cards ?? cardsJSON()).utf8).write(to: folder.appendingPathComponent("chat.json"))
+            PRReviewAPI.fixtureRaw = raw(resolved: resolved)
+            let first = PRChatSession(ref: ref, head: head, folder: folder)
+            first.me = { "u-me" }
+            first.loadExisting()
+            for _ in 0..<60 where first.replies.myRoots == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+            var file = ReplyFiles.load(folder)
+            file.apply(ReplyBlocks.parse(reads).analyses)
+            ReplyFiles.save(file, folder: folder)
+            let session = PRChatSession(ref: ref, head: head, folder: folder)
+            session.me = { "u-me" }
+            return session
+        }
+        defer { PRReviewAPI.fixtureRaw = nil; PRReviewAPI.fixtureResolveStatus = nil }
+
+        // Which threads count.
+        let session = await make(heads[0])
+        let items = session.resolvableThreads(currentHead: heads[0])
+        expect(items.map(\.id) == [61, 64, 70], "resolve all: counts fixed by follow-up (61), by reply read (64) and my own thread (70): \(items.map(\.id))")
+        expect(items.first?.severity == .blocking && items.first?.location == "src/a.ts:11" && items.first?.title == "Title 61" && items.first?.why == "guard added at a.ts:12" && items.first?.source == .followUp,
+               "resolve all: a follow-up item has severity, file:line, title and the follow-up's reason: \(String(describing: items.first))")
+        expect(items[1].why == "Reply read: null check added at a.ts:14" && items[1].source == .replyRead && items[2].severity == nil && items[2].title == "Comment 70", "resolve all: reply-read items give the reply reason; a hand-written thread uses its first line")
+        expect(![62, 63, 65, 66, 67].contains(where: items.map(\.id).contains), "resolve all: still open, unclear, explained, disagrees and question are left out")
+        expect(!items.map(\.id).contains(68) && !items.map(\.id).contains(69), "resolve all: resolved on Bitbucket and a disagreeing read are left out")
+        expect(session.resolvableThreads(currentHead: "0123456789ab").map(\.id) == [64, 70] && session.resolvableThreads(currentHead: nil).map(\.id) == [64, 70], "resolve all: a follow-up of another head does not count")
+
+        // One confirm, sent in order; the comments are read again; the cards and threads show resolved.
+        PRReviewAPI.sent = []
+        let said = await session.resolveAllFixed(items, currentHead: heads[0])
+        expect(PRReviewAPI.sent.map(\.url) == [61, 64, 70].map { base + "/comments/\($0)/resolve" } && PRReviewAPI.sent.allSatisfy { $0.body == "" }, "resolve all: three POSTs in order, no body: \(PRReviewAPI.sent.map(\.url))")
+        expect(said == "Resolved 3 threads" && session.card("c61")?.resolved == true && session.card("c64")?.resolved == true && session.replies.resolved.sorted() == [61, 64, 70], "resolve all: remembered: \(said)")
+        expect(session.resolvableThreads(currentHead: heads[0]).isEmpty && session.bulkFailures.isEmpty, "resolve all: nothing left to resolve")
+        PRReviewAPI.sent = []
+        _ = await session.resolveAllFixed(items, currentHead: heads[0])
+        expect(PRReviewAPI.sent.isEmpty, "resolve all: a second click sends nothing")
+
+        // 409 means already resolved: done, not a failure.
+        let session409 = await make(heads[1])
+        PRReviewAPI.fixtureResolveStatus = { $0 == 61 ? 409 : 204 }
+        PRReviewAPI.sent = []
+        let said409 = await session409.resolveAllFixed(session409.resolvableThreads(currentHead: heads[1]), currentHead: heads[1])
+        expect(said409 == "Resolved 3 threads" && session409.bulkFailures.isEmpty && session409.card("c61")?.resolved == true, "resolve all: 409 counts as done: \(said409)")
+        expect(ResolveAll.answer(status: 409) == .done && ResolveAll.answer(status: 200) == .done && ResolveAll.answer(status: 204) == .done && ResolveAll.answer(status: 500) == .failed("Bitbucket answered 500"), "resolve all: status mapping")
+
+        // A failure on one does not stop the rest; it is listed with its reason and stays resolvable.
+        let sessionFail = await make(heads[2])
+        PRReviewAPI.fixtureResolveStatus = { $0 == 64 ? 500 : $0 == 70 ? 403 : 200 }
+        PRReviewAPI.sent = []
+        let saidFail = await sessionFail.resolveAllFixed(sessionFail.resolvableThreads(currentHead: heads[2]), currentHead: heads[2])
+        expect(PRReviewAPI.sent.count == 3 && saidFail == "Not all resolved: 1 done, 2 failed", "resolve all: keeps going after a failure: \(saidFail), \(PRReviewAPI.sent.count) sent")
+        expect(sessionFail.bulkFailures.map(\.why) == ["Bitbucket answered 500", "only a comment thread's first comment can be resolved"]
+               && sessionFail.bulkFailures.first?.label == "src/a.ts:14 · Title 64", "resolve all: the failures say which and why: \(sessionFail.bulkFailures)")
+        expect(sessionFail.card("c61")?.resolved == true && sessionFail.card("c64")?.resolved != true && sessionFail.resolvableThreads(currentHead: heads[2]).map(\.id) == [64, 70], "resolve all: the failed ones stay open")
+        PRReviewAPI.fixtureResolveStatus = nil
+
+        // A thread resolved on Bitbucket since the confirm is dropped, not sent.
+        let sessionMoved = await make(heads[3])
+        let shown = sessionMoved.resolvableThreads(currentHead: heads[3])
+        PRReviewAPI.fixtureRaw = raw(resolved: [68, 64])
+        PRReviewAPI.sent = []
+        let saidMoved = await sessionMoved.resolveAllFixed(shown, currentHead: heads[3])
+        expect(PRReviewAPI.sent.map(\.url) == [61, 70].map { base + "/comments/\($0)/resolve" } && saidMoved == "Resolved 2 threads; 1 skipped (changed since the confirm)", "resolve all: re-checked on fresh data: \(saidMoved)")
+        PRReviewAPI.fixtureRaw = nil
+        let none = await sessionMoved.resolveAllFixed(shown, currentHead: heads[3])
+        expect(none == "Not resolved: could not read the comments", "resolve all: unreadable comments send nothing: \(none)")
+
+        // The gate: every thread of mine is resolved by one click, so Approve anyway turns on at once.
+        let gateHead = "a7a7a7a7a7a7"
+        let gateRef = PullRequestRef(workspace: "acme", repo: "web-app", id: 8)
+        let gateFolder = PRReviewStore.folder(gateRef, head: gateHead)
+        try? FileManager.default.createDirectory(at: gateFolder, withIntermediateDirectories: true)
+        let gateCards = #"{"version":1,"sessionID":"s","seeded":true,"cards":[{"id":"g1","severity":"blocking","path":"src/a.ts","line":3,"title":"One","body":"b","include":true,"postedID":61,"postedAt":1,"status":"fixed","statusReason":"done"},{"id":"g2","severity":"should-fix","path":"src/a.ts","line":9,"title":"Two","body":"b","include":true,"postedID":64,"postedAt":1},{"id":"g3","severity":"nit","body":"n","include":false}],"messages":[]}"#
+        try? Data(gateCards.utf8).write(to: gateFolder.appendingPathComponent("chat.json"))
+        PRReviewAPI.fixtureRaw = raw(resolved: []).filter { [61, 64, 164].contains($0.id) }
+        let gateSession = PRChatSession(ref: gateRef, head: gateHead, folder: gateFolder)
+        gateSession.me = { "u-me" }
+        gateSession.loadExisting()
+        for _ in 0..<60 where gateSession.replies.myRoots == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+        var gateFile = ReplyFiles.load(gateFolder)
+        gateFile.apply(ReplyBlocks.parse("```reply\n{\"comment\":64,\"verdict\":\"fixed\",\"reason\":\"done\"}\n```").analyses)
+        ReplyFiles.save(gateFile, folder: gateFolder)
+        let live = PRChatSession(ref: gateRef, head: gateHead, folder: gateFolder)
+        live.me = { "u-me" }
+        var record = ReviewRecord(key: gateRef.key, head: gateHead, phase: .done, auto: false, queuedAt: 1)
+        record.verdict = .requestChanges
+        record.findings = ReviewFindings(blocking: 1, shouldFix: 1)
+        record.finishedAt = 2
+        let store = PRReviewStore()
+        var ledger = store.ledger
+        ledger.set(record)
+        store.injectLedgerForCheck(ledger)
+        let pr = PullRequest(ref: gateRef, title: "t", isDraft: false, author: PRPerson(uuid: nil, name: "Jane Doe"), source: "f", destination: "main", role: .reviewing, participants: [],
+                             myReview: .none, taskCount: 0, commentCount: 0, updatedOn: "", updatedAt: 0, url: nil, build: PRBuild(state: .succeeded, key: "k", pipeline: nil, url: nil), head: gateHead)
+        expect(!store.overrideGate(for: pr, session: live).isAvailable && live.resolvableThreads(currentHead: gateHead).count == 2, "resolve all gate: two open threads, Approve anyway is off")
+        PRReviewAPI.fixtureFresh = PRReviewAPI.Fresh(isOpen: true, head: gateHead, pipeline: .green, alreadyApproved: false)
+        PRReviewAPI.sent = []
+        store.resolveAllFixed(live.resolvableThreads(currentHead: gateHead), on: pr, session: live)
+        for _ in 0..<80 where store.acting[gateRef.key] != nil || store.notices[gateRef.key] == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+        expect(store.notices[gateRef.key] == "Resolved 2 threads" && PRReviewAPI.sent.count == 2, "resolve all gate: resolved: \(store.notices[gateRef.key] ?? "-")")
+        expect(store.overrideGate(for: pr, session: live).isAvailable, "resolve all gate: Approve anyway is on at once, without a refresh: \(store.overrideGate(for: pr, session: live))")
+        PRReviewAPI.fixtureFresh = nil
+        PRReviewAPI.fixtureRaw = nil
     }
 
     /// "Approve anyway" (the gate, then the click on a dry run) and the one-result rule of a follow-up.
@@ -549,6 +705,7 @@ enum PRReviewDev {
 
         let store = PRReviewStore()
         if args.contains("--replies") { replyFixtures(store: store, ref: web(214), head: heads[0]) }
+        if args.contains("--resolve-all") { resolveAllFixtures(store: store, ref: web(214), head: heads[0]) }
         if args.contains("--override") { overrideFixtures(store: store, ref: web(214), head: heads[0], resolved: !args.contains("--unresolved")) }
         let list = PRListSource()
         let jane = PRPerson(uuid: "u-jane", name: "Jane Doe"), john = PRPerson(uuid: "u-john", name: "John Roe"), sam = PRPerson(uuid: "u-sam", name: "Sam Poe")
@@ -580,6 +737,7 @@ enum PRReviewDev {
         case "combined": model.overlay = .combined(.postAndRequestChanges)
         case "thread": model.overlay = .thread(.replyAndResolve, 302)
         case "override": model.overlay = .override
+        case "resolveall": model.overlay = .resolveAll
         case "keys": model.showKeys = true
         default: break
         }
@@ -599,6 +757,47 @@ enum PRReviewDev {
             }
             FileHandle.standardError.write(Data("review-window \(info.number) \(Int(info.frame.minX)) \(Int(info.frame.minY)) \(Int(info.frame.width)) \(Int(info.frame.height))\n".utf8))
         }
+    }
+
+    /// `--resolve-all`: three of my threads that count as fixed (a follow-up Fixed card, a reply read Fixed on a card, a comment I wrote by hand),
+    /// one still open, one explained, one resolved on Bitbucket. Resolving is a dry run (nothing is sent).
+    @MainActor private static func resolveAllFixtures(store: PRReviewStore, ref: PullRequestRef, head: String) {
+        store.meUUID = { "u-me" }
+        let chat = """
+        {"version":1,"sessionID":"s","seeded":true,"cards":[
+         {"id":"c1","severity":"blocking","path":"src/profile/photo.service.ts","line":42,"title":"Delete by id","body":"No owner check on the delete.","include":true,"postedID":301,"postedAt":1,"status":"fixed","statusReason":"The route now checks the owner before deleting (photo.service.ts:44)."},
+         {"id":"c2","severity":"should-fix","path":"src/profile/photo.service.ts","line":77,"title":"Default avatar","body":"Set the default avatar instead of clearing.","include":true,"postedID":302,"postedAt":1,"status":"still_open","statusReason":"The field is still cleared (photo.service.ts:79)."},
+         {"id":"c3","severity":"should-fix","path":"src/profile/photo.ts","line":9,"title":"Empty list test","body":"Add a test for the empty list.","include":true,"postedID":303,"postedAt":1},
+         {"id":"c4","severity":"nit","path":"src/profile/photo.ts","line":14,"title":"Log line","body":"The log prints the file path.","include":true,"postedID":304,"postedAt":1},
+         {"id":"c5","severity":"nit","body":"Rename x to count.","include":false}],"messages":[],
+         "followUps":[{"id":"f1","fromHead":"9f8e7d6c5b4a","toHead":"\(head)","commits":2,"at":2,"verdict":"REQUEST CHANGES","summary":"The owner check is in.","fixed":1,"stillOpen":1,"unclear":0,"newCards":0}]}
+        """
+        try? Data(chat.utf8).write(to: PRReviewStore.folder(ref, head: head).appendingPathComponent("chat.json"))
+        func mine(_ id: Int, _ line: Int, _ text: String, resolved: Bool = false) -> RawComment {
+            RawComment(id: id, author: "Sam Poe", authorUUID: "u-me", path: "src/profile/photo.ts", line: line, text: text, createdOn: "2026-11-20T10:0\(id - 300):00Z", resolved: resolved)
+        }
+        func theirs(_ id: Int, _ parent: Int, _ text: String) -> RawComment {
+            RawComment(id: id, parentID: parent, author: "Alex Doe", authorUUID: "u-alex", text: text, createdOn: "2026-11-21T10:0\(id - 400):00Z")
+        }
+        PRReviewAPI.fixtureRaw = [mine(301, 42, "No owner check on the delete."), mine(302, 77, "Set the default avatar."), mine(303, 9, "Add a test for the empty list."),
+                                  mine(304, 14, "The log prints the file path.", resolved: true), mine(320, 42, "Should this also clear the cached thumbnail?"),
+                                  theirs(402, 302, "The old screens go next sprint."), theirs(403, 303, "Added in the last commit."), theirs(405, 320, "Cleared in removePhoto now.")]
+        let folder = PRReviewStore.folder(ref, head: head)
+        var file = RepliesFile()
+        let roots = ReplyThreads.roots(in: PRReviewAPI.fixtureRaw ?? [], postedIDs: [301, 302, 303, 304], me: "u-me")
+        file.update(threads: ReplyThreads.build(PRReviewAPI.fixtureRaw ?? [], roots: roots, me: "u-me"), at: Date().timeIntervalSince1970)
+        file.apply(ReplyBlocks.parse("""
+        ```reply
+        {"comment": 302, "verdict": "explained", "reason": "The screens ship in this release, so the null check is still needed."}
+        ```
+        ```reply
+        {"comment": 303, "verdict": "fixed", "reason": "The empty-list test exists (photo.test.ts:31)."}
+        ```
+        ```reply
+        {"comment": 320, "verdict": "fixed", "reason": "removePhoto clears the cache (photo.ts:47)."}
+        ```
+        """).analyses)
+        ReplyFiles.save(file, folder: folder)
     }
 
     /// `--override`: two posted comments (threads resolved on Bitbucket unless `--unresolved`), a should-fix and a nit on Skip, a
