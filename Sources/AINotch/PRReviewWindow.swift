@@ -27,6 +27,7 @@ final class PRReviewWindowModel: ObservableObject {
         case action(ReviewAction)
         case combined(CombinedAction)
         case resolve(String)
+        case resolveAll
         case thread(ThreadAction, Int)
         case override
         case branch
@@ -658,6 +659,7 @@ struct PRReviewConfirm: View {
                 case .action(let action): actionBody(action)
                 case .combined(let action): combinedBody(action)
                 case .resolve(let id): resolveBody(id)
+                case .resolveAll: resolveAllBody
                 case .thread(let action, let id): threadBody(action, id)
                 case .override: overrideBody
                 case .branch: EmptyView()
@@ -799,6 +801,38 @@ struct PRReviewConfirm: View {
                 Task { await session.resolve(id) }
             }
         }
+    }
+
+    @ViewBuilder private var resolveAllBody: some View {
+        if let session = model.session(for: pr) {
+            let items = session.resolvableThreads(currentHead: pr.head)
+            Text(verbatim: "Resolve \(items.count) fixed thread\(items.count == 1 ? "" : "s") on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+            Text("Each thread is marked resolved on Bitbucket, as you, one after the other. They are checked again right before.").font(Typo.label()).foregroundStyle(Palette.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) { ForEach(items) { resolveRow($0) } }
+            }
+            .frame(maxHeight: 300)
+            .ax("Threads to resolve", value: "\(items.count)")
+            buttons(confirm: "Resolve \(items.count)", enabled: !items.isEmpty && !session.posting && store.acting[pr.id] == nil) {
+                model.overlay = nil
+                store.resolveAllFixed(items, on: pr, session: session)
+            }
+        }
+    }
+
+    private func resolveRow(_ item: ResolveItem) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                if let severity = item.severity { PRReviewSeverityChip(severity: severity) }
+                Text(item.location ?? "General comment").font(Typo.label(mono: true)).foregroundStyle(Palette.ink2).lineLimit(1).truncationMode(.middle)
+            }
+            Text(item.title).font(Typo.label(.medium)).foregroundStyle(Palette.ink).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            Text(item.why).font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
+        .ax("Thread to resolve: \(item.label)", value: item.why)
     }
 
     @ViewBuilder private func threadBody(_ action: ThreadAction, _ id: Int) -> some View {

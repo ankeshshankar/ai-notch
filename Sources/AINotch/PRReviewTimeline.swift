@@ -490,6 +490,34 @@ struct PRReviewTimeline: View {
         }
     }
 
+    /// "Resolve N fixed": one button for every open thread of mine that is found fixed; the confirm lists them.
+    @ViewBuilder private var resolveAllPill: some View {
+        let count = session.resolvableThreads(currentHead: pr.head).count
+        if count > 0 {
+            PRReviewPill(title: "Resolve \(count) fixed", symbol: "checkmark.bubble", enabled: !session.posting && store.acting[pr.id] == nil) { model.overlay = .resolveAll }
+                .help("Marks every open thread of yours that is found fixed (by the follow-up or the reply read) resolved on Bitbucket, after one confirm.")
+        }
+    }
+
+    /// The threads the last bulk resolve could not resolve, and why.
+    @ViewBuilder private var resolveFailures: some View {
+        if !session.bulkFailures.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Label("Not resolved", systemImage: "exclamationmark.triangle").font(Typo.label(.semibold)).foregroundStyle(Palette.failed)
+                    Spacer(minLength: 0)
+                    PRReviewPill(title: "Dismiss") { session.clearBulkFailures() }
+                }
+                ForEach(Array(session.bulkFailures.enumerated()), id: \.offset) { _, failure in
+                    Text("\(failure.label): \(failure.why)").font(Typo.label()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
+            .ax("Threads not resolved", value: session.bulkFailures.map { "\($0.label): \($0.why)" }.joined(separator: "; "))
+        }
+    }
+
     /// Replies under my comments that are not cards, and the bar to refresh them and have them read.
     @ViewBuilder private var repliesBar: some View {
         let threads = session.replies.threads
@@ -499,6 +527,7 @@ struct PRReviewTimeline: View {
                     Text("Replies").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
                     Text(session.newReplyIDs.isEmpty ? ReplySeen.label(threads.reduce(0) { $0 + $1.replies.count }) : "\(session.newReplyIDs.count) new").font(Typo.label()).foregroundStyle(Palette.ink3)
                     InfoMark(text: "What the authors answered under the comments you posted. Read replies has Claude check each thread against the code (read only) and draft an answer; nothing is posted or resolved until you click and confirm.")
+                    if !own { resolveAllPill }
                     Spacer(minLength: 0)
                     if !session.unreadThreads.isEmpty {
                         PRReviewPill(title: session.readingReplies ? "Reading…" : "Read replies", symbol: "text.magnifyingglass", enabled: !session.readingReplies && !session.running) { session.readReplies() }
@@ -543,11 +572,13 @@ struct PRReviewTimeline: View {
                 Text(own ? "To fix" : "Suggested comments").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
                 Text(cards.isEmpty ? "" : own ? "\(cards.filter { $0.done == true }.count) of \(cards.count) done" : "\(toAdd) to add · \(cards.count) total").font(Typo.label()).foregroundStyle(Palette.ink3)
                 InfoMark(text: own ? "The findings as a checklist for you. Nothing here is posted anywhere." : "Pick the ones to post under your name: Add is on for blocking and should-fix findings, off for nits. Edit the text, or ask in the chat to draft or soften one. Nothing is posted until you confirm.")
+                if !own { resolveAllPill }
                 Spacer(minLength: 0)
                 if session.needsDraft {
                     PRReviewPill(title: session.drafting ? "Drafting…" : "Draft comments", symbol: "text.badge.plus", enabled: !session.running) { session.draftComments() }
                 }
             }
+            if !own { resolveFailures }
             if cards.isEmpty {
                 Text(session.needsDraft ? "This review has no comments drafted yet." : "No comments to post. Ask in the chat to draft one.")
                     .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)

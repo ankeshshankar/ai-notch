@@ -460,6 +460,62 @@ final class PRChatSession: ObservableObject {
     /// The posted cards a follow-up found fixed and that are still open on Bitbucket.
     var resolvable: [SuggestedComment] { log.cards.filter { $0.isPosted && $0.status == .fixed && $0.resolved != true } }
 
+    // MARK: Resolve all fixed
+
+    /// My threads that are open on Bitbucket and found fixed (a follow-up on the current head, or the reply read).
+    func resolvableThreads(currentHead: String?) -> [ResolveItem] {
+        ResolveAll.items(cards: log.cards, replies: replies, followUpIsCurrent: ReviewGate.sameCommit(head, currentHead))
+    }
+
+    /// Threads the last "Resolve all fixed" could not resolve, with the reason.
+    @Published private(set) var bulkFailures: [(label: String, why: String)] = []
+
+    func clearBulkFailures() { bulkFailures = [] }
+
+    /// Resolves the threads listed in the confirm, one at a time. The comments are read again first and only the threads that
+    /// still qualify unchanged are sent; 409 counts as done; a failure is kept and the rest go on; the comments are read again after.
+    /// Returns the line for the status row.
+    @discardableResult
+    func resolveAllFixed(_ confirmed: [ResolveItem], currentHead: String?) async -> String {
+        guard !posting, !confirmed.isEmpty else { return "" }
+        posting = true
+        notice = nil
+        bulkFailures = []
+        defer { posting = false }
+        guard await readComments() else { notice = "Not resolved: could not read the comments"; return notice ?? "" }
+        let now = resolvableThreads(currentHead: currentHead)
+        let todo = confirmed.filter { now.contains($0) }
+        let dropped = confirmed.count - todo.count
+        var done = 0
+        var failures: [(label: String, why: String)] = []
+        for item in todo {
+            switch await PRReviewAPI.resolve(commentID: item.id, on: ref) {
+            case .done:
+                done += 1
+                if !replies.resolved.contains(item.id) { replies.resolved.append(item.id) }
+                if let index = log.cards.firstIndex(where: { $0.postedID == item.id }) { log.cards[index].resolved = true; save() }
+                ReplyFiles.save(replies, folder: folder)
+            case .failed(let why):
+                failures.append((item.label.isEmpty ? "comment \(item.id)" : item.label, why))
+            }
+        }
+        bulkFailures = failures
+        _ = await readComments()
+        var text = failures.isEmpty ? "Resolved \(done) thread\(done == 1 ? "" : "s")" : "Not all resolved: \(done) done, \(failures.count) failed"
+        if dropped > 0 { text += "; \(dropped) skipped (changed since the confirm)" }
+        notice = text
+        return text
+    }
+
+    /// Reads the pull request's comments now and folds them in; false when they could not be read.
+    private func readComments() async -> Bool {
+        guard let raw = await PRReviewAPI.rawComments(ref) else { return false }
+        existing = raw.map(\.existing)
+        existingLoaded = true
+        applyReplies(ReplyFiles.update(raw: raw, ref: ref, folder: folder, me: me(), posted: ReplyFiles.postedIDs(log)))
+        return true
+    }
+
     /// My own work: ticking a card off as done.
     func setDone(_ id: String, _ on: Bool) {
         guard let index = log.cards.firstIndex(where: { $0.id == id }) else { return }

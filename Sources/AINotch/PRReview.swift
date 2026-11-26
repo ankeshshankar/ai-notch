@@ -499,6 +499,21 @@ final class PRReviewStore: ObservableObject {
         }
     }
 
+    /// "Resolve N fixed" after its confirm; the result goes to the status row, which also redraws the Approve buttons.
+    func resolveAllFixed(_ items: [ResolveItem], on pr: PullRequest, session: PRChatSession) {
+        let id = pr.ref.key
+        guard acting[id] == nil, !session.posting, !items.isEmpty else { return }
+        acting[id] = "Resolving \(items.count)…"
+        notices[id] = nil
+        let (ref, me) = (pr.ref, meUUID())
+        Task { @MainActor in
+            defer { acting[id] = nil }
+            guard await PRReviewAPI.hasWriteTokenAsync() else { notices[id] = "Needs the write token: Setup → Pull requests"; return }
+            guard let fresh = await PRReviewAPI.fresh(ref, me: me), fresh.isOpen else { notices[id] = "Not resolved: could not read the open pull request"; return }
+            notices[id] = await session.resolveAllFixed(items, currentHead: fresh.head)
+        }
+    }
+
     /// "Approve anyway" after its confirm: the pull request, the pipeline and my threads are read again, the same
     /// override gate is checked on that, and only then the approval is sent (nothing is posted).
     func performOverride(on pr: PullRequest, session: PRChatSession) {
