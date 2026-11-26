@@ -28,6 +28,7 @@ final class PRReviewWindowModel: ObservableObject {
         case combined(CombinedAction)
         case resolve(String)
         case thread(ThreadAction, Int)
+        case override
         case branch
     }
 
@@ -609,6 +610,10 @@ struct PRReviewDetail: View {
                     .help(changes.isAllowed ? "Asks the author for changes, after a confirm." : "Off: \(Self.reason(changes))")
                 PRReviewPill(title: "Approve", symbol: "checkmark", prominent: true, enabled: approve.isAllowed && store.acting[id] == nil) { model.overlay = .action(.approve) }
                     .help(approve.isAllowed ? "Approves the pull request, after a confirm." : "Off: \(Self.reason(approve))")
+                if !approve.isAllowed, let info = store.overrideGate(for: pr, session: session).info {
+                    PRReviewPill(title: "Approve anyway", symbol: "checkmark.seal", enabled: store.acting[id] == nil) { model.overlay = .override }
+                        .help("Your call over the review: every thread of yours is resolved and every card is on Skip. The confirm lists what is overridden (\(info.lines.first ?? "")).")
+                }
             }
         }
     }
@@ -619,8 +624,12 @@ struct PRReviewDetail: View {
         if let acting = store.acting[id] { return (acting, Palette.ink2) }
         if let notice = store.notices[id] { return (notice, notice.hasPrefix("Not") || notice.hasPrefix("Needs") ? Palette.waiting : Palette.done) }
         guard let record = found?.record, record.phase == .done, let verdict = record.verdict, record.own != true, pr.role != .mine else { return nil }
-        let gate = store.gate(verdict == .approve ? .approve : .requestChanges, for: pr)
-        if case .blocked(let why) = gate { return ((verdict == .approve ? "Approve is off: " : "Request changes is off: ") + why, Palette.ink3) }
+        // Why the Approve button is off, always in view (the same words as its tooltip).
+        if case .blocked(let why) = store.gate(.approve, for: pr) {
+            if store.overrideGate(for: pr, session: session).isAvailable { return ("Approve is off: \(why). Approve anyway is yours to use.", Palette.ink3) }
+            return ("Approve is off: \(why)", Palette.ink3)
+        }
+        if verdict == .requestChanges, case .blocked(let why) = store.gate(.requestChanges, for: pr) { return ("Request changes is off: " + why, Palette.ink3) }
         return nil
     }
 
@@ -650,6 +659,7 @@ struct PRReviewConfirm: View {
                 case .combined(let action): combinedBody(action)
                 case .resolve(let id): resolveBody(id)
                 case .thread(let action, let id): threadBody(action, id)
+                case .override: overrideBody
                 case .branch: EmptyView()
                 }
             }
@@ -703,6 +713,36 @@ struct PRReviewConfirm: View {
             store.perform(action, on: pr)
         }
     }
+
+    /// "Approve anyway": what is overridden, listed (a blocking finding in plain words), then the same approve.
+    @ViewBuilder private var overrideBody: some View {
+        let session = model.session(for: pr)
+        let info = store.overrideGate(for: pr, session: session).info
+        Text(verbatim: "Approve #\(pr.ref.id) anyway?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+        Text("The review does not allow an approval. This approves on Bitbucket, as you, over what is listed here.")
+            .font(Typo.label()).foregroundStyle(Palette.ink2).fixedSize(horizontal: false, vertical: true)
+        if let info {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(info.lines.enumerated()), id: \.offset) { index, line in
+                    Text(line).font(Typo.label(index == 0 || line.hasSuffix("skipped.") ? .semibold : .regular))
+                        .foregroundStyle(line.contains("blocking finding") || line.hasPrefix("Blocking") ? Palette.waiting : Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
+            Text("All your threads are resolved and nothing is switched on. Pipeline \(PRReviewBadge.pipeline(pr).text.lowercased()) · commit \(String(pr.head?.prefix(7) ?? "—")).")
+                .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text("Not available now: " + (session.map { PRReviewDetail.reason(.blocked(reasonText(store.overrideGate(for: pr, session: $0)))) } ?? "no review")).font(Typo.label(.medium)).foregroundStyle(Palette.waiting)
+        }
+        buttons(confirm: "Approve anyway", enabled: info != nil && store.acting[pr.id] == nil) {
+            model.overlay = nil
+            if let session { store.performOverride(on: pr, session: session) }
+        }
+    }
+
+    private func reasonText(_ gate: OverrideGate) -> String { if case .unavailable(let why) = gate { return why } else { return "" } }
 
     /// What a card will put on the pull request: the comment, a suggested change, a task.
     private func cardRow(_ card: SuggestedComment) -> some View {

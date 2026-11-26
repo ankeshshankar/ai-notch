@@ -139,6 +139,7 @@ enum PRReviewDev {
             expect(PRReviewAPI.sent.last?.url == base + "/approve", "approve endpoint")
             await selfCheckNext(scratch: scratch, expect: expect)
             await selfCheckReplies(ref: ref, base: base, expect: expect)
+            await selfCheckOverride(ref: ref, base: base, expect: expect)
             done = true
         }
         let limit = Date().addingTimeInterval(20)
@@ -341,6 +342,122 @@ enum PRReviewDev {
         PRReviewAPI.sent = []
         await again.perform(.resolve, root: 301)
         expect(PRReviewAPI.sent.map(\.url) == [base + "/comments/301/resolve"] && again.card("k1")?.resolved == true, "resolve marks the card")
+    }
+
+    /// "Approve anyway" (the gate, then the click on a dry run) and the one-result rule of a follow-up.
+    @MainActor
+    private static func selfCheckOverride(ref: PullRequestRef, base: String, expect: (Bool, String) -> Void) async {
+        let head = "a1a1a1a1a1a1", other = "b2b2b2b2b2b2"
+        var record = ReviewRecord(key: ref.key, head: head, phase: .done, auto: false, queuedAt: 1)
+        record.verdict = .requestChanges
+        record.findings = ReviewFindings(blocking: 1, shouldFix: 1, nits: 1)
+        record.finishedAt = 2
+        func card(_ id: String, _ severity: CommentSeverity, posted: Int? = nil, on: Bool = false, status: FollowUpStatus? = nil) -> SuggestedComment {
+            var c = SuggestedComment(id: id, severity: severity, title: "Title \(id)", body: "Body \(id)", include: on, postedID: posted)
+            c.status = status
+            return c
+        }
+        func replies(roots: [Int], resolved: [Int]?) -> RepliesFile {
+            var file = RepliesFile()
+            file.fetchedAt = 1
+            file.myRoots = roots
+            file.resolvedOnBitbucket = resolved
+            return file
+        }
+        func gate(_ cards: [SuggestedComment], _ file: RepliesFile, record: ReviewRecord? = record, head h: String? = head, pipeline: PipelineState = .green,
+                  open: Bool = true, approved: Bool = false) -> OverrideGate {
+            ReviewGate.checkOverride(cards: cards, replies: file, record: record, currentHead: h, pipeline: pipeline, isOpen: open, alreadyApproved: approved)
+        }
+        let posted = [card("c1", .blocking, posted: 11, status: .stillOpen), card("c2", .shouldFix, posted: 12, status: .fixed)]
+        let skipped = [card("s1", .shouldFix, status: .unclear), card("s2", .nit)]
+        let allResolved = replies(roots: [11, 12], resolved: [11, 12])
+        let ok = gate(posted + skipped, allResolved)
+        expect(ok.isAvailable, "override: all resolved and all skipped is allowed: \(ok)")
+        let lines = ok.info?.lines ?? []
+        expect(lines.first == "Verdict REQUEST CHANGES is overridden." && lines.contains("1 blocking finding skipped."), "override: the confirm says it: \(lines)")
+        expect(lines.contains("Blocking, resolved by you: Title c1") && lines.contains("Should-fix, on Skip: Title s1") && lines.contains("1 nit on Skip."), "override: lists the items: \(lines)")
+        expect(!gate(posted + [card("s1", .shouldFix, on: true)], allResolved).isAvailable, "override: one card switched on blocks")
+        expect(!gate(posted + skipped, replies(roots: [11, 12], resolved: [11])).isAvailable, "override: one unresolved thread blocks")
+        expect(gate(posted + skipped, replies(roots: [11, 12], resolved: [11])).info == nil, "override: the reason is given")
+        var cardResolved = posted
+        cardResolved[1].resolved = true
+        expect(gate(cardResolved + skipped, replies(roots: [11, 12], resolved: [11])).isAvailable, "override: resolved from the notch counts")
+        expect(!gate(posted + skipped, replies(roots: [11, 12, 40], resolved: [11, 12])).isAvailable, "override: my own hand-written thread counts too")
+        expect(!gate(posted + skipped, replies(roots: [], resolved: nil)).isAvailable, "override: threads never read blocks")
+        var refused = record; refused.denied = ["Bash"]
+        var mine = record; mine.own = true
+        expect(!gate(skipped, allResolved, record: refused).isAvailable && !gate(skipped, allResolved, record: mine).isAvailable, "override: refused tool and own work stay hard blocks")
+        expect(!gate(skipped, allResolved, head: other).isAvailable && !gate(skipped, allResolved, pipeline: .notGreen).isAvailable
+               && !gate(skipped, allResolved, open: false).isAvailable && !gate(skipped, allResolved, approved: true).isAvailable, "override: moved head, red pipeline, closed, approved block")
+        var approveRecord = record; approveRecord.verdict = .approve; approveRecord.findings = ReviewFindings()
+        expect(!gate(skipped, allResolved, record: approveRecord).isAvailable, "override: not offered when a plain approve is open")
+
+        // The click, on a dry run: one approve and nothing else; a thread resolved on Bitbucket but unresolved now sends nothing.
+        let store = PRReviewStore()
+        let folder = PRReviewStore.folder(ref, head: head)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var chat = ChatLog(); chat.cards = posted + skipped
+        let encoder = JSONEncoder()
+        try? encoder.encode(chat).write(to: folder.appendingPathComponent("chat.json"))
+        var ledger = store.ledger
+        ledger.set(record)
+        store.injectLedgerForCheck(ledger)
+        let pr = PullRequest(ref: ref, title: "t", isDraft: false, author: PRPerson(uuid: nil, name: "Jane Doe"), source: "f", destination: "main", role: .reviewing, participants: [],
+                             myReview: .none, taskCount: 0, commentCount: 0, updatedOn: "", updatedAt: 0, url: nil, build: PRBuild(state: .succeeded, key: "k", pipeline: nil, url: nil), head: head)
+        let session = PRChatSession(ref: ref, head: head, folder: folder)
+        session.me = { "u-me" }
+        PRReviewAPI.fixtureFresh = PRReviewAPI.Fresh(isOpen: true, head: head, pipeline: .green, alreadyApproved: false)
+        func raw(resolved: Set<Int>) -> [RawComment] {
+            [11, 12].map { RawComment(id: $0, author: "Sam Poe", authorUUID: "u-me", text: "t\($0)", createdOn: "2026-11-20T10:0\($0 - 10):00Z", resolved: resolved.contains($0)) }
+        }
+        PRReviewAPI.fixtureRaw = raw(resolved: [11, 12])
+        session.loadExisting()
+        for _ in 0..<60 where session.replies.resolvedOnBitbucket == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+        expect(store.overrideGate(for: pr, session: session).isAvailable, "override: on offer once the threads are read as resolved")
+        // Thread 12 was reopened on Bitbucket since: the click reads again and sends nothing.
+        PRReviewAPI.fixtureRaw = raw(resolved: [11])
+        PRReviewAPI.sent = []
+        store.performOverride(on: pr, session: session)
+        for _ in 0..<60 where store.acting[ref.key] != nil || store.notices[ref.key] == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+        expect(PRReviewAPI.sent.isEmpty && store.notices[ref.key]?.hasPrefix("Not sent") == true, "override click: an unresolved thread sends nothing: \(store.notices[ref.key] ?? "")")
+        PRReviewAPI.fixtureRaw = raw(resolved: [11, 12])
+        PRReviewAPI.sent = []
+        store.performOverride(on: pr, session: session)
+        for _ in 0..<60 where store.acting[ref.key] != nil || PRReviewAPI.sent.isEmpty { try? await Task.sleep(nanoseconds: 50_000_000) }
+        expect(PRReviewAPI.sent.map(\.url) == [base + "/approve"], "override click: one approve: \(PRReviewAPI.sent.map(\.url)) \(store.notices[ref.key] ?? "-")")
+        expect(store.ledger.record(ref.key, head: head)?.posted == "approved" && store.notices[ref.key] == "Approved anyway", "override click: recorded")
+        PRReviewAPI.fixtureFresh = nil
+        PRReviewAPI.fixtureRaw = nil
+
+        // One result per follow-up: the pass says APPROVE, an open should-fix card is left: the record, the note and the window say REQUEST CHANGES.
+        let headA = "c3c3c3c3c3c3", headB = "d4d4d4d4d4d4"
+        let folderA = PRReviewStore.folder(ref, head: headA), folderB = PRReviewStore.folder(ref, head: headB)
+        for f in [folderA, folderB] { try? FileManager.default.createDirectory(at: f, withIntermediateDirectories: true) }
+        var logA = ChatLog(); logA.cards = [card("k1", .shouldFix, posted: 21), card("k2", .shouldFix, status: .unclear)]
+        try? encoder.encode(logA).write(to: folderA.appendingPathComponent("chat.json"))
+        try? Data(#"{"verdict":"APPROVE","summary":"All fixed.","comments":[{"id":"k1","status":"fixed","reason":"done"}],"new":[]}"#.utf8).write(to: folderB.appendingPathComponent("followup.json"))
+        var run = ReviewRecord(key: ref.key, head: headB, phase: .reviewing, auto: false, queuedAt: 3)
+        run.baseHead = headA
+        let out = ReviewOutput.parse(Data(#"{"result":"Done.\nVERDICT: APPROVE","session_id":"s","total_cost_usd":0.1}"#.utf8))!
+        let settled = PRReviewStore.settleFollowUp(PRReviewStore.settle(run, ref: ref, outcome: .finished(out)), existing: run, ref: ref, outcome: .finished(out))
+        let shown = PRChatSession(ref: ref, head: headB, folder: folderB)
+        let note = shown.log.followUps.first
+        expect(settled.verdict == .requestChanges && note?.verdict == .requestChanges && note?.reported == .approve, "one result: record \(String(describing: settled.verdict)), note \(String(describing: note?.verdict))")
+        expect(settled.findings == shown.log.openFindings, "one result: the record's findings are the cards' open ones")
+        // A second pass on the same head starts from that head's own cards (what I posted stays posted).
+        var mine2 = shown.log
+        mine2.cards[0].resolved = true
+        try? encoder.encode(mine2).write(to: folderB.appendingPathComponent("chat.json"))
+        expect(PRReviewStore.cardsFolder(ref, base: headA, head: headB) == folderB && PRReviewStore.cardsFolder(ref, base: headA, head: "e5e5e5e5e5e5") == folderA, "a second pass reads the head's own cards")
+        // One pass per folder at a time; a dev run never writes in the real folders.
+        let job = PRReviewRunner.Job(ref: ref, head: headB, repoPath: "/tmp", dir: folderB, token: "")
+        let slot = PRReviewRunner.claim(job)
+        expect(slot != nil && PRReviewRunner.claim(job) == nil, "a second pass in the same folder is refused")
+        if let slot { PRReviewRunner.release(slot) }
+        expect(PRReviewRunner.claim(job) != nil, "the folder is free again")
+        PRReviewRunner.release(job.dir.standardizedFileURL.path + "#run")
+        expect(PRReviewStore.isDevRun && PRReviewStore.isRealFolder(PRReviewStore.realBaseURL.appendingPathComponent("x-1-abc")) && !PRReviewStore.isRealFolder(folderB), "real folders are told apart from scratch ones")
+        expect(!PRReviewStore.ledgerURL.path.hasPrefix(NSHomeDirectory() + "/.claude/"), "the ledger of a check is not the real one")
     }
 
     /// One real turn on an existing review folder (`<ws>/<repo>#<id> <folder> <message>`); every post is a dry run.

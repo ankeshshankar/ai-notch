@@ -166,6 +166,13 @@ final class PRReviewStore: ObservableObject {
         return ReviewGate.combinedOptions(pending: pending, record: found.record, currentHead: pr.head, pipeline: pipelineState(pr), alreadyApproved: pr.myReview == .approved)
     }
 
+    /// "Approve anyway", from the cards and the threads as last read (the click reads them again).
+    func overrideGate(for pr: PullRequest, session: PRChatSession?) -> OverrideGate {
+        guard let session, let found = record(for: pr), !found.outdated else { return .unavailable("no review of the current commit") }
+        return ReviewGate.checkOverride(cards: session.cards, replies: session.replies, record: found.record, currentHead: pr.head,
+                                        pipeline: pipelineState(pr), alreadyApproved: pr.myReview == .approved)
+    }
+
     // MARK: Replies
 
     func setUnseenReplies(_ key: String, _ count: Int) {
@@ -486,6 +493,39 @@ final class PRReviewStore: ObservableObject {
                 record?.posted = action == .approve ? "approved" : "changes requested"
                 if let record { ledger.set(record); save() }
                 notices[id] = action == .approve ? "Approved" : "Changes requested"
+            case .failed(let why):
+                notices[id] = "Not sent: " + why
+            }
+        }
+    }
+
+    /// "Approve anyway" after its confirm: the pull request, the pipeline and my threads are read again, the same
+    /// override gate is checked on that, and only then the approval is sent (nothing is posted).
+    func performOverride(on pr: PullRequest, session: PRChatSession) {
+        let id = pr.ref.key
+        guard acting[id] == nil, !session.posting, let head = pr.head else { return }
+        let initial = overrideGate(for: pr, session: session)
+        guard initial.isAvailable else { if case .unavailable(let why) = initial { notices[id] = "Not sent: " + why }; return }
+        acting[id] = "Approving…"
+        notices[id] = nil
+        let ref = pr.ref
+        let me = meUUID()
+        Task { @MainActor in
+            defer { acting[id] = nil }
+            guard await PRReviewAPI.hasWriteTokenAsync() else { notices[id] = "Needs the write token: Setup → Pull requests"; return }
+            guard let fresh = await PRReviewAPI.fresh(ref, me: me) else { notices[id] = "Not sent: could not read the pull request"; return }
+            guard let raw = await PRReviewAPI.rawComments(ref) else { notices[id] = "Not sent: could not read the comments"; return }
+            let cards = session.cards
+            let replies = ReplyFiles.update(raw: raw, ref: ref, folder: session.folder, me: me, posted: Set(cards.compactMap(\.postedID)))
+            let again = ReviewGate.checkOverride(cards: cards, replies: replies, record: ledger.record(id, head: head), currentHead: fresh.head,
+                                                 pipeline: fresh.pipeline, isOpen: fresh.isOpen, alreadyApproved: fresh.alreadyApproved)
+            guard again.isAvailable else { if case .unavailable(let why) = again { notices[id] = "Not sent: " + why }; return }
+            switch await PRReviewAPI.send(.approve, to: ref) {
+            case .done:
+                var record = ledger.record(id, head: head)
+                record?.posted = "approved"
+                if let record { ledger.set(record); save() }
+                notices[id] = "Approved anyway"
             case .failed(let why):
                 notices[id] = "Not sent: " + why
             }
