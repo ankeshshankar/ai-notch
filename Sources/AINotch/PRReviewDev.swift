@@ -13,6 +13,9 @@ enum PRReviewDev {
         if let at = arguments.firstIndex(of: "--review-followup-live"), at + 5 < arguments.count {
             exit(liveFollowUp(repo: arguments[at + 1], base: arguments[at + 2], head: arguments[at + 3], input: arguments[at + 4], folder: arguments[at + 5]))
         }
+        if let at = arguments.firstIndex(of: "--review-replies-live"), at + 4 < arguments.count {
+            exit(liveReplies(repo: arguments[at + 1], head: arguments[at + 2], input: arguments[at + 3], folder: arguments[at + 4]))
+        }
         if let at = arguments.firstIndex(of: "--review-chat-live"), at + 3 < arguments.count {
             exit(liveChat(workspace: arguments[at + 1], folder: arguments[at + 2], message: arguments[at + 3], draft: arguments.contains("--draft")))
         }
@@ -29,6 +32,27 @@ enum PRReviewDev {
         print(String(format: "seconds %.0f", Date().timeIntervalSince(started)))
         switch result {
         case .finished(let out): print("cost \(out.costUSD.map { String(format: "%.2f", $0) } ?? "?") USD; followup.json: \(FileManager.default.fileExists(atPath: dir.appendingPathComponent("followup.json").path))"); return 0
+        case .failed(let m): print("failed: \(m)"); return 1
+        case .cancelled: print("cancelled"); return 1
+        case .timedOut: print("timed out"); return 1
+        }
+    }
+
+    /// `--review-replies-live <repo> <head> <reply-input-threads.json> <folder>`: one real read pass over reply threads
+    /// (read-only, the user's Claude login); prints time, cost and how many threads came back, never their text.
+    static func liveReplies(repo: String, head: String, input: String, folder: String) -> Int32 {
+        let dir = URL(fileURLWithPath: folder, isDirectory: true)
+        let job = PRReviewRunner.Job(ref: PullRequestRef(workspace: "acme", repo: "web-app", id: 1), head: head, repoPath: repo, dir: dir, token: "",
+                                     replyRead: .init(inputJSON: (try? Data(contentsOf: URL(fileURLWithPath: input))) ?? Data("{}".utf8)))
+        let started = Date()
+        let result = PRReviewRunner().runSync(job)
+        print(String(format: "seconds %.0f", Date().timeIntervalSince(started)))
+        switch result {
+        case .finished(let out):
+            let parsed = ReplyBlocks.parse(out.text)
+            print("cost \(out.costUSD.map { String(format: "%.3f", $0) } ?? "?") USD; threads \(parsed.analyses.count), skipped \(parsed.skipped), denied \(out.denied)")
+            for a in parsed.analyses { print("  \(a.commentID) \(a.verdict.rawValue) draft \(a.draft == nil ? "no" : "yes") wording \(a.draft.map { ReplyPayload.problems($0).isEmpty ? "ok" : "BAD" } ?? "-")") }
+            return 0
         case .failed(let m): print("failed: \(m)"); return 1
         case .cancelled: print("cancelled"); return 1
         case .timedOut: print("timed out"); return 1
@@ -407,6 +431,7 @@ enum PRReviewDev {
         ]
 
         let store = PRReviewStore()
+        if args.contains("--replies") { replyFixtures(store: store, ref: web(214), head: heads[0]) }
         let list = PRListSource()
         let jane = PRPerson(uuid: "u-jane", name: "Jane Doe"), john = PRPerson(uuid: "u-john", name: "John Roe"), sam = PRPerson(uuid: "u-sam", name: "Sam Poe")
         func people(_ id: Int) -> [PRParticipant] {
@@ -435,6 +460,7 @@ enum PRReviewDev {
         case "approve": model.overlay = .action(.approve)
         case "changes": model.overlay = .action(.requestChanges)
         case "combined": model.overlay = .combined(.postAndRequestChanges)
+        case "thread": model.overlay = .thread(.replyAndResolve, 302)
         case "keys": model.showKeys = true
         default: break
         }
@@ -446,8 +472,50 @@ enum PRReviewDev {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             guard let info = controller.windowInfo else { return }
+            if let path = value("--snapshot"), let view = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView,
+               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                // The screen may be locked (no screen capture): draw the view into a PNG instead.
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
             FileHandle.standardError.write(Data("review-window \(info.number) \(Int(info.frame.minX)) \(Int(info.frame.minY)) \(Int(info.frame.width)) \(Int(info.frame.height))\n".utf8))
         }
+    }
+
+    /// `--replies`: authors answered my two posted comments (one with a long reply), plus a comment I wrote by hand; the AI's
+    /// read is stored for the first two. Needs `--followup` so the cards are posted (ids 301 and 302).
+    @MainActor private static func replyFixtures(store: PRReviewStore, ref: PullRequestRef, head: String) {
+        store.meUUID = { "u-me" }
+        try? FileManager.default.removeItem(at: ReplyFiles.seenURL(ref))
+        let long = "I looked at this again and I think the owner check belongs one level up, in the route, rather than in the service: the service is also called from the nightly cleanup job, which has no user. " +
+            "Moving it means the job keeps working and the route still refuses other people's files. I added a test for the route, and one for the job, and I also renamed the helper so it is clear it is not user-scoped. " +
+            "Let me know if you would rather keep it in the service with a flag."
+        PRReviewAPI.fixtureRaw = [
+            RawComment(id: 301, author: "Sam Poe", authorUUID: "u-me", path: "src/profile/photo.service.ts", line: 42, text: "This deletes whatever file id the client sends, with no owner check.", createdOn: "2026-11-20T10:00:00Z"),
+            RawComment(id: 401, parentID: 301, author: "Alex Doe", authorUUID: "u-alex", text: long, createdOn: "2026-11-20T11:00:00Z"),
+            RawComment(id: 302, author: "Sam Poe", authorUUID: "u-me", path: "src/profile/photo.service.ts", line: 77, text: "Can we set the default avatar instead of clearing the field?", createdOn: "2026-11-20T10:05:00Z"),
+            RawComment(id: 402, parentID: 302, author: "Alex Doe", authorUUID: "u-alex", text: "The old screens are being removed next sprint, so I would leave this one.", createdOn: "2026-11-20T11:10:00Z"),
+            RawComment(id: 403, parentID: 402, author: "Sam Poe", authorUUID: "u-me", text: "They ship in the current release though.", createdOn: "2026-11-20T11:20:00Z"),
+            RawComment(id: 404, parentID: 403, author: "Alex Doe", authorUUID: "u-alex", text: "Right, is a null check in the two screens enough?", createdOn: "2026-11-20T11:30:00Z"),
+            RawComment(id: 320, author: "Sam Poe", authorUUID: "u-me", path: "src/profile/photo.ts", line: 42, text: "Should this also clear the cached thumbnail?", createdOn: "2026-11-20T10:40:00Z"),
+            RawComment(id: 405, parentID: 320, author: "Jane Doe", authorUUID: "u-jane", text: "Good catch, the cache is cleared in removePhoto now.", createdOn: "2026-11-20T12:00:00Z"),
+        ]
+        let folder = PRReviewStore.folder(ref, head: head)
+        var file = RepliesFile()
+        let roots = ReplyThreads.roots(in: PRReviewAPI.fixtureRaw ?? [], postedIDs: [301, 302], me: "u-me")
+        file.update(threads: ReplyThreads.build(PRReviewAPI.fixtureRaw ?? [], roots: roots, me: "u-me"), at: Date().timeIntervalSince1970)
+        file.apply(ReplyBlocks.parse("""
+        ```reply
+        {"comment": 301, "verdict": "explained", "reason": "The owner check is in the route (photo.route.ts:18) and the job is not user-scoped.", "draft": "Makes sense, thanks. The route check covers it."}
+        ```
+        ```reply
+        {"comment": 302, "verdict": "question", "reason": "Asks whether a null check in the two screens is enough; it is not for the directory screen (directory.ts:61).", "draft": "A null check in the profile screen is fine, but the directory screen also sorts on the field (directory.ts:61), so it still needs the default avatar."}
+        ```
+        ```reply
+        {"comment": 320, "verdict": "fixed", "reason": "removePhoto clears the cache (photo.ts:47)."}
+        ```
+        """).analyses)
+        ReplyFiles.save(file, folder: folder)
     }
 
     /// A finished follow-up: two posted comments (one fixed, one still open), one new finding.
