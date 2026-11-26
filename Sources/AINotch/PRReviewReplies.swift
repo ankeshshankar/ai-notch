@@ -51,6 +51,9 @@ enum ReplyFiles {
         var file = load(folder)
         let roots = ReplyThreads.roots(in: raw, postedIDs: posted.union(postedIDs(folder: folder)), me: me)
         file.update(threads: ReplyThreads.build(raw, roots: roots, me: me), at: now)
+        let present = Set(raw.map(\.id))
+        file.myRoots = roots.filter { present.contains($0) }.sorted()
+        file.resolvedOnBitbucket = raw.filter(\.resolved).map(\.id).sorted()
         save(file, folder: folder)
         return file
     }

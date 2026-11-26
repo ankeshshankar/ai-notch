@@ -16,8 +16,11 @@ public struct RawComment: Equatable, Sendable {
     public var line: Int?
     public var text: String
     public var createdOn: String?
+    /// Bitbucket's `resolution` is set on this comment (its thread was resolved).
+    public var resolved: Bool
 
-    public init(id: Int, parentID: Int? = nil, author: String, authorUUID: String? = nil, path: String? = nil, line: Int? = nil, text: String, createdOn: String? = nil) {
+    public init(id: Int, parentID: Int? = nil, author: String, authorUUID: String? = nil, path: String? = nil, line: Int? = nil, text: String, createdOn: String? = nil, resolved: Bool = false) {
+        self.resolved = resolved
         self.id = id
         self.parentID = parentID
         self.author = author
@@ -33,8 +36,9 @@ public struct RawComment: Equatable, Sendable {
 }
 
 public enum CommentPages {
-    /// The fields a thread-aware comments request asks for: the usual ones plus the parent and the author's uuid.
-    public static let fields = ExistingComments.fields + ",values.parent.id,values.user.uuid"
+    /// The fields a thread-aware comments request asks for: the usual ones plus the parent, the author's uuid and
+    /// whether the thread is resolved (`resolution` is an object once resolved, null before).
+    public static let fields = ExistingComments.fields + ",values.parent.id,values.user.uuid,values.resolution.type"
 
     /// A page of `/pullrequests/{id}/comments` (live comments only) and its `next` link.
     public static func parse(_ data: Data) -> (comments: [RawComment], next: String?)? {
@@ -49,7 +53,8 @@ public enum CommentPages {
                 id: id, parentID: ((value["parent"] as? [String: Any])?["id"] as? NSNumber)?.intValue,
                 author: (user?["display_name"] as? String) ?? "someone", authorUUID: user?["uuid"] as? String,
                 path: LooseJSON.string(inline?["path"]), line: LooseJSON.line(inline?["to"]) ?? LooseJSON.line(inline?["from"]),
-                text: ((value["content"] as? [String: Any])?["raw"] as? String) ?? "", createdOn: value["created_on"] as? String))
+                text: ((value["content"] as? [String: Any])?["raw"] as? String) ?? "", createdOn: value["created_on"] as? String,
+                resolved: value["resolution"] is [String: Any]))
         }
         return (comments, root["next"] as? String)
     }
@@ -248,8 +253,19 @@ public struct RepliesFile: Codable, Sendable, Equatable {
     public var resolved: [Int] = []
     /// "Keep open": thread id to the newest reply that existed then; a newer reply brings it back.
     public var kept: [Int: Int] = [:]
+    /// From the last read of the comments: my comment threads still on the pull request, and the ones Bitbucket
+    /// shows resolved. Nil until read (older files).
+    public var myRoots: [Int]?
+    public var resolvedOnBitbucket: [Int]?
 
     public init() {}
+
+    /// My threads that are not resolved (on Bitbucket, from the window, or on a card); nil when the comments were never read.
+    public func openRoots(cards: [SuggestedComment]) -> [Int]? {
+        guard let roots = myRoots, let done = resolvedOnBitbucket else { return nil }
+        let cardsResolved = Set(cards.filter { $0.resolved == true }.compactMap(\.postedID))
+        return roots.filter { !done.contains($0) && !resolved.contains($0) && !cardsResolved.contains($0) }
+    }
 
     /// Unseen replies of other people, given the ids already seen.
     public func unseen(_ seen: Set<Int>) -> Int { ReplySeen.unseen(threads, seen: seen) }
