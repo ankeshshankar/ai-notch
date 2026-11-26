@@ -76,7 +76,27 @@ final class PRReviewRunner: @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if process.isRunning { kill(pid, SIGKILL) } }
     }
 
+    /// One pass at a time per review folder and output file (a review or follow-up, a reply read): two runs writing
+    /// the same `out.json` and `followup.json` would leave files of one run next to the verdict of the other.
+    private static let busyLock = NSLock()
+    nonisolated(unsafe) private static var busy: Set<String> = []
+
+    static func claim(_ job: Job) -> String? {
+        let key = job.dir.standardizedFileURL.path + (job.replyRead != nil ? "#reply" : "#run")
+        busyLock.lock(); defer { busyLock.unlock() }
+        return busy.insert(key).inserted ? key : nil
+    }
+
+    static func release(_ key: String) { busyLock.lock(); busy.remove(key); busyLock.unlock() }
+
     private func run(_ job: Job) -> Outcome {
+        if PRReviewStore.isDevRun, PRReviewStore.isRealFolder(job.dir) { return .failed("a dev run never writes in the real review folders") }
+        guard let slot = Self.claim(job) else { return .failed("a pass is already running for this commit") }
+        defer { Self.release(slot) }
+        return runClaimed(job)
+    }
+
+    private func runClaimed(_ job: Job) -> Outcome {
         guard let claude = UsageProbe.executable else { return .failed("claude is not installed") }
         let fm = FileManager.default
         try? fm.createDirectory(at: job.dir, withIntermediateDirectories: true)

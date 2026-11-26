@@ -198,6 +198,10 @@ final class PRChatSession: ObservableObject {
         load()
     }
 
+    /// The record's `finishedAt` this session was read for (a later run means the files changed under it).
+    var stamp: Double = 0
+    var busy: Bool { running || drafting || posting || readingReplies }
+
     var cards: [SuggestedComment] { log.cards }
     var sessionID: String? { log.sessionID }
     var canChat: Bool { log.sessionID != nil }

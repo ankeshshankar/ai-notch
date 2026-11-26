@@ -114,7 +114,11 @@ public struct FollowUpNote: Codable, Sendable, Equatable, Identifiable {
     public var toHead: String
     public var commits: Int?
     public var at: Double
+    /// The verdict that stands (the record's, the window's and the gate's): the pass's own, unless a blocking or
+    /// should-fix card is still open, which makes it REQUEST CHANGES.
     public var verdict: ReviewVerdict
+    /// What the pass itself said, when that was overruled.
+    public var reported: ReviewVerdict?
     public var summary: String
     public var fixed: Int
     public var stillOpen: Int
@@ -175,6 +179,11 @@ public enum FollowUp {
             if let card = CommentParse.item(object, fallbackID: "f\(index + 1)")?.comment { cards.append(card) }
         }
         return FollowUpResult(verdict: verdict, summary: LooseJSON.string(root["summary"]) ?? "", items: items, newCards: cards)
+    }
+
+    /// The one verdict a follow-up leaves: APPROVE cannot stand over a blocking or should-fix card that is still open.
+    public static func standingVerdict(_ reported: ReviewVerdict, findings: ReviewFindings) -> ReviewVerdict {
+        findings.blocking + findings.shouldFix > 0 ? .requestChanges : reported
     }
 
     /// The log a follow-up starts from: the previous review's `chat.json`, else its `comments.json` as cards.
@@ -292,8 +301,10 @@ extension ChatLog {
             cards.append(card)
             added += 1
         }
-        let note = FollowUpNote(id: "fu-\(to.prefix(12))", fromHead: from, toHead: to, commits: commits, at: at, verdict: result.verdict, summary: result.summary,
+        var note = FollowUpNote(id: "fu-\(to.prefix(12))", fromHead: from, toHead: to, commits: commits, at: at, verdict: result.verdict, summary: result.summary,
                                 fixed: fixed, stillOpen: open, unclear: unclear, newCards: added)
+        let stands = FollowUp.standingVerdict(result.verdict, findings: openFindings)
+        if stands != result.verdict { note.verdict = stands; note.reported = result.verdict }
         followUps.removeAll { $0.id == note.id }
         followUps.append(note)
         return note

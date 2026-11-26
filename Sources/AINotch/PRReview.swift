@@ -48,9 +48,26 @@ final class PRReviewStore: ObservableObject {
 
     // MARK: Paths
 
+    /// A dev run (a preview, a self-check, a live check): it never uses the real ledger or review folders. Without
+    /// CLAUDE_NOTCH_REVIEWS / CLAUDE_NOTCH_REVIEW_LEDGER it gets a temporary one, so a forgotten variable cannot reach them.
+    nonisolated static var isDevRun: Bool {
+        CommandLine.arguments.contains { $0.hasPrefix("--review-") || $0.hasPrefix("--pr-") || $0.hasPrefix("--board-") || $0 == "--preview" || $0 == "--setup-preview" }
+    }
+
+    nonisolated static var devScratch: URL { FileManager.default.temporaryDirectory.appendingPathComponent("ai-notch-dev-reviews", isDirectory: true) }
+
+    nonisolated static var realBaseURL: URL { BitbucketConfig.home.appendingPathComponent("Library/Application Support/AINotch/reviews", isDirectory: true) }
+
     nonisolated static var baseURL: URL {
         if let dir = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_REVIEWS"], !dir.isEmpty { return URL(fileURLWithPath: dir, isDirectory: true) }
-        return BitbucketConfig.home.appendingPathComponent("Library/Application Support/AINotch/reviews", isDirectory: true)
+        if isDevRun { return devScratch.appendingPathComponent("reviews", isDirectory: true) }
+        return realBaseURL
+    }
+
+    /// Inside the real review folders (current or legacy).
+    nonisolated static func isRealFolder(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+        return [realBaseURL, legacyBaseURL].contains { path.hasPrefix($0.standardizedFileURL.resolvingSymlinksInPath().path + "/") }
     }
 
     /// Where reviews were kept before they moved out of `~/.claude` (read only: reports there still open).
@@ -61,6 +78,7 @@ final class PRReviewStore: ObservableObject {
     static var ledgerURL: URL {
         if let path = ProcessInfo.processInfo.environment["CLAUDE_NOTCH_REVIEW_LEDGER"], !path.isEmpty { return URL(fileURLWithPath: path) }
         if BitbucketConfig.isStubbed { return FileManager.default.temporaryDirectory.appendingPathComponent("ai-notch-pr-reviews-stub.json") }
+        if isDevRun { return devScratch.appendingPathComponent("ledger.json") }
         return BitbucketConfig.home.appendingPathComponent(".claude/notch/pr-reviews.json")
     }
 
@@ -230,6 +248,8 @@ final class PRReviewStore: ObservableObject {
 
     private func enqueue(_ ref: PullRequestRef, head: String, auto: Bool, resumed: Bool = false, full: Bool = false, own: Bool = false, branch: BranchTarget? = nil) {
         if let existing = ledger.record(ref.key, head: head), existing.isActive { return }
+        // One pass per head: never a second while one of its own is queued or running.
+        if queue.contains(where: { $0.ref == ref && $0.head == head }) || (running?.ref == ref && running?.head == head) { return }
         var record = ReviewRecord(key: ref.key, head: head, phase: .queued, auto: auto, queuedAt: Date().timeIntervalSince1970)
         record.posted = nil
         if resumed { record.resumed = true }
@@ -300,7 +320,7 @@ final class PRReviewStore: ObservableObject {
 
     /// The previous review's cards (its `chat.json`, else its `comments.json`) and the number of new commits.
     private func followUpInput(_ ref: PullRequestRef, base: ReviewRecord, head: String) async -> (ChatLog, Int?) {
-        let folder = Self.folder(ref, head: base.head)
+        let folder = Self.cardsFolder(ref, base: base.head, head: head)
         let log = FollowUp.baseLog(chatJSON: try? Data(contentsOf: folder.appendingPathComponent("chat.json")),
                                    commentsJSON: try? Data(contentsOf: folder.appendingPathComponent("comments.json")), sessionID: base.sessionID)
         return (log, await PRReviewAPI.commitsSince(ref, reviewed: base.head, head: head))
@@ -356,20 +376,28 @@ final class PRReviewStore: ObservableObject {
             // No structured answer: the report's VERDICT line still counts, nothing is marked.
             return record
         }
-        let baseFolder = Self.folder(ref, head: baseHead)
+        let baseFolder = Self.cardsFolder(ref, base: baseHead, head: existing.head)
         var log = FollowUp.baseLog(chatJSON: try? Data(contentsOf: baseFolder.appendingPathComponent("chat.json")),
                                    commentsJSON: try? Data(contentsOf: baseFolder.appendingPathComponent("comments.json")), sessionID: existing.sessionID)
-        log.applyFollowUp(result, from: baseHead, to: existing.head, commits: existing.commitCount, at: Date().timeIntervalSince1970)
+        let note = log.applyFollowUp(result, from: baseHead, to: existing.head, commits: existing.commitCount, at: Date().timeIntervalSince1970)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         if let encoded = try? encoder.encode(log) { try? encoded.write(to: folder.appendingPathComponent("chat.json"), options: .atomic) }
-        let findings = log.openFindings
-        record.findings = findings
+        record.findings = log.openFindings
         record.phase = .done
         record.error = nil
-        // A verdict of APPROVE cannot stand over a blocking or should-fix comment that is still open.
-        record.verdict = (findings.blocking + findings.shouldFix > 0) ? .requestChanges : result.verdict
+        // The note, the record, the window and the gate all read this one verdict.
+        record.verdict = note.verdict
         return record
+    }
+
+    /// Where a follow-up reads the cards from: the review it follows, or (a second pass on a head that already has a
+    /// follow-up) that head's own `chat.json`, so what I posted, resolved or skipped since is not lost.
+    nonisolated static func cardsFolder(_ ref: PullRequestRef, base: String, head: String) -> URL {
+        let own = folder(ref, head: head)
+        if let data = try? Data(contentsOf: own.appendingPathComponent("chat.json")), let log = try? JSONDecoder().decode(ChatLog.self, from: data),
+           log.followUps.contains(where: { $0.id == "fu-\(head.prefix(12))" }) { return own }
+        return folder(ref, head: base)
     }
 
     /// What a finished run means for its record: the report on disk, the verdict, or why it failed.

@@ -73,8 +73,12 @@ final class PRReviewWindowModel: ObservableObject {
     func session(for pr: PullRequest) -> PRChatSession? {
         guard let found = store.record(for: pr), found.record.phase == .done, let folder = store.folder(for: found.record) else { return nil }
         let key = pr.id + "@" + found.record.head
-        if let session = sessions[key] { return session }
+        // A run that finished after the session was read (a re-review of the same head) wrote new files: a session
+        // still holding the earlier result would show it, and save it back over the new one. Replaced unless busy.
+        let stamp = found.record.finishedAt ?? 0
+        if let session = sessions[key], session.stamp == stamp || session.busy { return session }
         let session = PRChatSession(ref: pr.ref, head: found.record.head, folder: folder)
+        session.stamp = stamp
         session.repoPath = { PRReviewStore.repoPath(pr.ref) }
         let (rkey, head) = (pr.ref.key, found.record.head)
         session.onPosted = { [weak store] count in store?.notePosted(key: rkey, head: head, count: count) }
