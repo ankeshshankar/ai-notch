@@ -429,7 +429,7 @@ struct PRPanelRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text("\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
+                Text(verbatim: "\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
                     .lineLimit(1).fixedSize()
                 Text(pr.title).font(Typo.subtitle(.medium)).foregroundStyle(Palette.ink)
                     .lineLimit(1).truncationMode(.tail)

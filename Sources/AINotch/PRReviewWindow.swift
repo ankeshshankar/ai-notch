@@ -292,7 +292,7 @@ struct PRReviewWindowView: View {
         } label: {
             HStack(spacing: 6) {
                 if let pr = model.current {
-                    Text("\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).fixedSize()
+                    Text(verbatim: "\(pr.ref.repo) #\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).fixedSize()
                     Text(pr.title).font(Typo.body(.medium)).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.tail)
                 }
                 Spacer(minLength: 0)
@@ -618,7 +618,7 @@ struct PRReviewConfirm: View {
     @ViewBuilder private var postBody: some View {
         if let session = model.session(for: pr) {
             let pending = PostPlan.pending(session.cards)
-            Text("Post \(pending.count) comment\(pending.count == 1 ? "" : "s") on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+            Text(verbatim: "Post \(pending.count) comment\(pending.count == 1 ? "" : "s") on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
             Text("They are posted under your own Bitbucket account, inline where there is a file and line.").font(Typo.label()).foregroundStyle(Palette.ink3)
                 .fixedSize(horizontal: false, vertical: true)
             if found?.outdated == true {
@@ -639,7 +639,7 @@ struct PRReviewConfirm: View {
     @ViewBuilder private func actionBody(_ action: ReviewAction) -> some View {
         let approve = action == .approve
         let record = found?.record
-        Text(approve ? "Approve #\(pr.ref.id)?" : "Request changes on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+        Text(verbatim: approve ? "Approve #\(pr.ref.id)?" : "Request changes on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
         VStack(alignment: .leading, spacing: 3) {
             Text(pr.title).font(Typo.body(.medium)).foregroundStyle(Palette.ink).lineLimit(2).fixedSize(horizontal: false, vertical: true)
             Text("Verdict \(record?.verdict?.rawValue ?? "none") · \(record?.findings?.text ?? "") · \(PRReviewBadge.pipeline(pr).text.lowercased()) · commit \(String(pr.head?.prefix(7) ?? "—"))")
@@ -674,7 +674,7 @@ struct PRReviewConfirm: View {
             let tasks = pending.filter(\.wantsTask).count
             let record = found?.record
             let approve = action.final == .approve
-            Text(action.title(count: pending.count) + " on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+            Text(verbatim: action.title(count: pending.count) + " on #\(pr.ref.id)?").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
             Text("In this order, all as you on Bitbucket:").font(Typo.label()).foregroundStyle(Palette.ink3)
             VStack(alignment: .leading, spacing: 3) {
                 Text("1. Post \(pending.count) comment\(pending.count == 1 ? "" : "s")" + (tasks > 0 ? " and \(tasks) task\(tasks == 1 ? "" : "s")" : ""))
