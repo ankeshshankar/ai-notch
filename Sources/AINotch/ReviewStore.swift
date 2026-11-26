@@ -18,6 +18,8 @@ final class ReviewStore: ObservableObject {
     @Published private(set) var attention: [PullRequest] = []
     /// Pull requests whose review is done and wait for my call (approve, request changes or post).
     @Published private(set) var waitingCount = 0
+    /// Where each pull request I review stands (by key), from my decision and the review ledger.
+    @Published private(set) var stages: [String: PRStage] = [:]
     private var waitingSink: AnyCancellable?
     /// The quiet ones, only counted.
     @Published private(set) var quietCount = 0
@@ -128,7 +130,7 @@ final class ReviewStore: ObservableObject {
         seenNews = Set(UserDefaults.standard.stringArray(forKey: Self.seenKey) ?? [])
         sessionLinks.onWatched = { [weak self] keys in self?.setWatched(keys) }
         autoReview.meUUID = { [weak self] in self?.me?.uuid }
-        waitingSink = autoReview.$ledger.sink { [weak self] ledger in self?.recountWaiting(ledger) }
+        waitingSink = autoReview.$ledger.sink { [weak self] ledger in self?.refreshAttention(ledger: ledger) }
         autoReview.onFinished = { [weak self] ref, record in self?.reviewFinished(ref, record) }
         sessionLinks.feedback = { [weak self] pr, build, comments in
             await self?.feedback(for: pr, build: build, comments: comments) ?? PRFeedbackData()
@@ -226,7 +228,6 @@ final class ReviewStore: ObservableObject {
         if mine != self.mine { self.mine = mine }
         if toReview != self.toReview { self.toReview = toReview }
         sessionLinks.setMine(mine)
-        defer { recountWaiting(autoReview.ledger) }
         autoReview.observe(toReview: toReview, healthy: snapshot.status == nil && snapshot.mineFetchedAt > 0)
         // A muted pull request that closed is forgotten (only from a healthy, read answer).
         if snapshot.status == nil, snapshot.mineFetchedAt > 0, !muted.isEmpty {
@@ -260,9 +261,14 @@ final class ReviewStore: ObservableObject {
 
     /// The rows to show (muted ones left out), the quiet count and the unseen news, from the last
     /// snapshot. News that arrives while I look is seen there and then.
-    private func refreshAttention() {
-        let attention = ReviewStore.attention(all).filter { !muted.contains($0.id) }
+    private func refreshAttention(ledger: ReviewLedger? = nil) {
+        let ledger = ledger ?? autoReview.ledger
+        let stages = ReviewStore.stages(all, ledger: ledger)
+        if stages != self.stages { self.stages = stages }
+        let attention = ReviewStore.attention(all, ledger: ledger).filter { !muted.contains($0.id) }
         if attention != self.attention { self.attention = attention }
+        let ready = all.filter { $0.role == .reviewing && !muted.contains($0.id) && stages[$0.id]?.isReady == true }.count
+        if ready != waitingCount { waitingCount = ready }
         let quiet = all.count - attention.count
         if quiet != quietCount { quietCount = quiet }
         if looking {
@@ -333,19 +339,10 @@ final class ReviewStore: ObservableObject {
         UserDefaults.standard.set(Array(next).sorted(), forKey: Self.mutedKey)
     }
 
-    /// Counts from the emitted ledger (a @Published emits before it is set).
-    private func recountWaiting(_ ledger: ReviewLedger) {
-        let prs = all.filter { $0.role == .reviewing }
-        let keys = ReviewWaiting.keys(prs.map {
-            WaitingInput(key: $0.ref.key, head: $0.head, decided: $0.myReview != .none, muted: muted.contains($0.id))
-        }, ledger: ledger)
-        if keys.count != waitingCount { waitingCount = keys.count }
-    }
-
     /// A review or follow-up finished: the alert, locked or not (muted pull requests and the Setup
     /// tick respected).
     private func reviewFinished(_ ref: PullRequestRef, _ record: ReviewRecord) {
-        recountWaiting(autoReview.ledger)
+        refreshAttention()
         guard notify.reviewDone, !muted.contains(ref.key) else { return }
         let body = ReviewWaiting.notificationText(id: ref.id, repo: ref.repo, record: record)
         Notifier.shared.postReviewDone(prID: ref.key, title: record.baseHead != nil ? "Follow-up done" : "Review done", body: body)
@@ -370,11 +367,45 @@ final class ReviewStore: ObservableObject {
 
     // MARK: Pure parts
 
-    /// The rows that need something, most urgent need first, then the newest update.
-    nonisolated static func attention(_ prs: [PullRequest]) -> [PullRequest] {
-        func rank(_ pr: PullRequest) -> Int { pr.needs.first.flatMap { PRNeed.allCases.firstIndex(of: $0) } ?? PRNeed.allCases.count }
-        return prs.filter(\.needsSomething).sorted { (rank($0), -$0.updatedAt) < (rank($1), -$1.updatedAt) }
+    /// Where each pull request I review stands (by key).
+    nonisolated static func stages(_ prs: [PullRequest], ledger: ReviewLedger) -> [String: PRStage] {
+        var out: [String: PRStage] = [:]
+        for pr in prs where pr.role == .reviewing {
+            out[pr.id] = PRStage.of(key: pr.ref.key, head: pr.head, decision: pr.decision, isDraft: pr.isDraft, ledger: ledger)
+        }
+        return out
     }
+
+    /// Sort rank, lower first: ready for my decision, then mine that need something, then new
+    /// commits after my decision, reviewing or not started, posted, waiting on the author, approved by me.
+    nonisolated static func rank(_ pr: PullRequest, stage: PRStage?) -> Int {
+        if let stage {
+            switch stage {
+            case .ready: return 0
+            case .newCommits: return 20
+            case .reviewing: return 30
+            case .asked: return 31
+            default: return 40 + stage.order
+            }
+        }
+        return 10 + (pr.needs.first.flatMap { PRNeed.allCases.firstIndex(of: $0) } ?? PRNeed.allCases.count)
+    }
+
+    /// The pull requests in the order of action (rank, then newest update).
+    nonisolated static func sorted(_ prs: [PullRequest], stages: [String: PRStage]) -> [PullRequest] {
+        prs.sorted { (rank($0, stage: stages[$0.id]), -$0.updatedAt) < (rank($1, stage: stages[$1.id]), -$1.updatedAt) }
+    }
+
+    /// The rows that wait on me, in the order of action. Mine: what PRNeed says. One I review: only
+    /// when its stage waits on me (a review to give or decide, or new commits after my decision).
+    nonisolated static func attention(_ prs: [PullRequest], ledger: ReviewLedger) -> [PullRequest] {
+        let stages = stages(prs, ledger: ledger)
+        let waiting = prs.filter { pr in stages[pr.id].map(\.needsMe) ?? pr.needsSomething }
+        return sorted(waiting, stages: stages)
+    }
+
+    /// Everything I review, in the order of action (the PRs panel's To review list).
+    var toReviewSorted: [PullRequest] { Self.sorted(toReview, stages: stages) }
 
     /// A failed build on my pull request whose Pipelines run was already notified is dropped.
     nonisolated static func dropAlreadyNotified(_ events: [PREvent], pipelineNotified: ((PipelineRef) -> Bool)?) -> [PREvent] {

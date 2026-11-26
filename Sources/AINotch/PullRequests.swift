@@ -1,4 +1,5 @@
 import CryptoKit
+import ReviewCore
 import Foundation
 
 // Bitbucket pull requests: mine, and the ones waiting for my review. The model, how an answer is
@@ -134,12 +135,22 @@ struct PullRequest: Equatable, Sendable, Identifiable {
         if role == .reviewing, myReview == .none, !isDraft { needs.append(.reviewRequested) }
         if role == .mine, !changesRequestedBy.isEmpty { needs.append(.changesRequested) }
         if role == .mine, build?.state == .failed { needs.append(.buildFailed) }
-        if newComments > 0 { needs.append(.newComments) }
+        // Comments on one I review only matter while my review is still to give.
+        if newComments > 0, role == .mine || myReview == .none { needs.append(.newComments) }
         if role == .mine, approvals > 0, changesRequestedBy.isEmpty { needs.append(.approved) }
         return needs
     }
 
     var needsSomething: Bool { !needs.isEmpty }
+
+    /// My own decision, for the review stages.
+    var decision: MyDecision {
+        switch myReview {
+        case .none: return .none
+        case .approved: return .approved
+        case .changesRequested: return .changesRequested
+        }
+    }
 
     /// Whether mine can be merged now: every merge check passes and the build is not failed or
     /// running. Nil while unknown (not mine, a draft, or the checks not read yet).

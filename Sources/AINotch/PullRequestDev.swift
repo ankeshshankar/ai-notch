@@ -85,7 +85,7 @@ enum PullRequestDev {
             latest = snapshot.prs
             let mine = snapshot.prs.filter { $0.role == .mine }
             let review = snapshot.prs.filter { $0.role == .reviewing }
-            let attention = ReviewStore.attention(snapshot.prs)
+            let attention = ReviewStore.attention(snapshot.prs, ledger: ReviewLedger())
             var text = "prs status=\(snapshot.status?.text ?? "ok") mine=\(mine.count) review=\(review.count) attention=\(attention.count) quiet=\(snapshot.prs.count - attention.count) combined=\(snapshot.combinedQuery.map(String.init) ?? "-") me=\(snapshot.me?.how.components(separatedBy: " ").prefix(2).joined(separator: " ") ?? "-")"
             if stubbed {
                 text += " | " + snapshot.prs.map { pr in
@@ -211,7 +211,7 @@ enum PullRequestDev {
         expect(changed.needs == [.changesRequested], "needs: changes requested, not approved")
         let quiet = PRParse.pullRequest(object(id: 8, author: me, reviewers: ["{a}"]), me: me, repo: nil)!
         expect(quiet.needs.isEmpty, "needs: quiet")
-        let order = ReviewStore.attention([quiet, mine!, changed, review!])
+        let order = ReviewStore.attention([quiet, mine!, changed, review!], ledger: ReviewLedger())
         expect(order.map(\.ref.id) == [2, 7, 1], "attention: review request, changes, approved; quiet left out")
 
         // The review hash.

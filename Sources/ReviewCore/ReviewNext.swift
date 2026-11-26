@@ -516,3 +516,78 @@ public enum ReviewKeys {
         ("⌘L", "Focus the chat box"),
     ]
 }
+
+// MARK: Where a pull request I review stands
+
+/// My own decision on a pull request on Bitbucket.
+public enum MyDecision: Equatable, Sendable { case none, approved, changesRequested }
+
+/// Where a pull request I review stands for me, from my decision on Bitbucket and the notch's
+/// review ledger. Decides what "needs you" and how the list is ordered.
+public enum PRStage: Equatable, Sendable {
+    /// A draft: waits for the author.
+    case draft
+    /// The review of the current commit is done and I have not approved, asked for changes or posted.
+    case ready(verdict: ReviewVerdict, findings: ReviewFindings, followUp: Bool, commits: Int?)
+    /// A review (or follow-up) is queued or running.
+    case reviewing(followUp: Bool, since: Double?)
+    /// I decided earlier and there are commits since, not reviewed yet.
+    case newCommits(commits: Int?)
+    /// My review is asked for and nothing has run (or the run failed or was cancelled).
+    case asked
+    /// I posted comments or a decision from the review; Bitbucket does not show my decision yet.
+    case posted
+    /// I asked for changes and the author has not pushed since.
+    case waitingAuthor
+    /// I approved and nothing new was pushed since.
+    case approvedByMe
+
+    /// Whether it waits on my action.
+    public var needsMe: Bool {
+        switch self {
+        case .ready, .reviewing, .newCommits, .asked: return true
+        case .draft, .posted, .waitingAuthor, .approvedByMe: return false
+        }
+    }
+
+    /// Ready for my call (the chip's second number).
+    public var isReady: Bool { if case .ready = self { return true } else { return false } }
+
+    /// Sort order: ready for my decision, new commits, reviewing or not started, then what waits on the author or is done.
+    public var order: Int {
+        switch self {
+        case .ready: return 0
+        case .newCommits: return 1
+        case .reviewing, .asked: return 2
+        case .posted: return 3
+        case .waitingAuthor: return 4
+        case .approvedByMe: return 5
+        case .draft: return 6
+        }
+    }
+
+    public static func of(key: String, head: String?, decision: MyDecision, isDraft: Bool, ledger: ReviewLedger) -> PRStage {
+        if isDraft { return .draft }
+        let record = head.flatMap { ledger.record(key, head: $0) }
+        func acted(_ r: ReviewRecord) -> Bool { r.posted != nil || (r.commentsPosted ?? 0) > 0 }
+        if let record, record.isActive, decision == .none || record.isFollowUp {
+            return .reviewing(followUp: record.isFollowUp, since: record.startedAt ?? record.queuedAt)
+        }
+        if decision == .none {
+            if let record, record.phase == .done, let verdict = record.verdict, record.own != true {
+                if acted(record) { return .posted }
+                return .ready(verdict: verdict, findings: record.findings ?? ReviewFindings(), followUp: record.isFollowUp, commits: record.commitCount)
+            }
+            return .asked
+        }
+        if let record, record.phase == .done, let verdict = record.verdict, record.own != true, record.isFollowUp, !acted(record) {
+            return .ready(verdict: verdict, findings: record.findings ?? ReviewFindings(), followUp: true, commits: record.commitCount)
+        }
+        // Decided: new commits since the run my decision was posted from?
+        let decidedHere = ledger.records.values.filter { $0.key == key && $0.posted != nil && $0.own != true }
+        if let head, !decidedHere.isEmpty, !decidedHere.contains(where: { ReviewGate.sameCommit($0.head, head) }) {
+            return .newCommits(commits: nil)
+        }
+        return decision == .approved ? .approvedByMe : .waitingAuthor
+    }
+}

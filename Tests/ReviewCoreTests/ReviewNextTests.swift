@@ -274,4 +274,43 @@ final class WaitingAndKeysTests: XCTestCase {
         XCTAssertEqual(id, ReviewBranch.pseudoID(repoKey: "acme/web-app", branch: "feature/x"))
         XCTAssertNotEqual(id, ReviewBranch.pseudoID(repoKey: "acme/web-app", branch: "feature/y"))
     }
+
+    func testStages() {
+        let key = "acme/web-app#7", h1 = "aaaaaaaaaaaa1", h2 = "bbbbbbbbbbbb2"
+        func ledger(_ records: ReviewRecord...) -> ReviewLedger { var l = ReviewLedger(); records.forEach { l.set($0) }; return l }
+        func record(_ head: String, _ phase: ReviewPhase, verdict: ReviewVerdict? = .approve, posted: String? = nil, base: String? = nil) -> ReviewRecord {
+            var r = ReviewRecord(key: key, head: head, phase: phase, auto: true, queuedAt: 10)
+            r.verdict = verdict; r.posted = posted; r.baseHead = base
+            return r
+        }
+        func stage(_ head: String?, _ decision: MyDecision, _ l: ReviewLedger, draft: Bool = false) -> PRStage {
+            PRStage.of(key: key, head: head, decision: decision, isDraft: draft, ledger: l)
+        }
+        XCTAssertEqual(stage(h1, .none, ReviewLedger()), .asked)
+        XCTAssertTrue(stage(h1, .none, ReviewLedger()).needsMe)
+        XCTAssertTrue(stage(h1, .none, ledger(record(h1, .done))).isReady)
+        XCTAssertTrue(stage(h1, .none, ledger(record(h1, .reviewing, verdict: nil))).needsMe)
+        XCTAssertFalse(stage(h1, .none, ledger(record(h1, .reviewing, verdict: nil))).isReady)
+        // Posted from the review: no longer waits.
+        XCTAssertEqual(stage(h1, .none, ledger(record(h1, .done, posted: "approved"))), .posted)
+        var commented = record(h1, .done); commented.commentsPosted = 2
+        XCTAssertFalse(stage(h1, .none, ledger(commented)).needsMe)
+        XCTAssertFalse(stage(h1, .none, ReviewLedger(), draft: true).needsMe)
+        // Decided, nothing new: does not count.
+        XCTAssertEqual(stage(h1, .approved, ledger(record(h1, .done, posted: "approved"))), .approvedByMe)
+        XCTAssertEqual(stage(h1, .changesRequested, ledger(record(h1, .done, verdict: .requestChanges, posted: "changes requested"))), .waitingAuthor)
+        XCTAssertFalse(stage(h1, .approved, ReviewLedger()).needsMe)
+        XCTAssertFalse(stage(h1, .changesRequested, ReviewLedger()).needsMe)
+        // Decided, then a push: counts (new commits, a follow-up running, a follow-up done).
+        let decided = record(h1, .done, verdict: .requestChanges, posted: "changes requested")
+        XCTAssertEqual(stage(h2, .changesRequested, ledger(decided)), .newCommits(commits: nil))
+        XCTAssertTrue(stage(h2, .approved, ledger(decided, record(h2, .reviewing, verdict: nil, base: h1))).needsMe)
+        XCTAssertTrue(stage(h2, .changesRequested, ledger(decided, record(h2, .done, base: h1))).isReady)
+        // A full re-review running after my decision does not make it wait on me.
+        XCTAssertFalse(stage(h1, .approved, ledger(decided, record(h1, .reviewing, verdict: nil))).needsMe)
+        // Order: ready, new commits, reviewing/asked, posted, waiting on the author, approved.
+        let order = [PRStage.approvedByMe, .waitingAuthor, .asked, .newCommits(commits: nil), .posted,
+                     .ready(verdict: .approve, findings: ReviewFindings(), followUp: false, commits: nil)].sorted { $0.order < $1.order }
+        XCTAssertTrue(order.first?.isReady == true && order.last == .approvedByMe)
+    }
 }
