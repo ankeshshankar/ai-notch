@@ -18,9 +18,12 @@ public struct RawComment: Equatable, Sendable {
     public var createdOn: String?
     /// Bitbucket's `resolution` is set on this comment (its thread was resolved).
     public var resolved: Bool
+    /// The author is an app or a bot (Bitbucket's `app_user`, or a name that says so).
+    public var isBot: Bool
 
-    public init(id: Int, parentID: Int? = nil, author: String, authorUUID: String? = nil, path: String? = nil, line: Int? = nil, text: String, createdOn: String? = nil, resolved: Bool = false) {
+    public init(id: Int, parentID: Int? = nil, author: String, authorUUID: String? = nil, path: String? = nil, line: Int? = nil, text: String, createdOn: String? = nil, resolved: Bool = false, isBot: Bool = false) {
         self.resolved = resolved
+        self.isBot = isBot
         self.id = id
         self.parentID = parentID
         self.author = author
@@ -35,10 +38,19 @@ public struct RawComment: Equatable, Sendable {
     public var existing: ExistingComment { ExistingComment(id: id, author: author, path: path, line: line, text: text, createdOn: createdOn) }
 }
 
+public enum BotName {
+    /// Bitbucket's `app_user`, or a name with the word "bot" in it ("review-bot", "Some Bot", "[bot]"); not "Abbott".
+    public static func isBot(name: String, type: String?) -> Bool {
+        if type == "app_user" { return true }
+        let words = name.lowercased().split(whereSeparator: { !$0.isLetter })
+        return words.contains("bot")
+    }
+}
+
 public enum CommentPages {
     /// The fields a thread-aware comments request asks for: the usual ones plus the parent, the author's uuid and
     /// whether the thread is resolved (`resolution` is an object once resolved, null before).
-    public static let fields = ExistingComments.fields + ",values.parent.id,values.user.uuid,values.resolution.type"
+    public static let fields = ExistingComments.fields + ",values.parent.id,values.user.uuid,values.user.type,values.resolution.type"
 
     /// A page of `/pullrequests/{id}/comments` (live comments only) and its `next` link.
     public static func parse(_ data: Data) -> (comments: [RawComment], next: String?)? {
@@ -54,7 +66,8 @@ public enum CommentPages {
                 author: (user?["display_name"] as? String) ?? "someone", authorUUID: user?["uuid"] as? String,
                 path: LooseJSON.string(inline?["path"]), line: LooseJSON.line(inline?["to"]) ?? LooseJSON.line(inline?["from"]),
                 text: ((value["content"] as? [String: Any])?["raw"] as? String) ?? "", createdOn: value["created_on"] as? String,
-                resolved: value["resolution"] is [String: Any]))
+                resolved: value["resolution"] is [String: Any],
+                isBot: BotName.isBot(name: (user?["display_name"] as? String) ?? "", type: user?["type"] as? String)))
         }
         return (comments, root["next"] as? String)
     }
