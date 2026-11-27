@@ -414,6 +414,28 @@ extension PRReviewDev {
         read = ReviewProgressPoller.compute(["k": watch], sessions: sessions)["k"]
         expect(read?.checked == true && read?.current?.id == "result", "progress: cards exist only once comments.json is written")
 
+        // The live visuals, through the poller: a transcript with one session file per reviewer, read off the main thread.
+        let nowT = Date().timeIntervalSince1970
+        let liveFolder = root.appendingPathComponent("live", isDirectory: true)
+        let transcript = ReviewLiveFixture.write(ReviewLiveFixture.large(working: 5, done: 6), folder: liveFolder, transcriptDir: root.appendingPathComponent("t", isDirectory: true), now: nowT)
+        try? ReviewProgressFixture.sessionJSON(title: title, startedAt: 1000, updatedAt: nowT, tool: "Read", agentsRunning: 5, transcript: transcript.path).write(to: sessions.appendingPathComponent("s3.json"))
+        let liveWatch = ReviewProgressPoller.Watch(folder: liveFolder, kind: .full, title: title, since: 1000)
+        let book = LiveTrackerBook()
+        let liveRead: ReviewProgress? = await withCheckedContinuation { c in
+            DispatchQueue.global(qos: .utility).async { c.resume(returning: ReviewProgressPoller.compute(["k": liveWatch], sessions: sessions, trackers: book, now: nowT)["k"]) }
+        }
+        expect(liveRead?.fileMap.count == 168 && liveRead?.reviewers.count == 16, "live: 168 files and 16 reviewer tiles")
+        expect(liveRead?.fileMap.contains { $0.state == .reading } == true && liveRead?.fileMap.contains { $0.state == .reported } == true, "live: files are being read and reported")
+        expect(liveRead?.reviewers.filter { $0.state == .running }.count == 5 && liveRead?.reviewers.filter { $0.state == .done }.count == 6, "live: 5 working, 6 done tiles")
+        expect(liveRead?.heartbeat(now: nowT)?.total ?? 0 > 50 && liveRead?.notice(now: nowT, since: nil) == nil, "live: the graph has steps and a moving run has no notice")
+        expect(liveRead?.notice(now: nowT + 120, since: nil) != nil, "live: two quiet minutes give a notice")
+        let later = ReviewProgressPoller.compute(["k": liveWatch], sessions: sessions, trackers: book, now: nowT)["k"]
+        expect(later?.heartbeat(now: nowT)?.total == liveRead?.heartbeat(now: nowT)?.total, "live: a second read adds no steps twice")
+        let gone = ReviewProgressPoller.compute(["k": liveWatch], sessions: sessions, trackers: LiveTrackerBook(), now: nowT)["k"]
+        try? fm.removeItem(at: transcript)
+        let broken = ReviewProgressPoller.compute(["k": liveWatch], sessions: sessions, trackers: LiveTrackerBook(), now: nowT)["k"]
+        expect(gone?.reviewers.count == 16 && broken?.reviewers.count == 16 && broken?.fileMap.count == 168, "live: without session files the folder alone still shows the tiles and the map")
+
         // A follow-up and a replies-only run have their own steps.
         let other = root.appendingPathComponent("follow", isDirectory: true)
         ReviewProgressFixture.writeFollowUp(started: true, to: other)

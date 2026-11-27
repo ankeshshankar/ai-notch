@@ -699,6 +699,8 @@ enum PRReviewDev {
         let suggestion = args.contains("--suggestion")
         // The folders and the ledger, written before the store reads them.
         var ledger = ReviewLedger()
+        var previewTranscript: String?
+        var previewQuiet = 0.0
         for fixture in fixtures {
             guard var record = fixture.record else { continue }
             if args.contains("--gates") { record.mergeGate = gateFixture(fixture.ref.id) }
@@ -713,6 +715,12 @@ enum PRReviewDev {
                 if stage == "followup" {
                     record.baseHead = "9f8e7d6c5b4a"
                     ReviewProgressFixture.writeFollowUp(started: true, to: folder)
+                } else if let scenario = ReviewLiveFixture.named(stage) {
+                    // The live visuals: a folder, a main transcript and one session file per reviewer.
+                    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ai-notch-live-preview", isDirectory: true)
+                    previewTranscript = ReviewLiveFixture.write(scenario, folder: folder, transcriptDir: dir, now: now()).path
+                    previewQuiet = scenario.quietFor
+                    if scenario.closing { record.startedAt = now() - 1260 }
                 } else {
                     let map: [String: ReviewProgressFixture.Stage] = ["gather": .gather, "reviewers": .halfDone, "final": .finalCheck, "failed": .halfDone]
                     ReviewProgressFixture.writeFull(map[stage] ?? .halfDone, to: folder)
@@ -720,7 +728,7 @@ enum PRReviewDev {
                 if let sessions = env["CLAUDE_NOTCH_SESSIONS"], !sessions.isEmpty {
                     try? FileManager.default.createDirectory(atPath: sessions, withIntermediateDirectories: true)
                     let tool = stage == "final" ? "Write" : "Read"
-                    let data = ReviewProgressFixture.sessionJSON(title: "PR review #214 · web-app", startedAt: record.startedAt ?? now(), updatedAt: now(), tool: stage == "gather" ? nil : tool, agentsRunning: stage == "reviewers" ? 3 : 0)
+                    let data = ReviewProgressFixture.sessionJSON(title: "PR review #214 · web-app", startedAt: record.startedAt ?? now(), updatedAt: now() - previewQuiet, tool: stage == "gather" ? nil : tool, agentsRunning: stage == "reviewers" ? 3 : 0, transcript: previewTranscript)
                     try? data.write(to: URL(fileURLWithPath: sessions).appendingPathComponent("preview-progress.json"))
                 }
                 ledger.set(record)

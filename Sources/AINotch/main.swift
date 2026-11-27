@@ -2,7 +2,7 @@ import AppKit
 import Combine
 
 /// A preview window for screenshots, never the app: it skips the one-copy check and the first-launch setup.
-let isPreviewRun = CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview") || CommandLine.arguments.contains("--review-window-preview")
+let isPreviewRun = CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--setup-preview") || CommandLine.arguments.contains("--review-window-preview") || CommandLine.arguments.contains("--progress-replay")
 let showSetupNotification = Notification.Name("info.ankeshshiv.notch.show-setup")
 
 @MainActor
@@ -29,6 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             LidAwake.shared.applyFixture(i.flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? "off")
         }
         let setup = SetupWindowController.shared
+        // `--progress-replay`: the progress view of an existing run, read only (see ProgressReplay).
+        if args.contains("--progress-replay") {
+            ProgressReplay.run(args)
+            return
+        }
         // `--review-window-preview`: the review window alone, on fixtures (see PRReviewDev).
         if args.contains("--review-window-preview") {
             PRReviewDev.preview(args)

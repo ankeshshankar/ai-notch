@@ -637,18 +637,30 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
   outside `~/.claude`, because Claude Code refuses writes there; older reports still open). The row shows
   `Review queued`, `Reviewing…`, `APPROVE · 1 should-fix`, `REQUEST CHANGES · 2 blocking` or
   `Review failed` (hover for why). Its tokens count in usage like any session.
-  - *Live progress.* While it runs, the review window shows what is happening instead of a waiting text: a step
-    list (Reading the PR, Listing files, Reviewers, Final check, Result) with the current step marked and each done step's
-    fact ("168 files, 9 chunks, risk: payments, auth", "Pipeline green", "3 open comments from others"); under
-    Reviewers one row per reviewer and chunk ("Security 2 of 3": waiting, running or done with its files and
-    findings) and a total (reviewers done, files reported); and a Now line with the latest activity and the elapsed
-    time. A follow-up and a read of author replies show their own shorter steps. The row badge, the sidebar and the
-    window's chip add a short suffix ("Reviewing · 4m · 3/9"). It is read from the review's folder and the run's own
-    session file every two seconds, off the main thread, only while a view shows it; it stops when the window closes
-    or the run ends. A failed, cancelled or timed-out run shows the step it reached. Findings shown before the final
-    check are marked "not yet checked": they are the reviewers' words, never cards, and nothing can be posted until
-    the final check writes `comments.json`. Cost and tool targets are not shown live (the headless run prints its
-    totals only when it exits); the cost appears with the result.
+  - *Live progress.* While it runs, the review window shows what is happening instead of a waiting text. Motion
+    comes from real work: a moving view is working, a frozen one is stuck. From the top: a strip of five connected
+    dots (Reading the PR, Listing files, Reviewers, Final check, Result) with the active one pulsing and the step's
+    fact under it ("168 files, 6 chunks, risk: payments", "Pipeline green"); one tile per reviewer and chunk
+    (waiting is dim, working has a pulsing ring and a short line like "reading unit-4.ts", "searching" or
+    "running git", done has a tick and its finding count, failed says so; a reviewer that was run again shows
+    "Second pass"); a file map with one square per file of the change (dark until a reviewer opens it, filled while
+    it is being read, green once a report lists it, a bar or dot in a finding's colour when one landed on it, and a
+    hover for its path and who read it) beside "x of y files checked"; a Now line that names the file; an activity
+    graph of tool calls over the last five minutes; and four counters (blocking, should fix, was already there,
+    nit) that tick up as reports arrive. After a minute with no step anywhere it says "No activity for 1m" (then
+    2m, and so on); when `gate.json` is written, the main session has ended its turn and the run is still open it
+    says "Finished, closing". A follow-up and a read of author replies show their own shorter steps. The row badge,
+    the sidebar and the window's chip add a short suffix ("Reviewing · 4m · 3/9"). It is read from the review's
+    folder and the run's own session files (the main transcript and the `subagents` files beside it) every two
+    seconds, off the main thread, only while a view shows it; each file is read from where the last read stopped.
+    Only a tool's name, the file or pattern it targets and its time are read: no message, tool result or prompt text
+    is kept or shown. A reviewer's file is matched to its tile by the `REPORT:` file name in the prompt it was given
+    (`lens-<area>-<chunk>.md`, `…b.md` for a second pass). If the session files cannot be found or read, the view
+    falls back to what the folder shows. With Reduce Motion on, the pulses stand still. A failed, cancelled or
+    timed-out run shows the step it reached. Findings shown before the final check are marked "not yet checked":
+    they are the reviewers' words, never cards, and nothing can be posted until the final check writes
+    `comments.json`. Cost is not shown live (the headless run prints its totals only when it exits); the cost
+    appears with the result.
   - *Permissions.* The run loads none of your settings (`--setting-sources ""`), so your own allow
     rules (commit, checkout, MCP writes) do not apply; the skill's text and the lens and
     verifier agents (names in Setup, default `pr-lens` and `pr-verifier`) are read from `~/.claude` and passed in directly. It uses
