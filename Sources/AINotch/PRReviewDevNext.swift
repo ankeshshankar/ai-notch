@@ -140,6 +140,17 @@ extension PRReviewDev {
         replies.resolvedOnBitbucket = []
         let info = ReviewGate.checkOverride(cards: [], replies: replies, record: look, currentHead: head, pipeline: .green).info
         expect(info?.lines.contains("Merge gate: Needs your look.") == true && info?.lines.contains("Gate: 1 file not read") == true, "gate: Approve anyway lists the overridden reasons: \(info?.lines ?? [])")
+        let infoNot = ReviewGate.checkOverride(cards: [], replies: replies, record: not, currentHead: head, pipeline: .green).info
+        expect(infoNot?.lines.contains("Merge gate: Not ready.") == true && infoNot?.lines.contains("Gate: 1 blocking finding open") == true, "gate: Approve anyway on Not ready lists its reason: \(infoNot?.lines ?? [])")
+        var own = not; own.own = true
+        var refused = not; refused.denied = ["Bash"]
+        expect(!ReviewGate.checkOverride(cards: [], replies: replies, record: own, currentHead: head, pipeline: .green).isAvailable
+               && !ReviewGate.checkOverride(cards: [], replies: replies, record: refused, currentHead: head, pipeline: .green).isAvailable, "gate: override stays off for own work and a refused tool")
+        var onCard = SuggestedComment(id: "c9", severity: .nit, title: "x", body: "y"); onCard.include = true
+        expect(!ReviewGate.checkOverride(cards: [onCard], replies: replies, record: not, currentHead: head, pipeline: .green).isAvailable, "gate: override stays off while a card is switched on")
+        expect(not.mergeGate?.offLine == "Approve is off: 1 blocking finding open" && look.mergeGate?.offLine == "Approve is off: 1 file not read", "gate: the off line names the first reason: \(not.mergeGate?.offLine ?? "")")
+        let many = GateFile.parse(Data(#"{"gate":"NOT_READY","reasons":[{"code":"open-blocking","text":"2 blocking findings open"},{"code":"ci-red"},{"code":"unread-files"}]}"#.utf8))
+        expect(many?.offLine == "Approve is off: 2 blocking findings open (+2 more)", "gate: the off line counts the rest: \(many?.offLine ?? "")")
         let plain = ReviewGate.checkOverride(cards: [], replies: replies, record: ready, currentHead: head, pipeline: .green)
         expect(!plain.isAvailable, "gate: no override when a plain approve is open")
         let panel = ready.mergeGate.map { $0.filesLine ?? "" } ?? ""

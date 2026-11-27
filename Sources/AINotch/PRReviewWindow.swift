@@ -640,6 +640,9 @@ struct PRReviewDetail: View {
         guard let record = found?.record, record.phase == .done, let verdict = record.verdict, record.own != true, pr.role != .mine else { return nil }
         // Why the Approve button is off, always in view (the same words as its tooltip).
         if case .blocked(let why) = store.gate(.approve, for: pr) {
+            let line = record.mergeGate.map { $0.gate != .ready ? $0.offLine : "Approve is off: \(why)" } ?? "Approve is off: \(why)"
+            if store.overrideGate(for: pr, session: session).isAvailable { return (line + ". Approve anyway is yours to use.", Palette.ink3) }
+            if record.mergeGate?.gate != .ready, record.mergeGate != nil { return (line, Palette.ink3) }
             if store.overrideGate(for: pr, session: session).isAvailable { return ("Approve is off: \(why). Approve anyway is yours to use.", Palette.ink3) }
             return ("Approve is off: \(why)", Palette.ink3)
         }

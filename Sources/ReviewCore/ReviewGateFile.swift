@@ -137,6 +137,14 @@ public struct GateFile: Codable, Sendable, Equatable {
         return gate.title.lowercased() + (first.map { ": " + $0.prefix(1).lowercased() + $0.dropFirst() } ?? "")
     }
 
+    /// The line under the buttons when Approve is off: the first reason in plain words, "+N more" after it.
+    public var offLine: String {
+        let all = shownReasons
+        guard let first = all.first else { return "Approve is off: " + gate.title.lowercased() }
+        let more = all.count > 1 ? " (+\(all.count - 1) more)" : ""
+        return "Approve is off: " + first.text.prefix(1).lowercased() + first.text.dropFirst() + more
+    }
+
     public var unreadCount: Int { coverage.map { max($0.unread.count, $0.files - $0.read) } ?? 0 }
 
     /// "Read 38 of 40 files" (nil when the file has no coverage).
