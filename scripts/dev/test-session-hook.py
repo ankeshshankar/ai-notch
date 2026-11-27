@@ -118,6 +118,23 @@ try:
     expect(state()["agents"][0].get("workDir") == wta, "wt: a subagent's read in the start tree keeps its worktree")
     send("SessionEnd", cwd=main + "/sub")
     shutil.rmtree(base, ignore_errors=True)
+
+    # Tool count: a review run observes only post events, a normal session sends both.
+    sid = "t-review-count"
+    send("SessionStart", source="startup")
+    send("PostToolUse", tool_name="Read", tool_use_id="a")
+    send("PostToolUse", tool_name="mcp__srv__x", tool_use_id="b")
+    send("PostToolUseFailure", tool_name="Bash", tool_use_id="c")
+    s = state()
+    expect(s["toolCount"] == 3 and s.get("mcp") == {"srv": 1}, "count: post-only session counts 3 from post events")
+    send("SessionEnd")
+    sid = "t-normal-count"
+    send("SessionStart", source="startup")
+    for i in ("a", "b"):
+        send("PreToolUse", tool_name="Read", tool_use_id=i)
+        send("PostToolUse", tool_name="Read", tool_use_id=i)
+    expect(state()["toolCount"] == 2, "count: a session with PreToolUse counts each call once")
+    send("SessionEnd")
     sid = "t-session-hook"
 finally:
     shutil.rmtree(folder, ignore_errors=True)

@@ -191,6 +191,9 @@ public struct SessionState: Codable, Sendable, Equatable {
     /// The session's transcript, where an interrupt (which raises no hook) is recorded.
     public var transcriptPath: String?
     public var pendingAgents: [PendingAgent]?
+    /// The session sends PreToolUse, which is where calls are counted. A session that never does
+    /// (a headless review observes only the post events) is counted from PostToolUse instead.
+    public var sawPreToolUse: Bool?
     /// Permission prompts handed to the app and not yet answered anywhere.
     public var pendingPermissions: [PendingPermission]?
     /// When the session's prompt cache goes cold, as the status line last said (terminal only).

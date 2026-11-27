@@ -607,6 +607,7 @@ case "UserPromptSubmit":
 case "PreToolUse":
     // A new call in a thread means its earlier prompt was answered.
     resolvePending { $0.agent == agentId }
+    state.sawPreToolUse = true
     guard let tool else { break }
     let server = mcpServer(of: tool)
     onLoop { current, count, mcp in
@@ -712,6 +713,15 @@ case "PermissionRequest":
 
 case "PostToolUse", "PostToolUseFailure", "PermissionDenied":
     resolvePending { $0.agent == agentId && $0.tool == tool }
+    // A session that never sends PreToolUse (a review run observes only post events) counts here;
+    // one that does has counted the call already.
+    if name != "PermissionDenied", state.sawPreToolUse != true, let tool {
+        let server = mcpServer(of: tool)
+        onLoop { _, count, mcp in
+            count += 1
+            if let server { mcp[server, default: 0] += 1 }
+        }
+    }
     if let index = agentIndex(agentId) {
         var agent = state.agents[index]
         if agent.current?.id == toolUseId || agent.current?.name == tool {
