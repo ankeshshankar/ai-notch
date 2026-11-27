@@ -629,7 +629,7 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
   request you review in a repository with a local clone in builds.json is reviewed by your review
   skill (named in Setup, default `pr-review`) when it is in **Auto-review repos** (Setup, empty by default: nothing is reviewed automatically; Review now works on any cloned repo) and it appears or gets new commits: `claude -p` with the skill's text and the PR number, in that repo's
   clone, through your own Claude login (an API key in the environment is removed), one review at a
-  time, stopped after 30 minutes (Cancel review stops it sooner). Drafts, ones you already
+  time, stopped after 90 minutes (Cancel review stops it sooner). Drafts, ones you already
   reviewed and ones idle for 7 days are left alone; a run cut short because the notch quit is started once more on the next launch (same commit, auto review on, never twice); a failed or cancelled run is started again
   only by **Review now / Re-review** (row bar or right-click). Each pull request is reviewed once
   per commit (`~/.claude/notch/pr-reviews.json`); the full report is

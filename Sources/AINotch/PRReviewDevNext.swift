@@ -211,6 +211,20 @@ extension PRReviewDev {
         expect(settle(allFixed.replacingOccurrences(of: ",\"gate\":\"READY\"", with: ""), prev: previous(blocking: 1, shouldFix: 1)).mergeGate?.gate == .needsLook, "follow-up: no gate written after a gated review is not a pass")
 
         // The diff: merge commits that brought the target in are left out; a big diff is split.
+        // git and the diff preparation block, so they run off the main thread.
+        let d = await Task.detached { followDiffCheck(scratch: scratch, ref: ref) }.value
+        expect(d.diff.contains("own.txt") && !d.diff.contains("target-only.txt"), "follow-up diff: the target's merged-in work is not the author's")
+        expect(d.prompt.contains("1 merge commit that brought the target branch in is left out"), "follow-up prompt: names the skipped merge")
+        // A big change: split into parts, each under the limit, none cut.
+        expect(d.files.count >= 2 && d.sizes.allSatisfy { $0 <= DiffSplit.limit } && d.sizes.reduce(0, +) > 800_000, "follow-up diff: split into \(d.files.count) parts, sizes \(d.sizes)")
+        if let text = d.bigPrompt { expect(text.contains("followup-1.diff") && text.contains("none is cut"), "follow-up prompt: every part named") } else { expect(false, "big follow-up prepared") }
+    }
+
+    struct FollowDiffCheck: Sendable { var diff = "", prompt = "", files: [String] = [], sizes: [Int] = [], bigPrompt: String? }
+
+    /// Builds a small repository (own work, a merge of the target, one big change) and prepares both follow-ups.
+    nonisolated static func followDiffCheck(scratch: URL, ref: PullRequestRef) -> FollowDiffCheck {
+        var out = FollowDiffCheck()
         let repo = scratch.appendingPathComponent("fu-repo", isDirectory: true)
         try? FileManager.default.removeItem(at: repo)
         try? FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
@@ -229,13 +243,8 @@ extension PRReviewDev {
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let job = PRReviewRunner.Job(ref: ref, head: head, repoPath: repo.path, dir: dir, token: "x")
-        let prompt = PRReviewRunner.prepareFollowUp(job, .init(baseHead: base, inputJSON: Data("{}".utf8)))
-        let diff = (try? String(contentsOf: dir.appendingPathComponent("followup.diff"), encoding: .utf8)) ?? ""
-        var promptText = ""
-        if case .success(let text) = prompt { promptText = text }
-        expect(diff.contains("own.txt") && !diff.contains("target-only.txt"), "follow-up diff: the target's merged-in work is not the author's")
-        expect(promptText.contains("1 merge commit that brought the target branch in is left out"), "follow-up prompt: names the skipped merge")
-        // A big change: split into parts, each under the limit, none cut.
+        if case .success(let text) = PRReviewRunner.prepareFollowUp(job, .init(baseHead: base, inputJSON: Data("{}".utf8))) { out.prompt = text }
+        out.diff = (try? String(contentsOf: dir.appendingPathComponent("followup.diff"), encoding: .utf8)) ?? ""
         _ = git(["checkout", "-q", "-b", "big", base])
         for i in 0..<5 { write("big\(i).txt", String(repeating: "a line of added text\n", count: 9000)) }
         _ = git(["add", "."]); _ = git(["commit", "-q", "-m", "big"])
@@ -244,10 +253,10 @@ extension PRReviewDev {
         try? FileManager.default.removeItem(at: bigDir)
         try? FileManager.default.createDirectory(at: bigDir, withIntermediateDirectories: true)
         let big = PRReviewRunner.prepareFollowUp(PRReviewRunner.Job(ref: ref, head: bigHead, repoPath: repo.path, dir: bigDir, token: "x"), .init(baseHead: base, inputJSON: Data("{}".utf8)))
-        let files = ((try? FileManager.default.contentsOfDirectory(atPath: bigDir.path)) ?? []).filter { $0.hasPrefix("followup-") && $0.hasSuffix(".diff") }.sorted()
-        let sizes = files.map { (try? Data(contentsOf: bigDir.appendingPathComponent($0)).count) ?? 0 }
-        expect(files.count >= 2 && sizes.allSatisfy { $0 <= DiffSplit.limit } && sizes.reduce(0, +) > 800_000, "follow-up diff: split into \(files.count) parts, sizes \(sizes)")
-        if case .success(let text) = big { expect(text.contains("followup-1.diff") && text.contains("none is cut"), "follow-up prompt: every part named") } else { expect(false, "big follow-up prepared") }
+        out.files = ((try? FileManager.default.contentsOfDirectory(atPath: bigDir.path)) ?? []).filter { $0.hasPrefix("followup-") && $0.hasSuffix(".diff") }.sorted()
+        out.sizes = out.files.map { (try? Data(contentsOf: bigDir.appendingPathComponent($0)).count) ?? 0 }
+        if case .success(let text) = big { out.bigPrompt = text }
+        return out
     }
 
     /// Learning: proposals from the three sources, nothing written until an approval, the approval writes lessons.md.

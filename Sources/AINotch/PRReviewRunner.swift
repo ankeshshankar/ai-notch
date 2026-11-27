@@ -50,7 +50,8 @@ final class PRReviewRunner: @unchecked Sendable {
         case timedOut
     }
 
-    static let timeout: Double = 30 * 60
+    /// A chunked review of a large pull request (100+ files) runs past half an hour.
+    static let timeout: Double = 90 * 60
     static var timeoutOverride: Double? { ProcessInfo.processInfo.environment["CLAUDE_NOTCH_REVIEW_TIMEOUT"].flatMap(Double.init) }
 
     private let lock = NSLock()
