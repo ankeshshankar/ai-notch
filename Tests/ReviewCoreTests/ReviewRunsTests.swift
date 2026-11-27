@@ -80,4 +80,14 @@ final class ReviewRunsTests: XCTestCase {
         XCTAssertEqual(log.cards.first?.unchecked, true)
         XCTAssertEqual(CommentParse.file(Data(#"[{"id":"c1","severity":"nit","body":"x"}]"#.utf8)).first?.finding, nil)
     }
+
+    func testTheAppTextMatchesTheContract() {
+        let text = ReviewChat.commentsInstruction(scratch: "/s/r1")
+        for needed in ["/s/r1/comments.json", "/s/r1/review.md", "/s/r1/gate.json", "/s/r1/drops.json", "\"finding\"", "GATE: READY | NOT_READY | NEEDS_LOOK", "nitsNotShown"] {
+            XCTAssertTrue(text.contains(needed), needed)
+        }
+        XCTAssertFalse(text.contains("Besides the report"), "no card is drafted on the orchestrator's own")
+        XCTAssertTrue(ReviewChat.draftPrompt(scratch: "/s/r1").contains("review.md"))
+        XCTAssertTrue(ReviewCommand.prompt(prNumber: 3, scratch: "/s/r1", skill: "body").contains("Nobody drafts cards before that check"))
+    }
 }

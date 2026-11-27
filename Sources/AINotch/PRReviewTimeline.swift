@@ -252,6 +252,12 @@ struct PRCommentCard: View {
                     Text("General comment").font(Typo.label()).foregroundStyle(Palette.ink3)
                 }
                 if let status = card.status { PRFollowUpBadge(status: status, reason: card.statusReason) }
+                if card.unchecked == true, !card.isPosted {
+                    Text("Not checked").font(Typo.caption(.semibold)).foregroundStyle(Palette.waiting)
+                        .padding(.horizontal, 5).padding(.vertical, 1).background(Capsule().fill(Palette.waitingHue.opacity(0.18)))
+                        .help("The final check did not keep this finding: it is not in the checked report, so it starts switched off.")
+                        .ax("Not checked", value: "")
+                }
                 if let badge = card.badge, !card.isPosted {
                     Text(badge).font(Typo.caption(.semibold)).foregroundStyle(Palette.claude)
                         .padding(.horizontal, 5).padding(.vertical, 1).background(Capsule().fill(Palette.claudeHue.opacity(0.16)))

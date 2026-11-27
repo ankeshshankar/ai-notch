@@ -521,17 +521,20 @@ public enum ReviewChat {
         return text
     }
 
-    /// What the review is asked to leave behind besides the report: `comments.json`.
+    /// What the review leaves behind (the contract): the cards are written by the final check from `review.md`, one per
+    /// kept finding, never drafted by the orchestrator on its own, each naming its finding.
     public static func commentsInstruction(scratch: String) -> String {
         """
-        Besides the report, write \(scratch)/comments.json with the Write tool: a JSON array with one object per BLOCKING, SHOULD-FIX or NIT finding you kept (not the CANNOT-VERIFY ones): {"id": "c1", "severity": "blocking" | "should-fix" | "nit", "path": "src/a.ts", "line": 12, "title": "five words", "body": "the comment"}. path is relative to the repository root, line is the first changed line the comment is about (null if it concerns the whole file or the pull request). body is the pull request comment the reviewer would post: short, plain, specific, with the fix, in the first person where natural. No lens codes ("C3 [B]", "— security"), no severity label, no file:line prefix in the body, and never mention AI, Claude, a bot or "the review".
+        The final check, after the reviewers, writes these with the Write tool, from the report it keeps and nothing else: \(scratch)/review.md (findings with stable ids F1, F2, …; its last two lines are `GATE: READY | NOT_READY | NEEDS_LOOK` and `VERDICT: APPROVE | REQUEST CHANGES`, APPROVE only with READY), \(scratch)/drops.json, \(scratch)/gate.json and \(scratch)/comments.json. Nobody drafts cards before that check: a card that is not a kept finding of review.md must not exist.
+        comments.json is a JSON array with one object per kept BLOCKING, SHOULD-FIX or NIT finding (not the CANNOT-VERIFY ones; at most 3 nits, the rest are counted in gate.json as nitsNotShown): {"id": "c1", "finding": "F3", "severity": "blocking" | "should-fix" | "nit", "path": "src/a.ts", "line": 12, "title": "five words", "body": "the comment", "suggestion": "optional exact replacement for that line"}. "finding" is required and must be an id in review.md. path is relative to the repository root, line is the first changed line the comment is about (null if it concerns the whole file or the pull request). body is the pull request comment the reviewer would post: short, plain, specific, with the fix, in the first person where natural. No lens codes ("C3 [B]", "— security"), no severity label, no file:line prefix in the body, and never mention AI, Claude, a bot or "the review".
         """
     }
 
-    /// The turn that writes `comments.json` for a review that predates it.
+    /// The turn that writes `comments.json` for a review that predates it: the cards come from the findings of
+    /// `review.md` (with their ids when it has them), not from a fresh opinion.
     public static func draftPrompt(scratch: String) -> String {
         """
-        From the review you just did (its findings are also in \(scratch)/review.md), \(commentsInstruction(scratch: scratch).replacingOccurrences(of: "Besides the report, write", with: "write")) Answer with one line when it is written.
+        Write \(scratch)/comments.json with the Write tool from the findings of \(scratch)/review.md (or, if it has none, of the report you just gave), one card per BLOCKING, SHOULD-FIX or NIT finding that report kept, and no card for anything it does not list: a JSON array of {"id": "c1", "finding": "F3" (the finding's id in review.md; leave it out if the report has none), "severity": "blocking" | "should-fix" | "nit", "path": "src/a.ts", "line": 12, "title": "five words", "body": "the comment"}. body is the pull request comment the reviewer would post: short, plain, specific, with the fix; no lens codes, no severity label, and never mention AI, Claude, a bot or "the review". Answer with one line when it is written.
         """
     }
 
