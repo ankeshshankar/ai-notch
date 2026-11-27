@@ -650,6 +650,21 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
     are shortcuts and stay in their group too. **↑ ↓** move through the list when it has the keyboard
     (**Esc** from the search box, or **↓** from it); on the comment cards they keep moving between cards.
     **⌘R**, **⌘L**, **⌘↩** and **⌘⇧R** are unchanged. All of it is in the window's **Shortcuts** list.
+  - *Handing my own pull request to the coding chat.* On a pull request of yours (Mine), the **To fix** header has
+    **Copy for chat** (**⌘⇧C**; also in the **Shortcuts** list). It first re-reads the pull request's comments from
+    Bitbucket (read only; nothing is posted), then writes `<repo>-<id>-fix.md` beside the review folders
+    (`~/Library/Application Support/AINotch/reviews/`), overwriting it each time, and copies one line:
+    `Read "<path>/<repo>-<id>-fix.md" and fix what it lists: check each item in the code first, then tell me per item what you changed or why you left it.`
+    The line is the same for a pull request every time, so paste it in the chat where you build the change. The
+    file has the repository, number, title, branches, the commit the review ran on (and a plain line when the
+    head has moved since), every finding not ticked **Done** (severity, file:line, the text and any suggested
+    code; ticked ones are counted, not listed), every open comment from other people and bots with its replies
+    (resolved threads are counted, not listed), and a pointer to `review.md` for the evidence. Names only: no
+    account ids or emails. If Bitbucket cannot be read, the file uses the comments the review saved, says so, and the notice
+    reads "comments could not be refreshed". The button is on when a finding is left or someone else has an open
+    comment, so it works with no review yet. The **Comments from others** list on the same page (author, bot tag,
+    file:line, first lines, reply count; **Refresh** reads again) is view only: Post, Resolve and Approve stay off
+    for your own pull requests.
   - *Live progress.* While it runs, the review window shows what is happening instead of a waiting text. Motion
     comes from real work: a moving view is working, a frozen one is stuck. From the top: a strip of five connected
     dots (Reading the PR, Listing files, Reviewers, Final check, Result) with the active one pulsing and the step's

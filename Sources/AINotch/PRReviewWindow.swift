@@ -50,6 +50,16 @@ final class PRReviewWindowModel: ObservableObject {
     var refresh: PRRefreshState?
     var refreshAction: ((String?) -> Void)?
     private var sessions: [String: PRChatSession] = [:]
+    private var handoffs: [String: PRHandoff] = [:]
+
+    /// The hand-off state of one of my pull requests (comments of others, the copy notice).
+    func handoff(for pr: PullRequest) -> PRHandoff {
+        if let held = handoffs[pr.ref.key] { return held }
+        let made = PRHandoff(ref: pr.ref)
+        made.me = { [weak store] in store?.meUUID() }
+        handoffs[pr.ref.key] = made
+        return made
+    }
 
     // The sidebar: what is typed, what is pinned, recent and folded (kept in the app's settings), and where the focus is.
     /// The search box's text. Kept here, not in the view, so a list refresh or a window rebuild never clears it.
@@ -839,6 +849,9 @@ struct PRReviewDetail: View {
                 Text("The review was cancelled").font(Typo.title(.medium)).foregroundStyle(Palette.ink2)
             }
             Spacer(minLength: 0)
+            if pr.role == .mine || record?.own == true, pr.ref.id > 0 {
+                PROwnOthersPanel(handoff: model.handoff(for: pr), store: store, pr: pr)
+            }
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity))

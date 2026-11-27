@@ -373,6 +373,7 @@ struct PRReviewTimeline: View {
     @FocusState private var inputFocused: Bool
 
     private var own: Bool { pr.role == .mine || store.record(for: pr)?.record.own == true }
+    private var reviewFolder: URL? { store.record(for: pr).flatMap { store.folder(for: $0.record) } }
 
     /// The cards in the order they show, for the arrow keys.
     private var shownCards: [SuggestedComment] { session.cards.filter { c in !session.log.messages.contains { $0.newCards.contains(c.id) } } }
@@ -387,6 +388,7 @@ struct PRReviewTimeline: View {
                         if !own { repliesBar }
                         existingSection
                         cardsSection
+                        if own, pr.ref.id > 0 { PROthersSection(handoff: model.handoff(for: pr), folder: reviewFolder) }
                         ForEach(session.log.messages) { message in messageView(message) }
                         if session.running { streamingView }
                         Color.clear.frame(height: 1).id("bottom")
@@ -406,7 +408,7 @@ struct PRReviewTimeline: View {
             footer
         }
         .background(shortcutButtons)
-        .onAppear { DispatchQueue.main.async { if !model.sidebarFocused { listFocused = true } }; if !own { session.loadExisting(maxAge: 30) } }
+        .onAppear { DispatchQueue.main.async { if !model.sidebarFocused { listFocused = true } }; if !own { session.loadExisting(maxAge: 30) } else { model.handoff(for: pr).load(folder: reviewFolder) } }
         .onChange(of: model.focusChat) { inputFocused = true }
     }
 
@@ -448,6 +450,12 @@ struct PRReviewTimeline: View {
             Button("Post") { perform(.post) }.keyboardShortcut(.return, modifiers: .command)
             Button("Re-review") { perform(.reReview) }.keyboardShortcut("r", modifiers: .command)
             Button("Chat") { perform(.focusChat) }.keyboardShortcut("l", modifiers: .command)
+            if own {
+                Button("Copy for chat") {
+                    let handoff = model.handoff(for: pr)
+                    if ReviewHandoff.canCopy(cards: session.cards, others: handoff.others) { handoff.copy(pr: pr, store: store, session: session) }
+                }.keyboardShortcut("c", modifiers: [.command, .shift])
+            }
         }
         .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true)
     }
@@ -581,6 +589,7 @@ struct PRReviewTimeline: View {
                 InfoMark(text: own ? "The findings as a checklist for you. Nothing here is posted anywhere." : "Pick the ones to post under your name: Add is on for blocking, should-fix and was-already-there findings, off for nits. Edit the text, or ask in the chat to draft or soften one. Nothing is posted until you confirm.")
                 if !own { resolveAllPill }
                 Spacer(minLength: 0)
+                if own { PRCopyForChat(handoff: model.handoff(for: pr), store: store, pr: pr, session: session, cards: session.cards) }
                 if session.needsDraft {
                     PRReviewPill(title: session.drafting ? "Drafting…" : "Draft comments", symbol: "text.badge.plus", enabled: !session.running) { session.draftComments() }
                 }

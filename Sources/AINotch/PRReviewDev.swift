@@ -151,6 +151,7 @@ enum PRReviewDev {
             await selfCheckPreExisting(scratch: scratch, expect: expect)
             await selfCheckFollowGate(scratch: scratch, expect: expect)
             await selfCheckLessons(scratch: scratch, expect: expect)
+            await selfCheckHandoff(scratch: scratch, expect: expect)
             done = true
         }
         let limit = Date().addingTimeInterval(20)
@@ -745,6 +746,7 @@ enum PRReviewDev {
             ledger.set(record)
             writeFolder(PRReviewStore.folder(fixture.ref, head: record.head), fixture: fixture.ref.id, record: record, followup: followup, suggestion: suggestion)
         }
+        if let own = ownFixtures(args) { ledger.set(own) }
         let ledgerData = (try? JSONEncoder().encode(ledger)) ?? Data()
         try? ledgerData.write(to: PRReviewStore.ledgerURL)
         PRReviewAPI.fixtureBehind = 3
@@ -755,6 +757,7 @@ enum PRReviewDev {
 
         if args.contains("--lessons") { lessonFixtures(ref: web(214)) }
         let store = PRReviewStore()
+        if args.contains("--own") || args.contains("--own-moved") || args.contains("--own-comments") { store.meUUID = { "u-me" } }
         // A run under way is not "interrupted" at launch: put it in the store as it stands.
         if let stage = value("--progress"), stage != "failed" { store.injectLedgerForCheck(ledger) }
         if args.contains("--replies") { replyFixtures(store: store, ref: web(214), head: heads[0]) }
@@ -783,6 +786,11 @@ enum PRReviewDev {
         let index = Int(value("--select") ?? "0") ?? 0
         model.selected = list.prs[min(max(index, 0), list.prs.count - 1)].id
         if value("--select") == "mine", let first = list.mine.first { model.selected = first.id }
+        if args.contains("--own-copied"), let mine = list.mine.first {
+            // The copy as a click would run it, with the line printed instead of put on the pasteboard.
+            PRHandoff.writePasteboard = { FileHandle.standardError.write(Data("copied-line \($0)\n".utf8)) }
+            model.handoff(for: mine).copy(pr: mine, store: store, session: model.session(for: mine))
+        }
         switch value("--overlay") {
         case "post": model.overlay = .post
         case "approve": model.overlay = .action(.approve)
