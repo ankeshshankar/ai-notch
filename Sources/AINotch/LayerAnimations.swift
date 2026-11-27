@@ -15,6 +15,8 @@ final class LoopLayerView: NSView {
         case dot
         /// The notch outline, breathing in opacity; `radius` is its bottom corners'.
         case glow(radius: CGFloat, lineWidth: CGFloat)
+        /// A circle outline, breathing in opacity.
+        case ring(lineWidth: CGFloat)
     }
 
     private let shape = CAShapeLayer()
@@ -96,6 +98,10 @@ final class LoopLayerView: NSView {
         case .dot:
             shape.fillColor = resolved
             shape.strokeColor = nil
+        case .ring(let lineWidth):
+            shape.strokeColor = resolved
+            shape.fillColor = nil
+            shape.lineWidth = lineWidth
         case .glow(_, let lineWidth):
             shape.strokeColor = resolved
             shape.fillColor = nil
@@ -115,6 +121,8 @@ final class LoopLayerView: NSView {
             return path
         case .dot:
             return CGPath(ellipseIn: rect, transform: nil)
+        case .ring(let lineWidth):
+            return CGPath(ellipseIn: rect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2), transform: nil)
         case .glow(let radius, let lineWidth):
             // The stroke lies wholly inside the shape: what the old stroke left after the clip.
             let inset = rect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
@@ -147,7 +155,7 @@ final class LoopLayerView: NSView {
             animation.duration = 0.7
             animation.autoreverses = true
             animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        case .glow:
+        case .glow, .ring:
             animation = CABasicAnimation(keyPath: "opacity")
             animation.fromValue = 0.3
             animation.toValue = 0.95

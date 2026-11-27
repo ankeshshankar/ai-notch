@@ -7,6 +7,22 @@ import SwiftUI
 // is polled while no view shows it, and nothing here can post. What a reviewer wrote before the final check is
 // labelled "not yet checked" and is never a card.
 
+/// The session-file readers of the runs being watched, one per run, so a poll reads only what was appended.
+final class LiveTrackerBook: @unchecked Sendable {
+    private let lock = NSLock()
+    private var trackers: [String: ReviewLiveTracker] = [:]
+
+    func tracker(for key: String) -> ReviewLiveTracker {
+        lock.lock(); defer { lock.unlock() }
+        if let found = trackers[key] { return found }
+        let made = ReviewLiveTracker()
+        trackers[key] = made
+        return made
+    }
+
+    func drop(_ key: String) { lock.lock(); trackers[key] = nil; lock.unlock() }
+}
+
 /// Polls the watched folders. One timer, on a utility queue, alive only while something is watched.
 final class ReviewProgressPoller: @unchecked Sendable {
     struct Watch: Sendable {
@@ -24,6 +40,7 @@ final class ReviewProgressPoller: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "ai-notch.review-progress", qos: .utility)
     private let sessions: URL
+    private let book = LiveTrackerBook()
     private let deliver: @Sendable ([String: ReviewProgress]) -> Void
 
     init(sessions: URL = NotchPaths.sessions, deliver: @escaping @Sendable ([String: ReviewProgress]) -> Void) {
@@ -52,7 +69,7 @@ final class ReviewProgressPoller: @unchecked Sendable {
         lock.lock()
         if var existing = watches[key] {
             existing.users -= 1
-            if existing.users <= 0 { watches[key] = nil } else { watches[key] = existing }
+            if existing.users <= 0 { watches[key] = nil; book.drop(key) } else { watches[key] = existing }
         }
         if watches.isEmpty { timer?.cancel(); timer = nil }
         lock.unlock()
@@ -66,11 +83,11 @@ final class ReviewProgressPoller: @unchecked Sendable {
     private func tick() {
         lock.lock(); let current = watches; lock.unlock()
         guard !current.isEmpty else { return }
-        deliver(Self.compute(current, sessions: sessions))
+        deliver(Self.compute(current, sessions: sessions, trackers: book))
     }
 
     /// Dev and tests: the same read, on this thread.
-    static func compute(_ watches: [String: Watch], sessions: URL) -> [String: ReviewProgress] {
+    static func compute(_ watches: [String: Watch], sessions: URL, trackers: LiveTrackerBook = LiveTrackerBook(), now: Double = Date().timeIntervalSince1970) -> [String: ReviewProgress] {
         let oldest = watches.values.map(\.since).min() ?? 0
         var files: [Data] = []
         let fm = FileManager.default
@@ -82,7 +99,9 @@ final class ReviewProgressPoller: @unchecked Sendable {
         var out: [String: ReviewProgress] = [:]
         for (key, watch) in watches {
             let activity = ReviewActivity.parse(files, title: watch.title, since: watch.since)
-            out[key] = ReviewProgress.read(folder: watch.folder, kind: watch.kind, activity: activity)
+            // The run's own files beside its transcript; anything unreadable leaves the folder-only view.
+            let live = activity?.transcript.map { trackers.tracker(for: key).update(transcript: URL(fileURLWithPath: $0), now: now) }
+            out[key] = ReviewProgress.read(folder: watch.folder, kind: watch.kind, activity: activity, live: live, now: now)
         }
         return out
     }
@@ -174,93 +193,5 @@ struct ReviewProgressWatch: ViewModifier {
 extension View {
     func reviewProgress(record: ReviewRecord?, folder: URL?, replies: Double? = nil) -> some View {
         modifier(ReviewProgressWatch(record: record, folder: folder, replies: replies))
-    }
-}
-
-struct ReviewProgressPanel: View {
-    var progress: ReviewProgress
-    /// When the run began; nil when unknown.
-    var since: Double?
-    /// The run ended without a result (failed, stopped, timed out): the step it reached is marked.
-    var stopped: Bool = false
-    var compact = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(progress.steps, id: \.id) { step in
-                    stepRow(step)
-                    if step.id == "reviewers", !progress.reviewers.isEmpty, step.state != .pending { reviewerList }
-                }
-            }
-            if !stopped { nowLine }
-            else if let step = progress.current {
-                Text("Stopped at: \(step.title)" + (step.id == "reviewers" ? " · \(progress.reviewersDone) of \(progress.reviewersTotal) reviewers done" : ""))
-                    .font(Typo.label(.medium)).foregroundStyle(Palette.failed)
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.panel))
-    }
-
-    private func stepRow(_ step: ReviewStepRow) -> some View {
-        let current = step.state == .current
-        let tone: Color = step.state == .done ? Palette.done : current ? (stopped ? Palette.failed : Palette.claude) : Palette.ink3
-        let symbol = step.state == .done ? "checkmark.circle.fill" : current ? (stopped ? "exclamationmark.circle" : "ellipsis.circle") : "circle"
-        return HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: symbol).font(Typo.label(.semibold)).foregroundStyle(tone).frame(width: 16).decorative()
-            Text(step.title).font(Typo.label(current ? .semibold : .medium)).foregroundStyle(step.state == .pending ? Palette.ink3 : Palette.ink)
-            if let fact = step.fact {
-                Text(fact).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private var reviewerList: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            ForEach(Array(progress.reviewers.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: 6) {
-                    Text(row.title).font(Typo.label()).foregroundStyle(row.state == .waiting ? Palette.ink3 : Palette.ink2)
-                    Spacer(minLength: 6)
-                    switch row.state {
-                    case .waiting: Text("waiting").font(Typo.label()).foregroundStyle(Palette.ink3)
-                    case .running: Text("running").font(Typo.label(.medium)).foregroundStyle(stopped ? Palette.ink3 : Palette.claude)
-                    case .done:
-                        Text("\(row.filesReported ?? 0) of \(row.filesGiven) files · \(row.findings?.text ?? "none")")
-                            .font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
-                    }
-                }
-            }
-            HStack(spacing: 4) {
-                Text("\(progress.reviewersDone) of \(progress.reviewersTotal) reviewers done · \(progress.filesReported) of \(progress.filesTotal) files reported")
-                    .font(Typo.label(.medium)).foregroundStyle(Palette.ink2)
-                Spacer(minLength: 0)
-            }
-            .padding(.top, 2)
-            if progress.liveFindings.total > 0 {
-                HStack(spacing: 4) {
-                    Text("Found so far: \(progress.liveFindings.text)").font(Typo.label()).foregroundStyle(Palette.ink3)
-                    if !progress.checked {
-                        Text("not yet checked").font(Typo.label(.medium)).foregroundStyle(Palette.waiting)
-                        InfoMark(text: "What the reviewers wrote so far. The final check re-opens each one in the code and drops what it cannot confirm; only what it keeps becomes a comment.")
-                    }
-                }
-            }
-        }
-        .padding(.leading, 24)
-    }
-
-    private var nowLine: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let elapsed = since.map { context.date.timeIntervalSince1970 - $0 }
-            HStack(spacing: 6) {
-                Text("Now").font(Typo.label(.semibold)).foregroundStyle(Palette.ink3)
-                Text(progress.nowLine(elapsed: elapsed)).font(Typo.label()).foregroundStyle(Palette.ink2).lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
     }
 }
