@@ -1017,7 +1017,7 @@ struct PRReviewGatePanel: View {
             HStack(spacing: 6) {
                 Image(systemName: look.symbol).font(Typo.label(.bold)).decorative()
                 Text(outcome.title + (older ? " · older commit" : "")).font(Typo.body(.semibold))
-                InfoMark(text: "The review's merge gate. Approve is on only when this says Ready to merge. \(gate.deepCheck ? "A second, deeper check ran on this pull request. " : "")Details sit on each line.")
+                InfoMark(text: "The review's merge gate. Approve is on only when this says Ready to merge. Problems that were there before the PR get a card but cap this at Needs your look. \(gate.deepCheck ? "A second, deeper check ran on this pull request. " : "")Details sit on each line.")
             }
             .foregroundStyle(look.color)
             ForEach(Array(gate.shownReasons.enumerated()), id: \.offset) { _, reason in
@@ -1052,6 +1052,7 @@ struct PRReviewGatePanel: View {
                 }
                 if let line = gate.nitsLine { Text(line).font(Typo.label()).foregroundStyle(Palette.ink3) }
             }
+            PRReviewFollowUps(items: gate.followUps)
             if gate.packChecks.contains(where: { $0.state != "na" }) {
                 InfoMark(text: gate.packChecks.map { "\($0.state.uppercased()): \($0.text)" }.joined(separator: "\n"))
             }
@@ -1062,6 +1063,39 @@ struct PRReviewGatePanel: View {
     }
 }
 
+/// "Follow-ups (n)": real defects on lines the PR did not change. Information only, collapsed; nothing when empty.
+struct PRReviewFollowUps: View {
+    var items: [GateFollowUp]
+    @State private var open = false
+
+    var body: some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Button { open.toggle() } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: open ? "chevron.down" : "chevron.right").font(Typo.label(.bold)).decorative()
+                            Text("Follow-ups (\(items.count))").font(Typo.label(.medium))
+                        }
+                        .foregroundStyle(Palette.ink2)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Follow-ups, \(items.count)")
+                    InfoMark(text: "Real problems on lines this PR did not change. For later; they do not change the gate.")
+                }
+                if open {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Text("•").font(Typo.label()).foregroundStyle(Palette.ink3)
+                            Text("\(item.title)  \(item.location)").font(Typo.label()).foregroundStyle(Palette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 // MARK: Lessons
 
