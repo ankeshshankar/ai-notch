@@ -478,9 +478,11 @@ struct PRPanelRowView: View {
     var stage: PRStage? = nil
     /// The automatic review's ledger on a row I review, for the badge.
     var review: PRReviewStore? = nil
+    @ObservedObject private var progress = ReviewProgressCenter.shared
 
     var body: some View {
-        let badge = PRBadge.make(pr: pr, stage: stage, record: review?.record(for: pr)?.record, now: now)
+        let record = review?.record(for: pr)?.record
+        let badge = PRBadge.make(pr: pr, stage: stage, record: record, now: now, progress: record?.phase == .reviewing ? progress.progress[pr.ref.key] : nil)
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text(verbatim: pr.ref.label).font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
@@ -513,6 +515,7 @@ struct PRPanelRowView: View {
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(waits && !isMuted ? glass.color(Palette.card) : glass.color(Palette.card).opacity(0.6)))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(glass.color(Palette.hairline), lineWidth: 1))
+        .reviewProgress(record: record, folder: record.flatMap { review?.folder(for: $0) })
     }
 
     private var waits: Bool { stage.map(\.needsMe) ?? pr.needsSomething }
@@ -643,7 +646,7 @@ struct PRBadge: Equatable {
     }
 
     /// Nil for one of mine (its glyphs say it) and for one with nothing to say.
-    static func make(pr: PullRequest, stage: PRStage?, record: ReviewRecord?, now: Double) -> PRBadge? {
+    static func make(pr: PullRequest, stage: PRStage?, record: ReviewRecord?, now: Double, progress: ReviewProgress? = nil) -> PRBadge? {
         guard let stage else { return nil }
         switch stage {
         case .ready(let verdict, let findings, let followUp, let commits):
@@ -662,7 +665,12 @@ struct PRBadge: Equatable {
                            help: "\(followUp ? "The follow-up review is done" : "The review is done"): \(what)" + (comments > 0 ? ", \(findings.text)" : "") + ". Nothing is posted until you decide.")
         case .reviewing(let followUp, let since):
             if record?.phase == .queued { return PRBadge(text: "Queued", symbol: "clock", color: Palette.ink3, help: "Waits for the review in progress; one runs at a time.") }
-            let age = since.map { " · " + short(max(0, now - $0)) } ?? ""
+            var age = since.map { " · " + short(max(0, now - $0)) } ?? ""
+            // "Reviewing · 4m · 3/9": the run's own steps, once the folder says anything.
+            if let progress, progress.current?.id != "reading" || progress.shortCount != nil {
+                let suffix = progress.suffix(elapsed: since.map { max(0, now - $0) })
+                if !suffix.isEmpty { age = " · " + suffix }
+            }
             return PRBadge(text: (followUp ? "Follow-up" : "Reviewing") + age, symbol: "ellipsis", color: Palette.claude,
                            help: followUp ? "Claude is checking the new commits against the earlier findings." : "Claude is reviewing this pull request (read only).")
         case .newCommits:

@@ -146,6 +146,7 @@ enum PRReviewDev {
             await selfCheckResolveAll(ref: ref, base: base, expect: expect)
             await selfCheckModels(scratch: scratch, expect: expect)
             await selfCheckRuns(expect: expect)
+            await selfCheckProgress(expect: expect)
             await selfCheckGate(expect: expect)
             await selfCheckPreExisting(scratch: scratch, expect: expect)
             await selfCheckFollowGate(scratch: scratch, expect: expect)
@@ -702,6 +703,29 @@ enum PRReviewDev {
             guard var record = fixture.record else { continue }
             if args.contains("--gates") { record.mergeGate = gateFixture(fixture.ref.id) }
             if followup, fixture.ref.id == 214 { record.baseHead = "9f8e7d6c5b4a"; record.commitCount = 2; record.commentsPosted = 2 }
+            if let stage = value("--progress"), fixture.ref.id == 214 {
+                // A review under way: only the files its stage has written, a session file for the "now" line.
+                let folder = PRReviewStore.folder(fixture.ref, head: record.head)
+                try? FileManager.default.removeItem(at: folder)
+                record = ReviewRecord(key: record.key, head: record.head, phase: stage == "failed" ? .failed : .reviewing, auto: true, queuedAt: now() - 300)
+                record.startedAt = now() - (stage == "final" ? 1260 : stage == "gather" ? 35 : 252)
+                if stage == "failed" { record.error = "claude stopped (exit 1)" }
+                if stage == "followup" {
+                    record.baseHead = "9f8e7d6c5b4a"
+                    ReviewProgressFixture.writeFollowUp(started: true, to: folder)
+                } else {
+                    let map: [String: ReviewProgressFixture.Stage] = ["gather": .gather, "reviewers": .halfDone, "final": .finalCheck, "failed": .halfDone]
+                    ReviewProgressFixture.writeFull(map[stage] ?? .halfDone, to: folder)
+                }
+                if let sessions = env["CLAUDE_NOTCH_SESSIONS"], !sessions.isEmpty {
+                    try? FileManager.default.createDirectory(atPath: sessions, withIntermediateDirectories: true)
+                    let tool = stage == "final" ? "Write" : "Read"
+                    let data = ReviewProgressFixture.sessionJSON(title: "PR review #214 · web-app", startedAt: record.startedAt ?? now(), updatedAt: now(), tool: stage == "gather" ? nil : tool, agentsRunning: stage == "reviewers" ? 3 : 0)
+                    try? data.write(to: URL(fileURLWithPath: sessions).appendingPathComponent("preview-progress.json"))
+                }
+                ledger.set(record)
+                continue
+            }
             ledger.set(record)
             writeFolder(PRReviewStore.folder(fixture.ref, head: record.head), fixture: fixture.ref.id, record: record, followup: followup, suggestion: suggestion)
         }
@@ -715,6 +739,8 @@ enum PRReviewDev {
 
         if args.contains("--lessons") { lessonFixtures(ref: web(214)) }
         let store = PRReviewStore()
+        // A run under way is not "interrupted" at launch: put it in the store as it stands.
+        if let stage = value("--progress"), stage != "failed" { store.injectLedgerForCheck(ledger) }
         if args.contains("--replies") { replyFixtures(store: store, ref: web(214), head: heads[0]) }
         if args.contains("--resolve-all") { resolveAllFixtures(store: store, ref: web(214), head: heads[0]) }
         if args.contains("--override") { overrideFixtures(store: store, ref: web(214), head: heads[0], resolved: !args.contains("--unresolved")) }

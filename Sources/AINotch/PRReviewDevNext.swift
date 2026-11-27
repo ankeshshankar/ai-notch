@@ -379,3 +379,68 @@ extension PRReviewDev {
         expect(countAgents(in: [call, blob, two, blob, call].joined(separator: "\n"), defaults: ["verifier": "fable"]) == "lens:opus x1, verifier:fable x1", "live: agent calls counted once by id, request blobs skipped")
     }
 }
+
+/// Live progress of a running review (`--review-selfcheck`): folder state to steps, the poller's life, the labels. Fixtures only.
+extension PRReviewDev {
+    @MainActor
+    static func selfCheckProgress(expect: (Bool, String) -> Void) async {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("ai-notch-progress-selfcheck-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let folder = root.appendingPathComponent("review", isDirectory: true), sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try? fm.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let title = "PR review #31 · web-app"
+        let watch = ReviewProgressPoller.Watch(folder: folder, kind: .full, title: title, since: 1000)
+
+        ReviewProgressFixture.writeFull(.gather, to: folder)
+        var read = ReviewProgressPoller.compute(["k": watch], sessions: sessions)["k"]
+        expect(read?.current?.id == "listing" && read?.steps.first?.fact?.hasPrefix("Pipeline green") == true, "progress: gather done, listing is next")
+
+        ReviewProgressFixture.writeFull(.halfDone, to: folder)
+        try? ReviewProgressFixture.sessionJSON(title: title, startedAt: 1000, updatedAt: 1100, tool: "Read", agentsRunning: 2).write(to: sessions.appendingPathComponent("s1.json"))
+        try? ReviewProgressFixture.sessionJSON(title: "PR review #99 · web-app", startedAt: 1000, updatedAt: 1200, tool: "Bash", agentsRunning: 5).write(to: sessions.appendingPathComponent("s2.json"))
+        read = ReviewProgressPoller.compute(["k": watch], sessions: sessions)["k"]
+        expect(read?.reviewersDone == 4 && read?.reviewersTotal == 9 && read?.shortCount == "4/9", "progress: 4 of 9 reviewers from the lens files")
+        expect(read?.reviewers.filter { $0.state == .running }.count == 2 && read?.activity?.tool == "Read", "progress: running count and tool come from this review's own session")
+        expect(read?.filesReported == 16 && read?.filesTotal == 24, "progress: files reported once each")
+        expect(read?.checked == false && (read?.liveFindings.total ?? 0) > 0 && !fm.fileExists(atPath: folder.appendingPathComponent("comments.json").path),
+               "progress: findings before the final check are unchecked and there is no comments.json to make cards from")
+        expect((try? Data(contentsOf: folder.appendingPathComponent("comments.json"))).map { CommentParse.file($0).count } == nil, "progress: a mid-run folder yields no cards")
+
+        ReviewProgressFixture.writeFull(.finalCheck, to: folder)
+        read = ReviewProgressPoller.compute(["k": watch], sessions: sessions)["k"]
+        expect(read?.current?.id == "final" && read?.suffix(elapsed: 120) == "2m · Final check", "progress: final check, suffix names it")
+        ReviewProgressFixture.writeFull(.finished, to: folder)
+        read = ReviewProgressPoller.compute(["k": watch], sessions: sessions)["k"]
+        expect(read?.checked == true && read?.current?.id == "result", "progress: cards exist only once comments.json is written")
+
+        // A follow-up and a replies-only run have their own steps.
+        let other = root.appendingPathComponent("follow", isDirectory: true)
+        ReviewProgressFixture.writeFollowUp(started: true, to: other)
+        let follow = ReviewProgress.read(folder: other, kind: .followUp)
+        expect(follow.steps.count == 3 && follow.current?.id == "earlier", "progress: follow-up steps")
+        expect(ReviewProgress.read(folder: other, kind: .replies).steps.count == 2, "progress: replies steps")
+
+        // The badge and the chip carry a short suffix while reviewing, and nothing while queued.
+        var record = ReviewRecord(key: "acme/web-app#31", head: "h", phase: .reviewing, auto: true, queuedAt: 1)
+        record.startedAt = Date().timeIntervalSince1970 - 252
+        let half = ReviewProgress.read(folder: { ReviewProgressFixture.writeFull(.halfDone, to: other); return other }(), kind: .full)
+        expect(PRReviewChip.describe(record, outdated: false, progress: half).0 == "Reviewing · 4m · 4/9", "progress: chip text (\(PRReviewChip.describe(record, outdated: false, progress: half).0))")
+        expect(PRReviewBadge.short(record, outdated: false, progress: half).text == "Reviewing · 4m · 4/9", "progress: sidebar text")
+        expect(PRReviewChip.describe(record, outdated: false).0 == "Reviewing…", "progress: no folder facts yet, the plain text")
+        record.phase = .queued
+        expect(PRReviewChip.describe(record, outdated: false, progress: half).0 == "Review queued", "progress: queued stays as it was")
+
+        // The poller runs only while something is watched, and counts its watchers.
+        let poller = ReviewProgressPoller(sessions: sessions) { _ in }
+        expect(!poller.isRunning, "poller: idle at first")
+        poller.retain(key: "k", watch); poller.retain(key: "k", watch)
+        expect(poller.isRunning && poller.watchedKeys == ["k"], "poller: runs while watched")
+        poller.release(key: "k")
+        expect(poller.isRunning, "poller: one watcher left")
+        poller.release(key: "k")
+        expect(!poller.isRunning && poller.watchedKeys.isEmpty, "poller: stops with the last watcher")
+        poller.release(key: "k")
+        expect(!poller.isRunning, "poller: an extra release changes nothing")
+    }
+}

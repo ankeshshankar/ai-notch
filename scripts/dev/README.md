@@ -83,7 +83,7 @@
 - `AINotch --review-selfcheck` — the review window's posting and cards on a dry run (nothing is
   sent): inline and general comment requests, the card defaults, a duplicate on the same line,
   blocked wording, one post per card, the approve request; exits 1 on any failure.
-  `AINotch --review-window-preview [--select N] [--overlay post|approve|changes|thread|resolveall|lessons] [--replies] [--gates] [--lessons] [--resolve-all (with --followup)] [--snapshot out.png] [--size WxH]`
+  `AINotch --review-window-preview [--select N] [--overlay post|approve|changes|thread|resolveall|lessons] [--replies] [--gates] [--progress gather|reviewers|final|followup|failed] [--lessons] [--resolve-all (with --followup)] [--snapshot out.png] [--size WxH]`
   opens the review window on made-up pull requests; it refuses to run unless
   `CLAUDE_NOTCH_REVIEWS` and `CLAUDE_NOTCH_REVIEW_LEDGER` point at a scratch folder and
   `AI_NOTCH_REVIEW_DRYRUN=1`. `--gates` also gives PR 214 a pre-existing card and a Follow-ups list. `AINotch --review-full-live <workspace> <repo> <pr> <head> <folder> [--replay-blind]` runs one real full review

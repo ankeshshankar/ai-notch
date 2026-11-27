@@ -189,14 +189,16 @@ final class PRReviewStore: ObservableObject {
         await autoReadReplies(ref, head: head, file: file)
     }
 
-    private var autoReading: Set<String> = []
+    /// Pull requests whose replies are being read by a headless pass, and since when (the window shows its steps).
+    @Published private(set) var autoReading: [String: Double] = [:]
 
     /// The replies nobody has read yet are read once per newest reply (Haiku, a disagreement again on Opus) and the
     /// classification saved in `replies.json`. Never in a dev run; a failed read is not repeated for the same reply.
     func autoReadReplies(_ ref: PullRequestRef, head: String, file: RepliesFile) async {
         let todo = file.unreadToTry()
-        guard !todo.isEmpty, !Self.isDevRun, let repo = Self.repoPath(ref), autoReading.insert(ref.key).inserted else { return }
-        defer { autoReading.remove(ref.key) }
+        guard !todo.isEmpty, !Self.isDevRun, let repo = Self.repoPath(ref), autoReading[ref.key] == nil else { return }
+        autoReading[ref.key] = Date().timeIntervalSince1970
+        defer { autoReading[ref.key] = nil }
         guard let token = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else { return }
         let folder = Self.folder(ref, head: head)
         let runner = PRReviewRunner()

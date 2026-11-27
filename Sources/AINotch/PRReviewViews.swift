@@ -9,10 +9,11 @@ import SwiftUI
 struct PRReviewChip: View {
     var pr: PullRequest
     @ObservedObject var store: PRReviewStore
+    @ObservedObject private var progress = ReviewProgressCenter.shared
 
     var body: some View {
         if let found = store.record(for: pr) {
-            let (text, color, help) = Self.describe(found.record, outdated: found.outdated)
+            let (text, color, help) = Self.describe(found.record, outdated: found.outdated, progress: found.record.phase == .reviewing ? progress.progress[found.record.key] : nil)
             HStack(spacing: 3) {
                 Image(systemName: Self.symbol(found.record)).font(Typo.micro(.bold)).decorative()
                 Text(text).font(Typo.label(.medium)).lineLimit(1).truncationMode(.tail)
@@ -34,13 +35,16 @@ struct PRReviewChip: View {
         }
     }
 
-    static func describe(_ record: ReviewRecord, outdated: Bool) -> (String, Color, String) {
+    static func describe(_ record: ReviewRecord, outdated: Bool, progress: ReviewProgress? = nil) -> (String, Color, String) {
         let older = outdated ? " · older commit" : ""
         switch record.phase {
         case .queued: return ("Review queued", Palette.ink3, "Waits for the review in progress; one runs at a time.")
         case .reviewing:
-            return record.baseHead != nil ? ("Follow-up…", Palette.claude, "Claude is checking the new commits against the earlier findings (headless, read only).")
-                                          : ("Reviewing…", Palette.claude, "Claude is reviewing this pull request (headless, read only).")
+            let now = Date().timeIntervalSince1970
+            let suffix = progress.map { $0.suffix(elapsed: max(0, now - (record.startedAt ?? record.queuedAt))) } ?? ""
+            let tail = suffix.isEmpty ? "…" : " · " + suffix
+            return record.baseHead != nil ? ("Follow-up" + tail, Palette.claude, "Claude is checking the new commits against the earlier findings (headless, read only).")
+                                          : ("Reviewing" + tail, Palette.claude, "Claude is reviewing this pull request (headless, read only).")
         case .cancelled: return ("Review cancelled", Palette.ink3, "Cancelled. Use Review now to start it again.")
         case .failed: return ("Review failed", Palette.failed, record.error ?? "The review did not finish.")
         case .done:

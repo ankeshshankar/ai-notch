@@ -393,12 +393,14 @@ struct PRReviewReviewerChip: View {
 
 /// The review's state in a few words, for the sidebar.
 enum PRReviewBadge {
-    static func short(_ record: ReviewRecord?, outdated: Bool) -> (text: String, color: Color, symbol: String) {
+    static func short(_ record: ReviewRecord?, outdated: Bool, progress: ReviewProgress? = nil) -> (text: String, color: Color, symbol: String) {
         guard let record else { return ("Not reviewed", Palette.ink3, "circle.dashed") }
         let older = outdated ? " · older" : ""
         switch record.phase {
         case .queued: return ("Queued", Palette.ink3, "clock")
-        case .reviewing: return ("Reviewing", Palette.claude, "ellipsis")
+        case .reviewing:
+            let suffix = progress.map { $0.suffix(elapsed: max(0, Date().timeIntervalSince1970 - (record.startedAt ?? record.queuedAt))) } ?? ""
+            return ("Reviewing" + (suffix.isEmpty ? "" : " · " + suffix), Palette.claude, "ellipsis")
         case .cancelled: return ("Cancelled", Palette.ink3, "slash.circle")
         case .failed: return ("Failed", Palette.failed, "exclamationmark.triangle")
         case .done:
@@ -428,10 +430,12 @@ private struct PRReviewSidebarRow: View {
     var pr: PullRequest
     @ObservedObject var store: PRReviewStore
     var selected: Bool
+    @ObservedObject private var progress = ReviewProgressCenter.shared
 
     var body: some View {
         let found = store.record(for: pr)
-        let badge = PRReviewBadge.short(found?.record, outdated: found?.outdated ?? false)
+        let live = found?.record.phase == .reviewing ? progress.progress[pr.ref.key] : nil
+        let badge = PRReviewBadge.short(found?.record, outdated: found?.outdated ?? false, progress: live)
         let pipeline = PRReviewBadge.pipeline(pr)
         let reviewers = ReviewerSummary(pr.reviewerRows)
         VStack(alignment: .leading, spacing: 3) {
@@ -465,6 +469,7 @@ private struct PRReviewSidebarRow: View {
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Palette.card : Color.clear))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(selected ? Palette.bitbucket.opacity(0.6) : Color.clear, lineWidth: 1))
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .reviewProgress(record: found?.record, folder: found.flatMap { store.folder(for: $0.record) })
     }
 }
 
@@ -501,8 +506,10 @@ struct PRReviewDetail: View {
     @ObservedObject var store: PRReviewStore
     var pr: PullRequest
     var session: PRChatSession?
+    @ObservedObject private var progress = ReviewProgressCenter.shared
 
     var body: some View {
+        let found = store.record(for: pr)
         VStack(spacing: 0) {
             header
             Divider()
@@ -512,6 +519,7 @@ struct PRReviewDetail: View {
                 status
             }
         }
+        .reviewProgress(record: found?.record, folder: found.flatMap { store.folder(for: $0.record) }, replies: store.autoReading[pr.ref.key])
         .onAppear {
             store.refreshWriteToken()
             model.loadBehind(pr)
@@ -523,7 +531,13 @@ struct PRReviewDetail: View {
     private var status: some View {
         let found = store.record(for: pr)
         let record = found?.record
-        return VStack(spacing: 8) {
+        if record?.phase == .reviewing, let live = progress.progress[pr.ref.key] {
+            return AnyView(ScrollView {
+                ReviewProgressPanel(progress: live, since: record?.startedAt ?? record?.queuedAt)
+                    .padding(14)
+            })
+        }
+        return AnyView(VStack(spacing: 8) {
             Spacer(minLength: 0)
             switch record?.phase {
             case nil:
@@ -538,13 +552,16 @@ struct PRReviewDetail: View {
             case .failed?:
                 Text("The review failed").font(Typo.title(.medium)).foregroundStyle(Palette.failed)
                 Text(record?.error ?? "It did not finish.").font(Typo.label()).foregroundStyle(Palette.ink3).multilineTextAlignment(.center)
+                if let reached = progress.progress[pr.ref.key], reached.current != nil, record?.startedAt != nil {
+                    ReviewProgressPanel(progress: reached, since: nil, stopped: true).padding(.top, 6)
+                }
             default:
                 Text("The review was cancelled").font(Typo.title(.medium)).foregroundStyle(Palette.ink2)
             }
             Spacer(minLength: 0)
         }
         .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity))
     }
 
     private var header: some View {
@@ -590,6 +607,9 @@ struct PRReviewDetail: View {
                     .font(Typo.label()).foregroundStyle(Palette.waiting).fixedSize(horizontal: false, vertical: true)
             }
             actions(id: id, found: found, active: active, own: own)
+            if session != nil, let live = progress.progress[pr.ref.key], record?.phase == .reviewing || (store.autoReading[pr.ref.key] != nil && !active) {
+                ReviewProgressPanel(progress: live, since: record?.phase == .reviewing ? (record?.startedAt ?? record?.queuedAt) : store.autoReading[pr.ref.key])
+            }
             if let line = statusLine(found: found) {
                 Text(line.text).font(Typo.label(.medium)).foregroundStyle(line.color).fixedSize(horizontal: false, vertical: true)
                     .onTapGesture { store.clearNotice(id) }
