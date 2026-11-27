@@ -29,7 +29,7 @@ extension PRReviewDev {
             return out.isError ? 1 : 0
         case .failed(let m): print("failed: \(m)"); return 1
         case .cancelled: print("cancelled"); return 1
-        case .timedOut: print("timed out"); return 1
+        case .timedOut(let stopped): print("timed out: \(stopped.text); elapsed \(String(format: "%.1f", stopped.elapsed / 60)) min; out.json records it"); return 1
         }
     }
 
@@ -62,11 +62,21 @@ extension PRReviewDev {
                 defaults[name] = ReviewAgents.parts(of: body).meta["model"] ?? "inherit"
             }
         }
+        return countAgents(in: text, defaults: defaults)
+    }
+
+    /// The Agent calls of a transcript, by type and model, each call once (see the note on the double count).
+    static func countAgents(in text: String, defaults: [String: String]) -> String {
         var counts: [String: Int] = [:]
+        // The transcript also holds `api-request-blob` lines that replay earlier requests, tool_use blocks included:
+        // only the assistant's own lines count, and each call once by its id (that doubled the count: 22 for 12).
+        var seen = Set<String>()
         for line in text.split(separator: "\n") where line.contains("\"tool_use\"") {
             guard let data = line.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["type"] as? String == "assistant",
                   let message = object["message"] as? [String: Any], let content = message["content"] as? [[String: Any]] else { continue }
             for item in content where item["type"] as? String == "tool_use" && ["Agent", "Task"].contains(item["name"] as? String ?? "") {
+                if let id = item["id"] as? String, !seen.insert(id).inserted { continue }
                 let input = item["input"] as? [String: Any] ?? [:]
                 let type = input["subagent_type"] as? String ?? "general"
                 counts["\(type):\(input["model"] as? String ?? defaults[type] ?? "inherit")", default: 0] += 1

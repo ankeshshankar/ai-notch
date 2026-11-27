@@ -47,7 +47,7 @@ final class PRReviewRunner: @unchecked Sendable {
         case finished(ReviewOutput)
         case failed(String)
         case cancelled
-        case timedOut
+        case timedOut(StoppedRun)
     }
 
     /// A chunked review of a large pull request (100+ files) runs past half an hour.
@@ -156,6 +156,7 @@ final class PRReviewRunner: @unchecked Sendable {
         lock.unlock()
 
         let limit = Self.timeoutOverride ?? Self.timeout
+        let startedAt = Date()
         let watchdog = DispatchWorkItem { [weak self] in
             guard let self, process.isRunning else { return }
             self.lock.lock(); self.timedOut = true; self.lock.unlock()
@@ -170,7 +171,11 @@ final class PRReviewRunner: @unchecked Sendable {
         let wasCancelled = cancelled, wasTimedOut = timedOut
         lock.unlock()
         if wasCancelled { return .cancelled }
-        if wasTimedOut { return .timedOut }
+        if wasTimedOut {
+            let stopped = StoppedRun(files: StoppedRun.present(in: job.dir), elapsed: Date().timeIntervalSince(startedAt), limit: limit)
+            stopped.record(in: out)
+            return .timedOut(stopped)
+        }
         let data = (try? Data(contentsOf: out)) ?? Data()
         guard let output = ReviewOutput.parse(data) else {
             return .failed(process.terminationStatus == 0 ? "claude's answer could not be read" : "claude stopped (exit \(process.terminationStatus))")

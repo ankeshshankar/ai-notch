@@ -134,3 +134,50 @@ public enum CardRebuild {
         return result
     }
 }
+
+/// A run the time limit stopped. `claude -p --output-format json` prints its one JSON result when it exits, so a run
+/// that is stopped leaves `out.json` empty even when the skill already wrote its files; this keeps that state in the
+/// folder in words the reader can trust: which output files were there, that the limit stopped it, and the wall time.
+public struct StoppedRun: Equatable, Sendable {
+    /// The files the final check writes, in the order they are written.
+    public static let outputFiles = ["review.md", "gate.json", "comments.json", "drops.json", "ledger.json"]
+
+    public var files: [String]
+    public var elapsed: Double
+    public var limit: Double
+
+    public init(files: [String], elapsed: Double, limit: Double) {
+        self.files = files
+        self.elapsed = elapsed
+        self.limit = limit
+    }
+
+    /// The output files that exist (non-empty) in the folder now.
+    public static func present(in folder: URL) -> [String] {
+        outputFiles.filter { name in
+            let size = (try? FileManager.default.attributesOfItem(atPath: folder.appendingPathComponent(name).path)[.size] as? Int) ?? 0
+            return size > 0
+        }
+    }
+
+    public var minutes: Int { Int((limit / 60).rounded()) }
+
+    /// "stopped after 90 minutes (review.md, gate.json were written)".
+    public var text: String {
+        "stopped after \(minutes) minutes" + (files.isEmpty ? "" : " (\(files.joined(separator: ", ")) \(files.count == 1 ? "was" : "were") written first)")
+    }
+
+    /// What goes in `out.json` in place of nothing.
+    public var json: Data {
+        let object: [String: Any] = ["type": "result", "subtype": "stopped_by_limit", "is_error": true,
+                                     "filesPresent": files, "elapsed_seconds": Int(elapsed.rounded()), "limit_seconds": Int(limit.rounded()),
+                                     "note": "AI Notch stopped this run at its time limit; claude prints its result only when it exits, so this stands in for it."]
+        return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+    }
+
+    /// Writes `json` into `out` when the run left it empty; a result claude did print is never replaced.
+    public func record(in out: URL) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
+        if size == 0 { try? json.write(to: out, options: .atomic) }
+    }
+}
