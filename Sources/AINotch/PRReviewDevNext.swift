@@ -130,7 +130,10 @@ extension PRReviewDev {
         var wrong: [String] = []
         for code in GateCode.all {
             let want: MergeGate = GateCode.notReady.contains(code) ? .notReady : GateCode.needsLook.contains(code) ? .needsLook : .ready
-            let file = GateFile.parse(Data("{\"gate\":\"READY\",\"reasons\":[{\"code\":\"\(code)\"}],\"ci\":{\"state\":\"green\"}}".utf8))
+            // A code that needs a fact is given it (reason hygiene): a failed check, a risky item, a pre-existing finding.
+            let facts = code == "pack-check-failed" ? #","packChecks":[{"id":"x","state":"fail","text":"t"}]"# : code == "cannot-verify-risky" ? #","cannotVerify":[{"path":"a","what":"w","risky":true}]"# : ""
+            let refs = code == "pre-existing" ? #","refs":["F2"]"# : ""
+            let file = GateFile.parse(Data("{\"gate\":\"READY\",\"reasons\":[{\"code\":\"\(code)\"\(refs)}],\"ci\":{\"state\":\"green\"}\(facts)}".utf8))
             if file?.gate != want { wrong.append(code) }
         }
         expect(wrong.isEmpty, "gate: every reason code follows the rule \(wrong)")
@@ -303,5 +306,76 @@ extension PRReviewDev {
         let saved = LessonsFile.decode(try? Data(contentsOf: LessonsStore.proposedURL))
         expect(saved.proposals.filter { $0.state == .approved }.count == 1 && saved.proposals.filter { $0.state == .dismissed }.count == 1, "lessons: states saved in lessons-proposed.json")
         expect(store.approve(noise.id) != nil, "lessons: an entry is added once")
+    }
+}
+
+extension PRReviewDev {
+    /// Pre-existing findings: the gate (a full run and a follow-up), the card, the report word, the follow-ups list,
+    /// the run the limit stopped and the agent count.
+    @MainActor
+    static func selfCheckPreExisting(scratch: URL, expect: (Bool, String) -> Void) async {
+        let ref = PullRequestRef(workspace: "acme", repo: "web-app", id: 36)
+        let head = "hhhhhhhhhhhh"
+        let folder = PRReviewStore.folder(ref, head: head)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let comments = #"[{"id":"c1","finding":"F1","severity":"pre-existing","path":"a.ts","line":3,"title":"Old join","body":"This was already here before this PR."},{"id":"c2","finding":"F2","severity":"nit","path":"b.ts","line":4,"body":"Rename."}]"#
+        try? Data(comments.utf8).write(to: folder.appendingPathComponent("comments.json"))
+        let gateJSON = #"{"gate":"READY","reasons":[],"ci":{"state":"green"},"coverage":{"files":2,"read":2,"unread":[]},"followUps":[{"path":"c.ts","line":9,"title":"No cap on page size"},{"path":"d.ts","line":2,"title":"Unescaped regex"}]}"#
+        try? Data(gateJSON.utf8).write(to: folder.appendingPathComponent("gate.json"))
+        let run = ReviewRecord(key: ref.key, head: head, phase: .reviewing, auto: false, queuedAt: 0)
+        let full = PRReviewStore.settle(run, ref: ref, outcome: output("PRE-EXISTING a.ts:3 — old join\nNIT b.ts:4 — x\nGATE: NEEDS_LOOK\nVERDICT: APPROVE"))
+        expect(full.findings == ReviewFindings(nits: 1, preExisting: 1), "pre-existing: the report word is its own bucket \(String(describing: full.findings))")
+        expect(full.mergeGate?.gate == .needsLook && full.mergeGate?.shownReasons.map(\.code) == ["pre-existing"], "pre-existing: a card gives NEEDS_LOOK, reason pre-existing")
+        expect(!ReviewGate.check(.approve, record: full, currentHead: head, pipeline: .green).isAllowed, "pre-existing: Approve stays off on Needs your look")
+        expect(full.mergeGate?.followUps.count == 2 && full.mergeGate?.followUpsTitle == "Follow-ups (2)", "pre-existing: follow-ups parsed from gate.json")
+        // The cards in the window: its own label, on by default, a nit still off.
+        let session = PRChatSession(ref: ref, head: head, folder: folder)
+        expect(session.cards.first?.severity == .preExisting && session.cards.first?.include == true && session.cards.last?.include == false, "pre-existing: card on by default, nit off")
+        // Without a card or finding the file's own claim is dropped; follow-ups alone leave READY.
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent("comments.json"))
+        try? Data(#"{"gate":"READY","reasons":[{"code":"pre-existing"},{"code":"pack-check-failed"},{"code":"cannot-verify-risky"}],"ci":{"state":"green"},"followUps":[{"path":"c.ts","title":"x"}]}"#.utf8).write(to: folder.appendingPathComponent("gate.json"))
+        let bare = PRReviewStore.settle(run, ref: ref, outcome: output("F1 x\nGATE: READY\nVERDICT: APPROVE"))
+        expect(bare.mergeGate?.gate == .ready && bare.mergeGate?.shownReasons.isEmpty == true && bare.mergeGate?.followUps.count == 1, "pre-existing: reasons without their fact are dropped, follow-ups never change the gate")
+
+        // A follow-up: the still-open pre-existing card is `pre-existing`, never should-fix; fixed, it is gone.
+        let base = "iiiiiiiiiiii", next = "jjjjjjjjjjjj"
+        let baseFolder = PRReviewStore.folder(ref, head: base), nextFolder = PRReviewStore.folder(ref, head: next)
+        for dir in [baseFolder, nextFolder] { try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+        try? Data(#"[{"id":"c1","finding":"F1","severity":"pre-existing","path":"a.ts","line":3,"body":"Already here."}]"#.utf8).write(to: baseFolder.appendingPathComponent("comments.json"))
+        var previous = ReviewRecord(key: ref.key, head: base, phase: .done, auto: false, queuedAt: 1)
+        previous.verdict = .approve
+        previous.findings = ReviewFindings(preExisting: 3)
+        previous.mergeGate = GateFile.parse(Data(#"{"gate":"NEEDS_LOOK","reasons":[{"code":"pre-existing","refs":["F1"]}],"ci":{"state":"green"}}"#.utf8))
+        func settle(_ followup: String) -> ReviewRecord {
+            try? followup.write(to: nextFolder.appendingPathComponent("followup.json"), atomically: true, encoding: .utf8)
+            try? FileManager.default.removeItem(at: nextFolder.appendingPathComponent("chat.json"))
+            var r = ReviewRecord(key: ref.key, head: next, phase: .reviewing, auto: false, queuedAt: 2)
+            r.baseHead = base
+            let out = output("Still open.\nVERDICT: APPROVE")
+            return PRReviewStore.settleFollowUp(PRReviewStore.settle(r, ref: ref, outcome: out), existing: r, ref: ref, outcome: out, previous: previous)
+        }
+        let open = settle(#"{"verdict":"REQUEST CHANGES","gate":"NOT_READY","reasons":[{"code":"open-should-fix","text":"1 should-fix finding open","refs":["c1"]}],"comments":[{"id":"c1","status":"still_open","reason":"a.ts:3"}],"new":[]}"#)
+        expect(open.mergeGate?.gate == .needsLook && open.mergeGate?.shownReasons.map(\.code) == ["pre-existing"], "pre-existing: a still-open card is NEEDS_LOOK, reason pre-existing: \(open.mergeGate?.shownReasons.map(\.code) ?? [])")
+        expect(open.findings == ReviewFindings(preExisting: 1), "pre-existing: open findings are their own bucket \(String(describing: open.findings))")
+        let fixed = settle(#"{"verdict":"APPROVE","gate":"READY","comments":[{"id":"c1","status":"fixed","confirmed":true,"reason":"a.ts:3"}],"new":[]}"#)
+        expect(fixed.mergeGate?.gate == .ready && fixed.verdict == .approve, "pre-existing: the card fixed and confirmed, READY")
+        expect(FollowUp.prompt(scratch: "/s", previousHead: base, newHead: next).contains("never counts as open blocking or should-fix"), "pre-existing: the follow-up prompt says so")
+
+        // The run the limit stopped keeps its state in out.json.
+        let stop = scratch.appendingPathComponent("stopped", isDirectory: true)
+        try? FileManager.default.removeItem(at: stop)
+        try? FileManager.default.createDirectory(at: stop, withIntermediateDirectories: true)
+        try? Data("# r".utf8).write(to: stop.appendingPathComponent("review.md"))
+        try? Data("{}".utf8).write(to: stop.appendingPathComponent("gate.json"))
+        FileManager.default.createFile(atPath: stop.appendingPathComponent("out.json").path, contents: nil)
+        StoppedRun(files: StoppedRun.present(in: stop), elapsed: 5400, limit: 5400).record(in: stop.appendingPathComponent("out.json"))
+        let recorded = (try? Data(contentsOf: stop.appendingPathComponent("out.json"))).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        expect(recorded?["subtype"] as? String == "stopped_by_limit" && recorded?["filesPresent"] as? [String] == ["review.md", "gate.json"], "stopped: out.json records files present and the limit")
+
+        // The agent count: replayed request lines and repeats are not calls.
+        let call = #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"subagent_type":"lens","model":"opus"}}]}}"#
+        let blob = #"{"type":"api-request-blob","message":{"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"subagent_type":"lens","model":"opus"}}]}}"#
+        let two = #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Agent","input":{"subagent_type":"verifier"}}]}}"#
+        expect(countAgents(in: [call, blob, two, blob, call].joined(separator: "\n"), defaults: ["verifier": "fable"]) == "lens:opus x1, verifier:fable x1", "live: agent calls counted once by id, request blobs skipped")
     }
 }

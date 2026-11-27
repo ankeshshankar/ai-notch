@@ -147,6 +147,7 @@ enum PRReviewDev {
             await selfCheckModels(scratch: scratch, expect: expect)
             await selfCheckRuns(expect: expect)
             await selfCheckGate(expect: expect)
+            await selfCheckPreExisting(scratch: scratch, expect: expect)
             await selfCheckFollowGate(scratch: scratch, expect: expect)
             await selfCheckLessons(scratch: scratch, expect: expect)
             done = true
@@ -685,7 +686,7 @@ enum PRReviewDev {
         let web = { (id: Int) in PullRequestRef(workspace: "acme", repo: "web-app", id: id) }
         let fixtures: [Fixture] = [
             Fixture(ref: web(214), title: "Let users remove their profile photo", author: "Jane Doe", source: "feature/remove-photo", head: heads[0], build: .succeeded,
-                    record: record(web(214), head: heads[0], verdict: .requestChanges, findings: ReviewFindings(blocking: 1, shouldFix: 1, nits: 1))),
+                    record: record(web(214), head: heads[0], verdict: .requestChanges, findings: ReviewFindings(blocking: 1, shouldFix: 1, nits: 1, preExisting: args.contains("--gates") ? 1 : 0))),
             Fixture(ref: web(207), title: "Fix the off-by-one in the invoice list pagination", author: "John Roe", source: "fix/invoice-pagination", head: heads[1], build: .succeeded,
                     record: record(web(207), head: heads[1], verdict: .approve, findings: ReviewFindings(nits: 1))),
             Fixture(ref: web(199), title: "Move the settings screen to the new layout", author: "Jane Doe", source: "feature/settings-layout", head: heads[3], build: .running,
@@ -770,12 +771,12 @@ enum PRReviewDev {
         }
     }
 
-    /// `--gates`: 207 READY, 214 NOT_READY, 199 NEEDS_LOOK, each with the facts behind it.
+    /// `--gates`: 207 READY, 214 NOT_READY (also a pre-existing card and a follow-ups list), 199 NEEDS_LOOK, each with the facts behind it.
     private static func gateFixture(_ id: Int) -> GateFile? {
         let json: String
         switch id {
         case 207: json = #"{"gate":"READY","pack":"expo","reasons":[],"ci":{"state":"green","head":"b2c3d4e5f6a7","covers":"typecheck and unit tests"},"coverage":{"files":12,"read":12,"unread":[]},"othersOpen":[],"cannotVerify":[{"path":"README.md","what":"link targets","risky":false}],"nitsNotShown":0,"risk":[],"deepCheck":false}"#
-        case 214: json = #"{"gate":"NOT_READY","pack":"expo","reasons":[{"code":"open-blocking","text":"1 blocking finding open","refs":["F1"]},{"code":"open-should-fix","text":"1 should-fix finding open","refs":["F2"]},{"code":"others-open","text":"A major comment from John Roe is unresolved"}],"ci":{"state":"green","head":"a1b2c3d4e5f6","covers":"unit tests; no device run"},"coverage":{"files":31,"read":31,"unread":[]},"othersOpen":[{"id":11,"author":"John Roe","asks":true,"severity":"major"}],"cannotVerify":[],"nitsNotShown":4,"risk":["pii"],"deepCheck":true}"#
+        case 214: json = #"{"gate":"NOT_READY","pack":"expo","reasons":[{"code":"open-blocking","text":"1 blocking finding open","refs":["F1"]},{"code":"open-should-fix","text":"1 should-fix finding open","refs":["F2"]},{"code":"others-open","text":"A major comment from John Roe is unresolved"},{"code":"pre-existing","text":"1 problem that was there before this PR","refs":["F4"]}],"ci":{"state":"green","head":"a1b2c3d4e5f6","covers":"unit tests; no device run"},"coverage":{"files":31,"read":31,"unread":[]},"othersOpen":[{"id":11,"author":"John Roe","asks":true,"severity":"major"}],"cannotVerify":[],"nitsNotShown":4,"risk":["pii"],"deepCheck":true,"followUps":[{"path":"src/profile/avatar.ts","line":127,"title":"Unescaped regex built from the file name"},{"path":"src/profile/list.ts","line":55,"title":"Page size is read from the query without a cap"}]}"#
         case 199: json = #"{"gate":"NEEDS_LOOK","pack":"generic","reasons":[{"code":"unread-files","text":"2 files were not read"},{"code":"ci-running","text":"The pipeline is still running"},{"code":"generic-pack","text":"No checklist for this repo"}],"ci":{"state":"running","head":"d4e5f6a7b8c9","covers":"build only"},"coverage":{"files":40,"read":38,"unread":["src/layout/legacy.ts","src/layout/grid.generated.ts"]},"othersOpen":[],"cannotVerify":[{"path":"src/layout/native.ts","what":"native build","risky":true}],"nitsNotShown":0,"risk":["native"],"deepCheck":false}"#
         default: return nil
         }
@@ -920,6 +921,9 @@ enum PRReviewDev {
             write("comments.json", #"[{"id":"c1","severity":"nit","path":"src/invoices/list.ts","line":31,"title":"Inline helper","body":"Small thing: `pageCount` has one caller, so it could be inlined."}]"#)
             return
         }
+        // `--gates` adds a defect that was already in the base on a line the PR touched: a card of its own kind.
+        let pre = CommandLine.arguments.contains("--gates") && id == 214
+        let preCard = #",{"id":"c4","finding":"F4","severity":"pre-existing","path":"src/profile/photo.ts","line":20,"title":"Old path join","body":"This join was already like this before this PR: a path with .. escapes the photo folder. Worth fixing here while the line is open."}"#
         write("report.md", """
         **Pull request #\(id): let users remove their profile photo, CI passed**
 
@@ -937,7 +941,7 @@ enum PRReviewDev {
 
         **NIT**
         - `src/profile/photo.test.ts:12` — the test names repeat the file name.
-
+        \(pre ? "\n**PRE-EXISTING**\n- `src/profile/photo.ts:20` — **The path join was already unsafe.** It is the same in the base; this PR only moved the line.\n" : "")
         Tests were not run: the review worktree has no dependencies installed.
 
         VERDICT: REQUEST CHANGES
@@ -945,7 +949,7 @@ enum PRReviewDev {
         write("comments.json", """
         [{"id":"c1","severity":"blocking","path":"src/profile/photo.service.ts","line":42,"title":"Delete by id","body":"This deletes whatever file id the client sends, with no owner check, so one user can delete another user's photo. Please only delete files under the user's own folder."},
          {"id":"c2","severity":"should-fix","path":"src/profile/photo.service.ts","line":77,"title":"Clearing the photo","body":"Clearing the field makes the profile and directory screens return a 500, since they read it without a null check. Can we set the default avatar instead?"},
-         {"id":"c3","severity":"nit","path":"src/profile/photo.test.ts","line":12,"title":"Test names","body":"Nit: the test names repeat the file name, so they could be shorter."}]
+         {"id":"c3","severity":"nit","path":"src/profile/photo.test.ts","line":12,"title":"Test names","body":"Nit: the test names repeat the file name, so they could be shorter."}\(pre ? preCard : "")]
         """)
         let chat = """
         {"version":1,"sessionID":"\(record.sessionID ?? "")","seeded":true,
@@ -953,7 +957,7 @@ enum PRReviewDev {
           {"id":"c1","severity":"blocking","path":"src/profile/photo.service.ts","line":42,"title":"Delete by id","body":"This deletes whatever file id the client sends, with no owner check, so one user can delete another user's photo. Please only delete files under the user's own folder.","include":true},
           {"id":"c2","severity":"should-fix","path":"src/profile/photo.service.ts","line":77,"title":"Clearing the photo","body":"Setting the default avatar instead of clearing the field would keep the profile and directory screens working, since they read it without a null check.","include":true,"badge":"revised"},
           {"id":"c3","severity":"nit","path":"src/profile/photo.test.ts","line":12,"title":"Test names","body":"Nit: the test names repeat the file name, so they could be shorter.","include":false},
-          {"id":"n-4f2a1c","severity":"should-fix","path":"src/profile/photo.ts","line":42,"title":"Thumbnail cache","body":"Does removing the photo also need to clear the cached thumbnail? It looks like it is only dropped on the next upload.","include":true,"badge":"new"}
+          {"id":"n-4f2a1c","severity":"should-fix","path":"src/profile/photo.ts","line":42,"title":"Thumbnail cache","body":"Does removing the photo also need to clear the cached thumbnail? It looks like it is only dropped on the next upload.","include":true,"badge":"new"}\(pre ? preCard.replacingOccurrences(of: #""body":"This join"#, with: #""include":true,"body":"This join"#) : "")
          ],
          "messages":[
           {"id":"m1","role":"user","text":"Make the second one softer, and draft a comment about the thumbnail cache.","at":1,"newCards":[],"revisedCards":[],"isError":false},

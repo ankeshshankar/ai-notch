@@ -649,6 +649,18 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
     own approval prompt is off for it (`AI_NOTCH_NO_APPROVALS=1`).
   - *Token.* The existing read token reaches the child as `BB_API_TOKEN` in its environment only;
     it is not in the arguments, a file or a log.
+  - *Merge gate.* A review ends in **Ready to merge**, **Not ready** or **Needs your look** (`gate.json`); the app
+    recomputes it from the facts in the file and takes the stricter one, and Approve is on only for Ready.
+    Not ready: a blocking or should-fix finding, a red pipeline, missing tests, a failed repo check or a major
+    comment from someone else still open. Needs your look: unread files, a pipeline that is running or missing, a
+    risky change that could not be verified, a repo with no checklist, a minor comment from someone else still open,
+    or **problems that were there before this PR** (a defect already in the base on a line the PR touched, word
+    `PRE-EXISTING`, reason `pre-existing`). Those still get a comment card, with its own label and switched on like
+    blocking and should-fix, but they are counted apart and never make the gate worse than Needs your look. A reason
+    is shown only when its fact is there (a failed repo check, a risky item, a pre-existing card or finding). Real
+    problems on lines the PR did not change are not findings: the gate panel lists them under a collapsed
+    **Follow-ups (n)**, for information only; they never change the gate. A follow-up run treats a still-open
+    pre-existing card the same way (reason `pre-existing`, never open should-fix).
   - *Approve / Request changes.* Only from the row bar, after **Approve** and then **Confirm
     approve**, using a separate write token (Keychain `ai-notch.bitbucket.write`, scope
     `write:pullrequest` / `pullrequest:write`; Setup shows the steps). Approve shows only for an APPROVE
