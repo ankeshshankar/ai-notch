@@ -371,6 +371,11 @@ final class PRReviewStore: ObservableObject {
         guard let existing = ledger.record(ref.key, head: head) else { return }
         var record = Self.settle(existing, ref: ref, outcome: outcome)
         if existing.baseHead != nil { record = Self.settleFollowUp(record, existing: existing, ref: ref, outcome: outcome) }
+        if case .finished = outcome {
+            // The run is kept as runs/<n>/; a full run's cards are rebuilt from it without losing what I did to the old ones.
+            if existing.baseHead == nil, record.phase == .done { Self.rebuildCards(ref, head: existing.head) }
+            ReviewRuns.finish(Self.folder(ref, head: existing.head))
+        }
         if record.phase == .done, record.notified != true, record.own != true {
             record.notified = true
             ledger.set(record)
@@ -419,6 +424,18 @@ final class PRReviewStore: ObservableObject {
         // The note, the record, the window and the gate all read this one verdict.
         record.verdict = note.verdict
         return record
+    }
+
+    /// A new full run on a folder that already has cards: `chat.json` gets the cards of the new `comments.json`
+    /// (matched by finding id, else path and line); a folder with no `chat.json` is seeded when the window opens it.
+    nonisolated static func rebuildCards(_ ref: PullRequestRef, head: String) {
+        let folder = Self.folder(ref, head: head)
+        guard let chat = try? Data(contentsOf: folder.appendingPathComponent("chat.json")), var log = try? JSONDecoder().decode(ChatLog.self, from: chat), log.seeded,
+              let comments = try? Data(contentsOf: folder.appendingPathComponent("comments.json")) else { return }
+        log.rebuild(from: CommentParse.file(comments), report: try? String(contentsOf: folder.appendingPathComponent("review.md"), encoding: .utf8))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        if let data = try? encoder.encode(log) { try? data.write(to: folder.appendingPathComponent("chat.json"), options: .atomic) }
     }
 
     /// Where a follow-up reads the cards from: the review it follows, or (a second pass on a head that already has a

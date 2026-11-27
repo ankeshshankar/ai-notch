@@ -103,6 +103,8 @@ final class PRReviewRunner: @unchecked Sendable {
         let fm = FileManager.default
         try? fm.createDirectory(at: job.dir, withIntermediateDirectories: true)
         Self.installHelper()
+        // An earlier run of this folder is kept in runs/<n>/ and cleared from the top level before the new one writes.
+        if job.replyRead == nil { ReviewRuns.begin(job.dir) }
         let prefix = job.replyRead != nil ? "reply-" : ""
         let out = job.dir.appendingPathComponent(prefix + "out.json"), err = job.dir.appendingPathComponent(prefix + "err.log")
         fm.createFile(atPath: out.path, contents: nil)

@@ -46,4 +46,57 @@ extension PRReviewDev {
         expect((raw?["analyses"] as? [String: Any])?.count == 2, "replies.json keeps the classification under analyses")
         expect(ReplyFiles.load(folder).analyses[7]?.isCorrectDisagreement == true, "the saved read reloads")
     }
+
+    /// Runs kept, cards rebuilt, "not checked".
+    @MainActor
+    static func selfCheckRuns(expect: (Bool, String) -> Void) async {
+        let ref = PullRequestRef(workspace: "acme", repo: "web-app", id: 32)
+        let head = "rrrrrrrrrrrr"
+        let folder = PRReviewStore.folder(ref, head: head)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        func put(_ text: String, _ name: String) { try? text.write(to: folder.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        put(#"{"result":"VERDICT: REQUEST CHANGES","session_id":"s1"}"#, "out.json")
+        put("F1 blocking a.ts:3\nF2 should-fix b.ts:4\nGATE: NOT_READY\nVERDICT: REQUEST CHANGES", "review.md")
+        put(#"[{"id":"c1","finding":"F1","severity":"blocking","path":"a.ts","line":3,"body":"First wording."},{"id":"c2","finding":"F2","severity":"should-fix","path":"b.ts","line":4,"body":"Second."},{"id":"c3","finding":"F6","severity":"should-fix","path":"c.ts","line":1,"body":"Not in the report."}]"#, "comments.json")
+        ReviewRuns.finish(folder)
+        let first = PRChatSession(ref: ref, head: head, folder: folder)
+        expect(first.cards.map(\.id) == ["c1", "c2", "c3"], "runs: cards seeded from the first run")
+        expect(first.card("c3")?.unchecked == true && first.card("c3")?.include == false, "checked report: a card whose finding review.md lacks is not checked and off")
+        first.setBody("c2", "My own words for the second.")
+        first.setInclude("c1", false)
+        // A second run of the same head, with a different comments.json.
+        ReviewRuns.begin(folder)
+        expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("review.md").path), "runs: the top level is cleared for the new run")
+        put(#"{"result":"VERDICT: REQUEST CHANGES","session_id":"s2"}"#, "out.json")
+        put("F1 blocking a.ts:3\nF2 should-fix b.ts:4\nF3 nit d.ts:8\nGATE: NOT_READY\nVERDICT: REQUEST CHANGES", "review.md")
+        put(#"[{"id":"c1","finding":"F1","severity":"blocking","path":"a.ts","line":3,"body":"New wording."},{"id":"c2","finding":"F2","severity":"should-fix","path":"b.ts","line":4,"body":"New second."},{"id":"c3","finding":"F3","severity":"nit","path":"d.ts","line":8,"body":"A nit."}]"#, "comments.json")
+        ReviewRuns.finish(folder)
+        PRReviewStore.rebuildCards(ref, head: head)
+        expect(ReviewRuns.numbers(folder) == [1, 2], "runs: both runs are kept: \(ReviewRuns.numbers(folder))")
+        let second = PRChatSession(ref: ref, head: head, folder: folder)
+        expect(second.card("c1")?.include == false, "rebuild: a card switched off stays off")
+        expect(second.card("c2")?.body == "My own words for the second.", "rebuild: edited text stays")
+        expect(second.cards.contains { $0.finding == "F3" && $0.badge == "new" } && !second.cards.contains { $0.finding == "F6" }, "rebuild: the new finding is a new card, the stale unposted one is gone")
+        // A posted card stays as posted, with its Bitbucket id, even when the new run words it differently.
+        var log = second.log
+        if let i = log.cards.firstIndex(where: { $0.id == "c1" }) { log.cards[i].postedID = 4242; log.cards[i].include = true }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        try? encoder.encode(log).write(to: folder.appendingPathComponent("chat.json"), options: .atomic)
+        ReviewRuns.begin(folder)
+        put(#"{"result":"x"}"#, "out.json")
+        put("F1 blocking a.ts:3\nVERDICT: REQUEST CHANGES", "review.md")
+        put(#"[{"id":"c1","finding":"F1","severity":"blocking","path":"a.ts","line":3,"body":"Third wording."}]"#, "comments.json")
+        ReviewRuns.finish(folder)
+        PRReviewStore.rebuildCards(ref, head: head)
+        let third = PRChatSession(ref: ref, head: head, folder: folder)
+        expect(third.card("c1")?.postedID == 4242 && third.card("c1")?.body == "New wording.", "rebuild: a posted card keeps its Bitbucket id and sent text")
+        expect(ReviewRuns.numbers(folder) == [1, 2, 3], "runs: three runs kept")
+        // An old folder: cards with no finding id and no review.md open as they were.
+        let oldRef = PullRequestRef(workspace: "acme", repo: "web-app", id: 33)
+        let oldFolder = PRReviewStore.folder(oldRef, head: "oooooooooooo")
+        try? FileManager.default.createDirectory(at: oldFolder, withIntermediateDirectories: true)
+        try? Data(#"[{"id":"c1","severity":"blocking","path":"a.ts","line":3,"body":"Old card."}]"#.utf8).write(to: oldFolder.appendingPathComponent("comments.json"))
+        let old = PRChatSession(ref: oldRef, head: "oooooooooooo", folder: oldFolder)
+        expect(old.cards.count == 1 && old.cards[0].unchecked == nil && old.cards[0].include, "old folder: opens with no badge")
+    }
 }

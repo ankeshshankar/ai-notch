@@ -233,7 +233,7 @@ final class PRChatSession: ObservableObject {
     /// `comments.json`, once: the review's own findings as cards.
     private func readComments() {
         guard !log.seeded, let data = try? Data(contentsOf: folder.appendingPathComponent("comments.json")) else { return }
-        log.seed(CommentParse.file(data))
+        log.seed(CommentParse.file(data), report: try? String(contentsOfFile: folder.appendingPathComponent("review.md").path, encoding: .utf8))
     }
 
     private func save() {
@@ -388,11 +388,13 @@ final class PRChatSession: ObservableObject {
     func setInclude(_ id: String, _ on: Bool) {
         guard let index = log.cards.firstIndex(where: { $0.id == id }), !log.cards[index].isPosted else { return }
         log.cards[index].include = on
+        log.cards[index].includeTouched = true
         save()
     }
 
     func setBody(_ id: String, _ text: String) {
         guard let index = log.cards.firstIndex(where: { $0.id == id }), !log.cards[index].isPosted else { return }
+        if log.cards[index].body != text { log.cards[index].bodyEdited = true }
         log.cards[index].body = text
         log.cards[index].badge = log.cards[index].badge == "new" ? "new" : nil
         save()

@@ -142,6 +142,7 @@ enum PRReviewDev {
             await selfCheckOverride(ref: ref, base: base, expect: expect)
             await selfCheckResolveAll(ref: ref, base: base, expect: expect)
             await selfCheckModels(scratch: scratch, expect: expect)
+            await selfCheckRuns(expect: expect)
             done = true
         }
         let limit = Date().addingTimeInterval(20)

@@ -65,6 +65,13 @@ public struct SuggestedComment: Codable, Sendable, Equatable, Identifiable {
     public var resolved: Bool?
     /// On my own work the cards are a checklist: ticked when done.
     public var done: Bool?
+    /// The finding of `review.md` this card was written from (`F3`); nil on a card of an older review or from the chat.
+    public var finding: String?
+    /// The card names a finding that `review.md` does not have: it was not checked, and it starts switched off.
+    public var unchecked: Bool?
+    /// What the reviewer did by hand, kept when the cards are rebuilt from a newer run.
+    public var bodyEdited: Bool?
+    public var includeTouched: Bool?
 
     public init(id: String, severity: CommentSeverity, path: String? = nil, line: Int? = nil, title: String? = nil, body: String,
                 include: Bool? = nil, postedID: Int? = nil, postedAt: Double? = nil, badge: String? = nil, suggestion: String? = nil) {
@@ -146,8 +153,9 @@ public enum CommentParse {
         if path == nil { line = nil }
         let severity = (object["severity"] as? String).flatMap(CommentSeverity.parse) ?? .shouldFix
         let id = LooseJSON.string(object["id"]) ?? fallbackID
-        let comment = SuggestedComment(id: id, severity: severity, path: path, line: line, title: LooseJSON.string(object["title"]), body: body,
+        var comment = SuggestedComment(id: id, severity: severity, path: path, line: line, title: LooseJSON.string(object["title"]), body: body,
                                        suggestion: LooseJSON.code(object["suggestion"]))
+        comment.finding = LooseJSON.string(object["finding"])
         return CommentDraft(comment: comment, replaces: LooseJSON.string(object["replaces"]))
     }
 
@@ -435,9 +443,16 @@ public struct ChatLog: Codable, Sendable, Equatable {
         followUps = try c.decodeIfPresent([FollowUpNote].self, forKey: .followUps) ?? []
     }
 
-    /// The first cards, from the review's own `comments.json`.
-    public mutating func seed(_ cards: [SuggestedComment]) {
-        self.cards = cards
+    /// The first cards, from the review's own `comments.json`; `report` is its `review.md`, which a card's finding id must be in.
+    public mutating func seed(_ cards: [SuggestedComment], report: String? = nil) {
+        self.cards = CardCheck.mark(cards, report: report)
+        seeded = true
+    }
+
+    /// A newer full run finished: its cards replace the old ones, keeping what the reviewer already did (posted cards
+    /// with their comment ids, cards switched on or off, edited text), matched by finding id, else by path and line.
+    public mutating func rebuild(from fresh: [SuggestedComment], report: String? = nil) {
+        cards = CardRebuild.merge(old: cards, new: CardCheck.mark(fresh, report: report))
         seeded = true
     }
 
