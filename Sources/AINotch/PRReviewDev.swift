@@ -654,7 +654,7 @@ enum PRReviewDev {
 
     /// A preview never reads or writes the app's real settings: its own, emptied at launch.
     static func previewDefaults() -> UserDefaults {
-        let name = "com.asbl.ai-notch.review-preview"
+        let name = "info.ankeshshiv.notch.review-preview"
         UserDefaults().removePersistentDomain(forName: name)
         return UserDefaults(suiteName: name) ?? .standard
     }
