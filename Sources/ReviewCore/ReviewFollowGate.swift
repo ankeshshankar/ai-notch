@@ -21,7 +21,8 @@ extension GateFile {
 
 extension FollowUp {
     /// The previous review counted open blocking or should-fix findings that the cards in the input do not cover
-    /// (a card missing, or never made): the pass cannot check them, so it must not approve.
+    /// (a card missing, or never made): the pass cannot check them, so it must not approve. Pre-existing findings
+    /// are their own count and never take part.
     public static func missingCards(previous: ReviewRecord?, log: ChatLog) -> Bool {
         guard let findings = previous?.findings else { return false }
         let cards = log.cards.filter { $0.status != .fixed && ($0.severity == .blocking || $0.severity == .shouldFix) }.count
@@ -31,12 +32,30 @@ extension FollowUp {
     /// The gate a follow-up leaves. The pass's own gate (if any) gains what the app knows: open blocking and
     /// should-fix cards, cards that are missing (NEEDS_LOOK, `cannot-verify`), and a gate the pass forgot to write
     /// after a gated review (also NEEDS_LOOK). Nothing gated before and nothing wrong now: no gate, today's rules.
-    public static func finalGate(reported: GateFile?, previous: GateFile?, open: ReviewFindings, missingCards: Bool) -> GateFile? {
+    public static func finalGate(reported: GateFile?, previous: GateFile?, open: ReviewFindings, missingCards: Bool, preExistingIDs: Set<String> = []) -> GateFile? {
         guard reported != nil || previous != nil || missingCards else { return nil }
         var gate = reported ?? GateFile(stated: .needsLook, pack: previous?.pack, reasons: [], ci: nil, coverage: nil, othersOpen: [], cannotVerify: [],
                                         packChecks: [], nitsNotShown: 0, risk: previous?.risk ?? [], deepCheck: false)
         func add(_ code: String, _ text: String) {
             if !gate.reasons.contains(where: { $0.code == code }) { gate.reasons.append(GateReason(code: code, text: text)) }
+        }
+        // A reason the pass put on a pre-existing card is the `pre-existing` reason, whatever code it used.
+        var remapped = false
+        for index in gate.reasons.indices where ["open-blocking", "open-should-fix"].contains(gate.reasons[index].code) {
+            let refs = gate.reasons[index].refs
+            if !refs.isEmpty, refs.allSatisfy(preExistingIDs.contains) {
+                gate.reasons[index] = GateReason(code: "pre-existing", text: "", refs: refs)
+                remapped = true
+            }
+        }
+        var seen = Set<String>()
+        gate.reasons = gate.reasons.filter { seen.insert($0.code).inserted || $0.code != "pre-existing" }
+        if remapped { gate.stated = GateRule.decide(codes: Set(gate.reasons.map(\.code))) }
+        gate.hasPreExisting = open.preExisting > 0
+        if open.preExisting > 0 { add("pre-existing", "\(open.preExisting) problem\(open.preExisting == 1 ? "" : "s") that were there before this PR") }
+        else if gate.reasons.contains(where: { $0.code == "pre-existing" }) {
+            gate.reasons.removeAll { $0.code == "pre-existing" }
+            gate.stated = GateRule.decide(codes: Set(gate.reasons.map(\.code)))
         }
         if reported == nil { add("cannot-verify", "The follow-up wrote no merge gate.") }
         if open.blocking > 0 { add("open-blocking", "\(open.blocking) blocking finding\(open.blocking == 1 ? "" : "s") open") }

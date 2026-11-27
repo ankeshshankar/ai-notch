@@ -426,7 +426,8 @@ final class PRReviewStore: ObservableObject {
         let missing = FollowUp.missingCards(previous: previous, log: log)
         let note = log.applyFollowUp(result, from: baseHead, to: existing.head, commits: existing.commitCount, at: Date().timeIntervalSince1970)
         // The gate the follow-up leaves: its own, plus the open findings and any card it could not check. APPROVE only over READY.
-        record.mergeGate = FollowUp.finalGate(reported: result.gate, previous: previous?.mergeGate, open: log.openFindings, missingCards: missing)
+        record.mergeGate = FollowUp.finalGate(reported: result.gate, previous: previous?.mergeGate, open: log.openFindings, missingCards: missing,
+                                                preExistingIDs: Set(log.cards.filter { $0.severity == .preExisting }.map(\.id)))
         let standing = FollowUp.standingVerdict(note.verdict, findings: log.openFindings, gate: record.mergeGate)
         log.restateVerdict(standing, note: note.id)
         let encoder = JSONEncoder()
@@ -468,9 +469,9 @@ final class PRReviewStore: ObservableObject {
         switch outcome {
         case .cancelled:
             record.phase = .cancelled
-        case .timedOut:
+        case .timedOut(let stopped):
             record.phase = .failed
-            record.error = "stopped after \(Int((PRReviewRunner.timeoutOverride ?? PRReviewRunner.timeout) / 60)) minutes"
+            record.error = stopped.text
         case .failed(let message):
             record.phase = .failed
             record.error = message
@@ -494,7 +495,9 @@ final class PRReviewStore: ObservableObject {
                 record.findings = parsed.findings
                 // A full run's merge gate; none written (an older skill) means today's rules.
                 if existing.baseHead == nil {
-                    record.mergeGate = (try? Data(contentsOf: folder.appendingPathComponent("gate.json"))).flatMap(GateFile.parse)
+                    record.mergeGate = (try? Data(contentsOf: folder.appendingPathComponent("gate.json"))).flatMap {
+                        GateFile.settle(gateJSON: $0, findings: parsed.findings, commentsJSON: try? Data(contentsOf: folder.appendingPathComponent("comments.json")))
+                    }
                 }
             } else {
                 record.phase = .failed
