@@ -185,6 +185,8 @@ public struct ReviewRecord: Codable, Sendable, Equatable {
     public var commentsPosted: Int?
     /// The "review finished" notification was sent.
     public var notified: Bool?
+    /// The merge gate the run wrote (`gate.json`, or a follow-up's `gate` and `reasons`); nil = none, so today's rules apply.
+    public var mergeGate: GateFile?
 
     public init(key: String, head: String, phase: ReviewPhase, auto: Bool, queuedAt: Double) {
         self.key = key
@@ -317,6 +319,7 @@ public enum ReviewGate: Equatable, Sendable {
         switch action {
         case .approve:
             guard verdict == .approve else { return .blocked("verdict is not APPROVE") }
+            if let gate = record.mergeGate, gate.gate != .ready { return .blocked(gate.blockText) }
             guard (record.findings?.blocking ?? 0) == 0 else { return .blocked("blocking findings") }
             guard pipeline == .green else { return .blocked(pipeline == .unknown ? "pipeline state unknown" : "pipeline is not green") }
             guard !alreadyApproved else { return .blocked("already approved") }

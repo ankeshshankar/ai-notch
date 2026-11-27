@@ -398,10 +398,16 @@ enum PRReviewBadge {
         case .cancelled: return ("Cancelled", Palette.ink3, "slash.circle")
         case .failed: return ("Failed", Palette.failed, "exclamationmark.triangle")
         case .done:
+            if let gate = record.mergeGate?.gate {
+                let look = PRReviewGate.style(gate)
+                return (gate.shortTitle + older, look.color, look.symbol)
+            }
             let approve = record.verdict == .approve
             return ((approve ? "Approve" : "Changes") + older, approve ? Palette.done : Palette.waiting, approve ? "checkmark.seal" : "xmark.seal")
         }
     }
+
+    static func gate(_ record: ReviewRecord?) -> MergeGate? { record?.phase == .done ? record?.mergeGate?.gate : nil }
 
     static func pipeline(_ pr: PullRequest) -> (text: String, color: Color) {
         guard let state = pr.build?.state else { return ("No pipeline", Palette.ink3) }
@@ -572,6 +578,9 @@ struct PRReviewDetail: View {
                 }
                 .foregroundStyle(Palette.waiting)
             }
+            if let gate = record?.mergeGate, record?.phase == .done, record?.own != true {
+                PRReviewGatePanel(gate: gate, older: found?.outdated == true)
+            }
             if let denied = record?.denied, !denied.isEmpty {
                 Text("Limited: the review was refused \(denied.joined(separator: ", ")) and could not read everything, so Approve is off.")
                     .font(Typo.label()).foregroundStyle(Palette.waiting).fixedSize(horizontal: false, vertical: true)
@@ -726,8 +735,8 @@ struct PRReviewConfirm: View {
         if let info {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(info.lines.enumerated()), id: \.offset) { index, line in
-                    Text(line).font(Typo.label(index == 0 || line.hasSuffix("skipped.") ? .semibold : .regular))
-                        .foregroundStyle(line.contains("blocking finding") || line.hasPrefix("Blocking") ? Palette.waiting : Palette.ink)
+                    Text(line).font(Typo.label(index == 0 || line.hasSuffix("skipped.") || line.hasPrefix("Merge gate") ? .semibold : .regular))
+                        .foregroundStyle(line.contains("blocking finding") || line.hasPrefix("Blocking") || line.hasPrefix("Merge gate") || line.hasPrefix("Gate:") ? Palette.waiting : Palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -973,5 +982,75 @@ struct PRReviewBranchPicker: View {
             Text(title).font(Typo.label(.medium)).foregroundStyle(Palette.ink2).frame(width: 80, alignment: .leading)
             content().frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+
+// MARK: The merge gate
+
+enum PRReviewGate {
+    static func style(_ gate: MergeGate) -> (color: Color, symbol: String) {
+        switch gate {
+        case .ready: return (Palette.done, "checkmark.seal")
+        case .notReady: return (Palette.failed, "xmark.seal")
+        case .needsLook: return (Palette.waiting, "eye")
+        }
+    }
+}
+
+/// Ready to merge / Not ready / Needs your look, with the reasons and the facts behind them. Detail sits in tooltips.
+struct PRReviewGatePanel: View {
+    var gate: GateFile
+    var older: Bool
+
+    var body: some View {
+        let outcome = gate.gate
+        let look = PRReviewGate.style(outcome)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: look.symbol).font(Typo.label(.bold)).decorative()
+                Text(outcome.title + (older ? " · older commit" : "")).font(Typo.body(.semibold))
+                InfoMark(text: "The review's merge gate. Approve is on only when this says Ready to merge. \(gate.deepCheck ? "A second, deeper check ran on this pull request. " : "")Details sit on each line.")
+            }
+            .foregroundStyle(look.color)
+            ForEach(Array(gate.shownReasons.enumerated()), id: \.offset) { _, reason in
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text("•").font(Typo.label()).foregroundStyle(Palette.ink3)
+                    Text(reason.text + (reason.refs.isEmpty ? "" : " (\(reason.refs.joined(separator: ", ")))"))
+                        .font(Typo.label()).foregroundStyle(Palette.ink).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            PRReviewFlow(spacing: 10, rowSpacing: 3) {
+                if let line = gate.filesLine {
+                    HStack(spacing: 3) {
+                        Text(line).font(Typo.label(.medium)).foregroundStyle(gate.unreadCount > 0 ? Palette.waiting : Palette.ink2)
+                        if !(gate.coverage?.unread.isEmpty ?? true) { InfoMark(text: "Not read:\n" + (gate.coverage?.unread.joined(separator: "\n") ?? "")) }
+                    }
+                }
+                if let line = gate.pipelineLine {
+                    Text(line).font(Typo.label(.medium)).foregroundStyle(gate.ci?.state == "red" ? Palette.failed : Palette.ink2)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+                if let line = gate.othersLine {
+                    HStack(spacing: 3) {
+                        Text(line).font(Typo.label(.medium)).foregroundStyle(gate.othersOpen.contains(where: \.isHard) ? Palette.failed : Palette.waiting)
+                        InfoMark(text: gate.othersOpen.map { "#\($0.id) \($0.author), \($0.severity)" }.joined(separator: "\n"))
+                    }
+                }
+                if !gate.cannotVerify.isEmpty {
+                    HStack(spacing: 3) {
+                        Text("\(gate.cannotVerify.count) not verified").font(Typo.label(.medium)).foregroundStyle(gate.cannotVerify.contains(where: \.risky) ? Palette.waiting : Palette.ink2)
+                        InfoMark(text: gate.cannotVerify.map { "\($0.risky ? "Risky: " : "")\($0.path): \($0.what)" }.joined(separator: "\n"))
+                    }
+                }
+                if let line = gate.nitsLine { Text(line).font(Typo.label()).foregroundStyle(Palette.ink3) }
+            }
+            if gate.packChecks.contains(where: { $0.state != "na" }) {
+                InfoMark(text: gate.packChecks.map { "\($0.state.uppercased()): \($0.text)" }.joined(separator: "\n"))
+            }
+        }
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(look.color.opacity(0.35), lineWidth: 1))
     }
 }

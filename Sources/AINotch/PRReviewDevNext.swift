@@ -99,4 +99,50 @@ extension PRReviewDev {
         let old = PRChatSession(ref: oldRef, head: "oooooooooooo", folder: oldFolder)
         expect(old.cards.count == 1 && old.cards[0].unchecked == nil && old.cards[0].include, "old folder: opens with no badge")
     }
+
+    /// The merge gate: read at settle, the three outcomes, every reason code, Approve only on READY, the override's lines.
+    @MainActor
+    static func selfCheckGate(expect: (Bool, String) -> Void) async {
+        let ref = PullRequestRef(workspace: "acme", repo: "web-app", id: 34)
+        let head = "gggggggggggg"
+        let folder = PRReviewStore.folder(ref, head: head)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        func settled(_ gate: String?) -> ReviewRecord {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent("gate.json"))
+            if let gate { try? gate.write(to: folder.appendingPathComponent("gate.json"), atomically: true, encoding: .utf8) }
+            let run = ReviewRecord(key: ref.key, head: head, phase: .reviewing, auto: false, queuedAt: 0)
+            return PRReviewStore.settle(run, ref: ref, outcome: output("F1 x\nGATE: READY\nVERDICT: APPROVE"))
+        }
+        let ready = settled(#"{"gate":"READY","ci":{"state":"green","head":"gggggggggggg"},"coverage":{"files":4,"read":4,"unread":[]}}"#)
+        let look = settled(#"{"gate":"NEEDS_LOOK","reasons":[{"code":"unread-files","text":"1 file not read"}],"coverage":{"files":4,"read":3,"unread":["a.ts"]},"ci":{"state":"green"}}"#)
+        let not = settled(#"{"gate":"NOT_READY","reasons":[{"code":"open-blocking","text":"1 blocking finding open","refs":["F1"]}],"ci":{"state":"green"}}"#)
+        let none = settled(nil)
+        expect(ready.mergeGate?.gate == .ready && look.mergeGate?.gate == .needsLook && not.mergeGate?.gate == .notReady, "gate: settle reads all three outcomes")
+        expect(none.mergeGate == nil, "gate: no gate.json, no gate")
+        func approve(_ r: ReviewRecord) -> Bool {
+            ReviewGate.check(.approve, record: r, currentHead: head, pipeline: .green).isAllowed
+        }
+        expect(approve(ready) && approve(none) && !approve(look) && !approve(not), "gate: Approve on READY or no gate only (VERDICT: APPROVE in all four)")
+        // The window's words.
+        expect(PRReviewBadge.short(ready, outdated: false).text == "Ready" && PRReviewBadge.short(look, outdated: false).text == "Needs look"
+               && PRReviewBadge.short(not, outdated: true).text == "Not ready · older" && PRReviewBadge.short(none, outdated: false).text == "Approve", "gate: sidebar badges")
+        // Each code, one by one, maps to the outcome the contract names.
+        var wrong: [String] = []
+        for code in GateCode.all {
+            let want: MergeGate = GateCode.notReady.contains(code) ? .notReady : GateCode.needsLook.contains(code) ? .needsLook : .ready
+            let file = GateFile.parse(Data("{\"gate\":\"READY\",\"reasons\":[{\"code\":\"\(code)\"}],\"ci\":{\"state\":\"green\"}}".utf8))
+            if file?.gate != want { wrong.append(code) }
+        }
+        expect(wrong.isEmpty, "gate: every reason code follows the rule \(wrong)")
+        // The override confirm lists the gate's reasons.
+        var replies = RepliesFile()
+        replies.myRoots = []
+        replies.resolvedOnBitbucket = []
+        let info = ReviewGate.checkOverride(cards: [], replies: replies, record: look, currentHead: head, pipeline: .green).info
+        expect(info?.lines.contains("Merge gate: Needs your look.") == true && info?.lines.contains("Gate: 1 file not read") == true, "gate: Approve anyway lists the overridden reasons: \(info?.lines ?? [])")
+        let plain = ReviewGate.checkOverride(cards: [], replies: replies, record: ready, currentHead: head, pipeline: .green)
+        expect(!plain.isAvailable, "gate: no override when a plain approve is open")
+        let panel = ready.mergeGate.map { $0.filesLine ?? "" } ?? ""
+        expect(panel == "Read all 4 files", "gate: files-read line: \(panel)")
+    }
 }

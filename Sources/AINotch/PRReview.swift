@@ -478,6 +478,10 @@ final class PRReviewStore: ObservableObject {
                 record.phase = .done
                 record.verdict = parsed.verdict
                 record.findings = parsed.findings
+                // A full run's merge gate; none written (an older skill) means today's rules.
+                if existing.baseHead == nil {
+                    record.mergeGate = (try? Data(contentsOf: folder.appendingPathComponent("gate.json"))).flatMap(GateFile.parse)
+                }
             } else {
                 record.phase = .failed
                 record.error = "the report has no VERDICT line"

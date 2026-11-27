@@ -16,12 +16,19 @@ public struct ApproveOverride: Equatable, Sendable {
     public var resolvedShouldFix: [String]
     /// What the review's own count says (the report may list more than the cards).
     public var findings: ReviewFindings
+    /// The merge gate's outcome and reasons when the run wrote one: what the override goes against.
+    public var gate: MergeGate? = nil
+    public var gateReasons: [String] = []
 
     public var blockingCount: Int { max(findings.blocking, skippedBlocking.count + resolvedBlocking.count) }
 
     /// The lines the confirm shows: what is being overridden, nothing hidden.
     public var lines: [String] {
         var out = ["Verdict \(verdict.rawValue) is overridden."]
+        if let gate, gate != .ready {
+            out.append("Merge gate: \(gate.title).")
+            for reason in gateReasons { out.append("Gate: \(reason)") }
+        }
         if blockingCount > 0 { out.append("\(blockingCount) blocking finding\(blockingCount == 1 ? "" : "s") skipped.") }
         for title in skippedBlocking { out.append("Blocking, on Skip: \(title)") }
         for title in resolvedBlocking { out.append("Blocking, resolved by you: \(title)") }
@@ -61,6 +68,10 @@ extension ReviewGate {
         guard on == 0 else { return .unavailable("\(on) card\(on == 1 ? " is" : "s are") switched on") }
         var info = ApproveOverride(verdict: verdict, skippedBlocking: [], skippedShouldFix: [], skippedNits: 0, resolvedBlocking: [], resolvedShouldFix: [],
                                    findings: record.findings ?? ReviewFindings())
+        if let gate = record.mergeGate, gate.gate != .ready {
+            info.gate = gate.gate
+            info.gateReasons = gate.shownReasons.map(\.text)
+        }
         for card in cards where card.status != .fixed {
             let name = (card.title?.isEmpty == false ? card.title : nil) ?? card.location ?? card.id
             switch (card.severity, card.isPosted) {
