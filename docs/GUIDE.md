@@ -637,6 +637,19 @@ with the same token. Nothing is merged or commented from the notch, and nothing 
   outside `~/.claude`, because Claude Code refuses writes there; older reports still open). The row shows
   `Review queued`, `Reviewing…`, `APPROVE · 1 should-fix`, `REQUEST CHANGES · 2 blocking` or
   `Review failed` (hover for why). Its tokens count in usage like any session.
+  - *Finding a pull request in the review window.* The sidebar has a search box (**⌘F** puts the cursor
+    in it; **Esc** clears it and returns to the list; **↩** opens the first match). It matches the number
+    (with or without `#`), words of the title, the author, the source branch, the repository and a ticket id
+    in the title or branch, on **To review** and **Mine** together, as one flat list with "3 of 30".
+    Without a search, **To review** is split into **Needs you** (not reviewed, new commits since your
+    review, or a reply waiting), **Reviewing now**, **Waiting on author** (you asked for changes or posted, or it
+    is a draft) and **Approved by you**. Each group folds; the last two start folded; the choice is
+    remembered. **Pin** a row (hover button, right-click, or **P** with the list focused) to keep it in
+    **Pinned** at the top, in the order pinned, until it is merged or declined. **Recent** lists the last 5 opened.
+    A pinned pull request shows only under Pinned (its group still counts it: "1 pinned above"); Recent rows
+    are shortcuts and stay in their group too. **↑ ↓** move through the list when it has the keyboard
+    (**Esc** from the search box, or **↓** from it); on the comment cards they keep moving between cards.
+    **⌘R**, **⌘L**, **⌘↩** and **⌘⇧R** are unchanged. All of it is in the window's **Shortcuts** list.
   - *Live progress.* While it runs, the review window shows what is happening instead of a waiting text. Motion
     comes from real work: a moving view is working, a frozen one is stuck. From the top: a strip of five connected
     dots (Reading the PR, Listing files, Reviewers, Final check, Result) with the active one pulsing and the step's
