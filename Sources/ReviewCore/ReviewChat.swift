@@ -11,17 +11,19 @@ import Foundation
 public enum CommentSeverity: String, Codable, Sendable, CaseIterable, Equatable {
     case blocking
     case shouldFix = "should-fix"
+    case preExisting = "pre-existing"
     case nit
 
     public var label: String {
         switch self {
         case .blocking: return "Blocking"
         case .shouldFix: return "Should fix"
+        case .preExisting: return "Was already there"
         case .nit: return "Nit"
         }
     }
 
-    /// Blocking and should-fix start switched on, nits start off.
+    /// Blocking, should-fix and pre-existing start switched on, nits start off.
     public var addByDefault: Bool { self != .nit }
 
     /// Tolerant: "BLOCKING", "should_fix", "Should fix", "nitpick", "major"…
@@ -29,6 +31,7 @@ public enum CommentSeverity: String, Codable, Sendable, CaseIterable, Equatable 
         let key = raw.lowercased().filter { $0.isLetter }
         switch key {
         case "blocking", "blocker", "critical", "high", "b": return .blocking
+        case "preexisting", "pre", "existing", "predates", "base":  return .preExisting
         case "shouldfix", "should", "major", "medium", "s", "important": return .shouldFix
         case "nit", "nits", "nitpick", "minor", "low", "n", "style": return .nit
         default: return nil
@@ -499,7 +502,7 @@ public enum ReviewChat {
         {"path": "src/a.ts", "line": 12, "severity": "should-fix", "body": "the comment", "replaces": "c2", "suggestion": "const x = 1;"}
         ```
 
-        severity is blocking, should-fix or nit. path and line may be left out for a general comment. Add "replaces" with the card id only when you revise that card. Add "suggestion" only when the fix is a concrete replacement for the one line at path:line: the exact new code for that line (indent included), nothing else; the app can post it as a suggested change. Say in one line outside the block what you changed. Never edit or rewrite comments.json (or any file) to change a comment: the cards live in the app, and only a block like this changes them.
+        severity is blocking, should-fix, pre-existing (a defect already in the base; its body says it predates the PR) or nit. path and line may be left out for a general comment. Add "replaces" with the card id only when you revise that card. Add "suggestion" only when the fix is a concrete replacement for the one line at path:line: the exact new code for that line (indent included), nothing else; the app can post it as a suggested change. Say in one line outside the block what you changed. Never edit or rewrite comments.json (or any file) to change a comment: the cards live in the app, and only a block like this changes them.
 
         Comment wording: it is posted under the person's own name, so write it the way they would on a pull request: short, plain, specific, with the fix. No lens codes such as "C3 [B]" or "— security", and never mention AI, Claude, a bot or "the review".
 
@@ -526,7 +529,7 @@ public enum ReviewChat {
     public static func commentsInstruction(scratch: String) -> String {
         """
         The final check, after the reviewers, writes these with the Write tool, from the report it keeps and nothing else: \(scratch)/review.md (findings with stable ids F1, F2, …; its last two lines are `GATE: READY | NOT_READY | NEEDS_LOOK` and `VERDICT: APPROVE | REQUEST CHANGES`, APPROVE only with READY), \(scratch)/drops.json, \(scratch)/gate.json and \(scratch)/comments.json. comments.json belongs to that final check (the verifier): do not draft cards yourself, and do not rewrite or replace the file after it has written it. A card that is not a kept finding of review.md must not exist.
-        comments.json is a JSON array with one object per kept BLOCKING, SHOULD-FIX or NIT finding (not the CANNOT-VERIFY ones; at most 3 nits, the rest are counted in gate.json as nitsNotShown): {"id": "c1", "finding": "F3", "severity": "blocking" | "should-fix" | "nit", "path": "src/a.ts", "line": 12, "title": "five words", "body": "the comment", "suggestion": "optional exact replacement for that line"}. "finding" is required and must be an id in review.md. path is relative to the repository root, line is the first changed line the comment is about (null if it concerns the whole file or the pull request). body is the pull request comment the reviewer would post: short, plain, specific, with the fix, in the first person where natural. No lens codes ("C3 [B]", "— security"), no severity label, no file:line prefix in the body, and never mention AI, Claude, a bot or "the review".
+        comments.json is a JSON array with one object per kept BLOCKING, SHOULD-FIX or NIT finding (not the CANNOT-VERIFY ones; at most 3 nits, the rest are counted in gate.json as nitsNotShown): {"id": "c1", "finding": "F3", "severity": "blocking" | "should-fix" | "pre-existing" | "nit", "path": "src/a.ts", "line": 12, "title": "five words", "body": "the comment", "suggestion": "optional exact replacement for that line"}. "finding" is required and must be an id in review.md. path is relative to the repository root, line is the first changed line the comment is about (null if it concerns the whole file or the pull request). body is the pull request comment the reviewer would post: short, plain, specific, with the fix, in the first person where natural. No lens codes ("C3 [B]", "— security"), no severity label, no file:line prefix in the body, and never mention AI, Claude, a bot or "the review".
         """
     }
 
@@ -534,7 +537,7 @@ public enum ReviewChat {
     /// `review.md` (with their ids when it has them), not from a fresh opinion.
     public static func draftPrompt(scratch: String) -> String {
         """
-        Write \(scratch)/comments.json with the Write tool from the findings of \(scratch)/review.md (or, if it has none, of the report you just gave), one card per BLOCKING, SHOULD-FIX or NIT finding that report kept, and no card for anything it does not list: a JSON array of {"id": "c1", "finding": "F3" (the finding's id in review.md; leave it out if the report has none), "severity": "blocking" | "should-fix" | "nit", "path": "src/a.ts", "line": 12, "title": "five words", "body": "the comment"}. body is the pull request comment the reviewer would post: short, plain, specific, with the fix; no lens codes, no severity label, and never mention AI, Claude, a bot or "the review". Answer with one line when it is written.
+        Write \(scratch)/comments.json with the Write tool from the findings of \(scratch)/review.md (or, if it has none, of the report you just gave), one card per BLOCKING, SHOULD-FIX, PRE-EXISTING or NIT finding that report kept, and no card for anything it does not list: a JSON array of {"id": "c1", "finding": "F3" (the finding's id in review.md; leave it out if the report has none), "severity": "blocking" | "should-fix" | "pre-existing" | "nit", "path": "src/a.ts", "line": 12, "title": "five words", "body": "the comment"}. body is the pull request comment the reviewer would post: short, plain, specific, with the fix; no lens codes, no severity label, and never mention AI, Claude, a bot or "the review". Answer with one line when it is written.
         """
     }
 

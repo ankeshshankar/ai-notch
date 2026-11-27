@@ -142,7 +142,8 @@ final class CardTests: XCTestCase {
         XCTAssertTrue(SuggestedComment(id: "b", severity: .shouldFix, body: "x").include)
         XCTAssertFalse(SuggestedComment(id: "c", severity: .nit, body: "x").include)
         XCTAssertEqual(SuggestedComment(id: "d", severity: .nit, body: "x", include: true).include, true)
-        XCTAssertEqual(CommentSeverity.allCases.map(\.label), ["Blocking", "Should fix", "Nit"])
+        XCTAssertTrue(SuggestedComment(id: "e", severity: .preExisting, body: "x").include)
+        XCTAssertEqual(CommentSeverity.allCases.map(\.label), ["Blocking", "Should fix", "Was already there", "Nit"])
     }
 
     func testDedupeAgainstExistingComments() throws {

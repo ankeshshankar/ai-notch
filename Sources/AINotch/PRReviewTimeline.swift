@@ -56,6 +56,7 @@ struct PRReviewSeverityChip: View {
         switch severity {
         case .blocking: return Palette.failed
         case .shouldFix: return Palette.waiting
+        case .preExisting: return Palette.mcp
         case .nit: return Palette.ink3
         }
     }
@@ -577,7 +578,7 @@ struct PRReviewTimeline: View {
             HStack(spacing: 6) {
                 Text(own ? "To fix" : "Suggested comments").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
                 Text(cards.isEmpty ? "" : own ? "\(cards.filter { $0.done == true }.count) of \(cards.count) done" : "\(toAdd) to add · \(cards.count) total").font(Typo.label()).foregroundStyle(Palette.ink3)
-                InfoMark(text: own ? "The findings as a checklist for you. Nothing here is posted anywhere." : "Pick the ones to post under your name: Add is on for blocking and should-fix findings, off for nits. Edit the text, or ask in the chat to draft or soften one. Nothing is posted until you confirm.")
+                InfoMark(text: own ? "The findings as a checklist for you. Nothing here is posted anywhere." : "Pick the ones to post under your name: Add is on for blocking, should-fix and was-already-there findings, off for nits. Edit the text, or ask in the chat to draft or soften one. Nothing is posted until you confirm.")
                 if !own { resolveAllPill }
                 Spacer(minLength: 0)
                 if session.needsDraft {

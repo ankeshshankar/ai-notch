@@ -15,17 +15,31 @@ public struct ReviewFindings: Codable, Sendable, Equatable {
     public var shouldFix = 0
     public var nits = 0
     public var cannotVerify = 0
+    /// Defects already in the base on a line the PR touched: their own bucket, never blocking or should-fix.
+    public var preExisting = 0
 
-    public init(blocking: Int = 0, shouldFix: Int = 0, nits: Int = 0, cannotVerify: Int = 0) {
+    public init(blocking: Int = 0, shouldFix: Int = 0, nits: Int = 0, cannotVerify: Int = 0, preExisting: Int = 0) {
         self.blocking = blocking
         self.shouldFix = shouldFix
         self.nits = nits
         self.cannotVerify = cannotVerify
+        self.preExisting = preExisting
+    }
+
+    private enum CodingKeys: String, CodingKey { case blocking, shouldFix, nits, cannotVerify, preExisting }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        blocking = try c.decodeIfPresent(Int.self, forKey: .blocking) ?? 0
+        shouldFix = try c.decodeIfPresent(Int.self, forKey: .shouldFix) ?? 0
+        nits = try c.decodeIfPresent(Int.self, forKey: .nits) ?? 0
+        cannotVerify = try c.decodeIfPresent(Int.self, forKey: .cannotVerify) ?? 0
+        preExisting = try c.decodeIfPresent(Int.self, forKey: .preExisting) ?? 0
     }
 
     /// "2 blocking · 1 should-fix"; "no findings" when all are zero.
     public var text: String {
-        let parts = [(blocking, "blocking"), (shouldFix, "should-fix"), (nits, nits == 1 ? "nit" : "nits"), (cannotVerify, "unverified")]
+        let parts = [(blocking, "blocking"), (shouldFix, "should-fix"), (nits, nits == 1 ? "nit" : "nits"), (preExisting, "pre-existing"), (cannotVerify, "unverified")]
             .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
         return parts.isEmpty ? "no findings" : parts.joined(separator: " · ")
     }
@@ -38,7 +52,7 @@ public struct ParsedReview: Equatable, Sendable {
 
 public enum ReviewParse {
     /// The skill's report ends with `VERDICT: APPROVE | REQUEST CHANGES` and one line per
-    /// finding (`BLOCKING file:line — …`, `SHOULD-FIX`, `NIT`, `CANNOT-VERIFY`). The last
+    /// finding (`BLOCKING file:line — …`, `SHOULD-FIX`, `NIT`, `PRE-EXISTING`, `CANNOT-VERIFY`). The last
     /// verdict line wins; a line naming both words (the template itself) is not a verdict.
     public static func parse(_ report: String) -> ParsedReview? {
         let lines = report.components(separatedBy: .newlines)
@@ -68,7 +82,7 @@ public enum ReviewParse {
         // A bold heading on its own line ("**SHOULD-FIX**") followed by top-level bullets: each
         // bullet is one finding, until a prose line or the next heading ("None." is no finding).
         var section: String?
-        let headings = ["BLOCKING", "SHOULD-FIX", "NIT", "CANNOT-VERIFY"]
+        let headings = ["BLOCKING", "SHOULD-FIX", "NIT", "PRE-EXISTING", "CANNOT-VERIFY"]
         for raw in lines {
             let line = strip(raw)
             let bare = line.uppercased().trimmingCharacters(in: CharacterSet(charactersIn: ": "))
@@ -82,6 +96,7 @@ public enum ReviewParse {
                         case "BLOCKING": findings.blocking += 1
                         case "SHOULD-FIX": findings.shouldFix += 1
                         case "NIT": findings.nits += 1
+                        case "PRE-EXISTING": findings.preExisting += 1
                         default: findings.cannotVerify += 1
                         }
                     }
@@ -104,6 +119,7 @@ public enum ReviewParse {
             if hit("BLOCKING") { findings.blocking += 1 }
             else if hit("SHOULD-FIX") { findings.shouldFix += 1 }
             else if hit("NIT") { findings.nits += 1 }
+            else if hit("PRE-EXISTING") { findings.preExisting += 1 }
             else if hit("CANNOT-VERIFY") { findings.cannotVerify += 1 }
         }
         return findings

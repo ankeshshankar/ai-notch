@@ -80,7 +80,7 @@ extension ReviewGate {
             case (.shouldFix, false): info.skippedShouldFix.append(name)
             case (.shouldFix, true): info.resolvedShouldFix.append(name)
             case (.nit, false): info.skippedNits += 1
-            case (.nit, true): break
+            case (.nit, true), (.preExisting, _): break
             }
         }
         return .available(info)

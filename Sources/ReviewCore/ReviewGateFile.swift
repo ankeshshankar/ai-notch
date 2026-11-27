@@ -42,9 +42,9 @@ public enum MergeGate: String, Codable, Sendable, Equatable {
 /// The closed list of reason codes, in plain words.
 public enum GateCode {
     public static let notReady: Set<String> = ["open-blocking", "open-should-fix", "ci-red", "tests-missing", "pack-check-failed", "others-open"]
-    public static let needsLook: Set<String> = ["unread-files", "ci-running", "ci-none", "cannot-verify-risky", "generic-pack"]
+    public static let needsLook: Set<String> = ["unread-files", "ci-running", "ci-none", "cannot-verify-risky", "generic-pack", "pre-existing"]
     public static let all: [String] = ["open-blocking", "open-should-fix", "unread-files", "ci-red", "ci-running", "ci-none", "tests-missing",
-                                       "pack-check-failed", "others-open", "cannot-verify-risky", "cannot-verify", "generic-pack"]
+                                       "pack-check-failed", "others-open", "cannot-verify-risky", "cannot-verify", "generic-pack", "pre-existing"]
 
     public static func label(_ code: String) -> String {
         switch code {
@@ -60,6 +60,7 @@ public enum GateCode {
         case "cannot-verify-risky": return "A risky change could not be verified"
         case "cannot-verify": return "Something could not be verified"
         case "generic-pack": return "No checklist for this repo"
+        case "pre-existing": return "Problems that were there before this PR"
         default: return code
         }
     }
@@ -107,6 +108,14 @@ public struct GatePackCheck: Codable, Sendable, Equatable {
     public var text: String
 }
 
+/// A real defect on a line the PR did not change: listed for later, never part of the gate.
+public struct GateFollowUp: Codable, Sendable, Equatable {
+    public var path: String
+    public var line: Int?
+    public var title: String
+    public var location: String { line.map { "\(path):\($0)" } ?? path }
+}
+
 public struct GateFile: Codable, Sendable, Equatable {
     /// What the file says.
     public var stated: MergeGate
@@ -120,13 +129,49 @@ public struct GateFile: Codable, Sendable, Equatable {
     public var nitsNotShown: Int
     public var risk: [String]
     public var deepCheck: Bool
+    /// Information only (`gate.json.followUps`); never changes the gate.
+    public var followUps: [GateFollowUp] = []
+    /// True when a card or finding in the review is pre-existing (set by the app from the cards; the file's own
+    /// `pre-existing` reason also counts).
+    public var hasPreExisting: Bool = false
+
+    public init(stated: MergeGate, pack: String?, reasons: [GateReason], ci: GateCI?, coverage: GateCoverage?, othersOpen: [GateOther],
+                cannotVerify: [GateCannot], packChecks: [GatePackCheck], nitsNotShown: Int, risk: [String], deepCheck: Bool,
+                followUps: [GateFollowUp] = [], hasPreExisting: Bool = false) {
+        self.stated = stated; self.pack = pack; self.reasons = reasons; self.ci = ci; self.coverage = coverage
+        self.othersOpen = othersOpen; self.cannotVerify = cannotVerify; self.packChecks = packChecks
+        self.nitsNotShown = nitsNotShown; self.risk = risk; self.deepCheck = deepCheck
+        self.followUps = followUps; self.hasPreExisting = hasPreExisting
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case stated, pack, reasons, ci, coverage, othersOpen, cannotVerify, packChecks, nitsNotShown, risk, deepCheck, followUps, hasPreExisting
+    }
+
+    /// Records saved before follow-ups and the pre-existing bucket have neither key.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        stated = try c.decode(MergeGate.self, forKey: .stated)
+        pack = try c.decodeIfPresent(String.self, forKey: .pack)
+        reasons = try c.decode([GateReason].self, forKey: .reasons)
+        ci = try c.decodeIfPresent(GateCI.self, forKey: .ci)
+        coverage = try c.decodeIfPresent(GateCoverage.self, forKey: .coverage)
+        othersOpen = try c.decode([GateOther].self, forKey: .othersOpen)
+        cannotVerify = try c.decode([GateCannot].self, forKey: .cannotVerify)
+        packChecks = try c.decode([GatePackCheck].self, forKey: .packChecks)
+        nitsNotShown = try c.decode(Int.self, forKey: .nitsNotShown)
+        risk = try c.decode([String].self, forKey: .risk)
+        deepCheck = try c.decode(Bool.self, forKey: .deepCheck)
+        followUps = try c.decodeIfPresent([GateFollowUp].self, forKey: .followUps) ?? []
+        hasPreExisting = try c.decodeIfPresent(Bool.self, forKey: .hasPreExisting) ?? false
+    }
 
     /// What the facts in it say, never milder than what it states: this is the one the window and the gate use.
     public var gate: MergeGate { MergeGate.stricter(stated, GateRule.decide(self)) }
 
     /// The reasons shown: the file's own, plus any the facts add that it left out.
     public var shownReasons: [GateReason] {
-        var out = reasons
+        var out = reasons.filter { GateRule.isBacked($0.code, in: self) }
         for code in GateRule.derivedCodes(self) where !out.contains(where: { $0.code == code }) { out.append(GateReason(code: code)) }
         return out
     }
@@ -173,6 +218,8 @@ public struct GateFile: Codable, Sendable, Equatable {
         return "\(othersOpen.count) unresolved comment\(othersOpen.count == 1 ? "" : "s") from others" + (hard > 0 ? " (\(hard) critical or major)" : "")
     }
 
+    public var followUpsTitle: String? { followUps.isEmpty ? nil : "Follow-ups (\(followUps.count))" }
+
     public var nitsLine: String? {
         nitsNotShown > 0 ? "\(nitsNotShown) more nit\(nitsNotShown == 1 ? "" : "s") found, not shown" : nil
     }
@@ -213,9 +260,25 @@ public struct GateFile: Codable, Sendable, Equatable {
             guard let d = item as? [String: Any], let id = str(d["id"]) else { return nil }
             return GatePackCheck(id: id, state: str(d["state"]) ?? "na", text: str(d["text"]) ?? id)
         }
+        let followUps = (object["followUps"] as? [Any] ?? []).compactMap { item -> GateFollowUp? in
+            guard let d = item as? [String: Any], let title = str(d["title"]) else { return nil }
+            return GateFollowUp(path: str(d["path"]) ?? "", line: int(d["line"]), title: title)
+        }
         return GateFile(stated: stated, pack: str(object["pack"]), reasons: reasons, ci: ci, coverage: coverage, othersOpen: others, cannotVerify: cannot,
                         packChecks: checks, nitsNotShown: max(int(object["nitsNotShown"]) ?? 0, 0),
-                        risk: (object["risk"] as? [Any] ?? []).compactMap { str($0) }, deepCheck: (object["deepCheck"] as? Bool) ?? false)
+                        risk: (object["risk"] as? [Any] ?? []).compactMap { str($0) }, deepCheck: (object["deepCheck"] as? Bool) ?? false,
+                        followUps: followUps)
+    }
+}
+
+extension GateFile {
+    /// A full run's `gate.json`, with the one fact the file alone does not carry: a pre-existing finding in the
+    /// report or a pre-existing card in `comments.json` (the `pre-existing` reason then holds, NEEDS_LOOK at most).
+    public static func settle(gateJSON: Data, findings: ReviewFindings, commentsJSON: Data?) -> GateFile? {
+        guard var file = parse(gateJSON) else { return nil }
+        let cards = commentsJSON.map { CommentParse.file($0) } ?? []
+        file.hasPreExisting = findings.preExisting > 0 || cards.contains { $0.severity == .preExisting }
+        return file
     }
 }
 
@@ -235,11 +298,25 @@ public enum GateRule {
         if file.othersOpen.contains(where: \.isHard) { out.append("others-open") }
         if file.cannotVerify.contains(where: \.risky) { out.append("cannot-verify-risky") }
         if file.pack == "generic" { out.append("generic-pack") }
+        if file.hasPreExisting { out.append("pre-existing") }
         return out
     }
 
+    /// The reason codes the facts back up. A code the file lists without its fact is dropped from what is shown
+    /// and from the outcome: `pack-check-failed` needs a pack check in state `fail`, `cannot-verify-risky` a
+    /// `risky: true` item, `pre-existing` a pre-existing card or finding (the app's own count, or the file's
+    /// `pre-existing` reason that names finding ids). A code that needs no further fact is kept as it is.
+    public static func isBacked(_ code: String, in file: GateFile) -> Bool {
+        switch code {
+        case "pack-check-failed": return file.packChecks.contains { $0.state == "fail" }
+        case "cannot-verify-risky": return file.cannotVerify.contains(where: \.risky)
+        case "pre-existing": return file.hasPreExisting || (file.reasons.first { $0.code == code }?.refs.isEmpty == false)
+        default: return true
+        }
+    }
+
     public static func decide(_ file: GateFile) -> MergeGate {
-        let codes = Set(file.reasons.map(\.code)).union(derivedCodes(file))
+        let codes = Set(file.reasons.map(\.code).filter { isBacked($0, in: file) }).union(derivedCodes(file))
         return decide(codes: codes, softOthers: file.othersOpen.contains { !$0.isHard })
     }
 

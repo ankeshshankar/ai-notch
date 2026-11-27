@@ -647,7 +647,7 @@ struct PRBadge: Equatable {
         guard let stage else { return nil }
         switch stage {
         case .ready(let verdict, let findings, let followUp, let commits):
-            let comments = findings.blocking + findings.shouldFix + findings.nits
+            let comments = findings.blocking + findings.shouldFix + findings.preExisting + findings.nits
             let tone = verdict == .approve ? Palette.done : Palette.waiting
             let text: String
             if followUp {
