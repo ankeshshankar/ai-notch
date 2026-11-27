@@ -16,6 +16,9 @@ enum PRReviewDev {
         if let at = arguments.firstIndex(of: "--review-replies-live"), at + 4 < arguments.count {
             exit(liveReplies(repo: arguments[at + 1], head: arguments[at + 2], input: arguments[at + 3], folder: arguments[at + 4]))
         }
+        if let at = arguments.firstIndex(of: "--review-full-live"), at + 5 < arguments.count, let pr = Int(arguments[at + 3]) {
+            exit(liveFull(workspace: arguments[at + 1], repo: arguments[at + 2], pr: pr, head: arguments[at + 4], folder: arguments[at + 5], blind: arguments.contains("--replay-blind")))
+        }
         if let at = arguments.firstIndex(of: "--review-chat-live"), at + 3 < arguments.count {
             exit(liveChat(workspace: arguments[at + 1], folder: arguments[at + 2], message: arguments[at + 3], draft: arguments.contains("--draft")))
         }

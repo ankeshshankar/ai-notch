@@ -153,6 +153,20 @@ extension PRReviewDev {
         expect(many?.offLine == "Approve is off: 2 blocking findings open (+2 more)", "gate: the off line counts the rest: \(many?.offLine ?? "")")
         let plain = ReviewGate.checkOverride(cards: [], replies: replies, record: ready, currentHead: head, pipeline: .green)
         expect(!plain.isAvailable, "gate: no override when a plain approve is open")
+        // The replay flag: pinned head, blind line, and the one-line summary read from a folder.
+        let lines = ReplayPrompt.lines(head: "abc123def456", blind: true)
+        let prompt = ReviewCommand.prompt(prNumber: 9, scratch: "/s", skill: "body", extra: lines)
+        expect(prompt.contains("checked out at commit abc123def456") && prompt.contains("`others.json` as `[]`") && prompt.contains("do not look at commits after abc123def456"), "replay: the prompt pins the commit and keeps others out")
+        expect(!ReviewCommand.prompt(prNumber: 9, scratch: "/s", skill: "body").contains("REPLAY") && !ReplayPrompt.lines(head: "a", blind: false).joined().contains("others.json"), "replay: a normal run's prompt is unchanged, not-blind adds no blind line")
+        let sum = FileManager.default.temporaryDirectory.appendingPathComponent("replay-summary-\(getpid())", isDirectory: true)
+        try? FileManager.default.createDirectory(at: sum, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sum) }
+        try? "NIT a.ts:1 — x\nGATE: NEEDS_LOOK\nVERDICT: REQUEST CHANGES".write(to: sum.appendingPathComponent("review.md"), atomically: true, encoding: .utf8)
+        try? #"{"gate":"NEEDS_LOOK"}"#.write(to: sum.appendingPathComponent("gate.json"), atomically: true, encoding: .utf8)
+        try? #"{"files":[{"path":"a","read":true},{"path":"b","read":false}]}"#.write(to: sum.appendingPathComponent("ledger.json"), atomically: true, encoding: .utf8)
+        try? "[{}]".write(to: sum.appendingPathComponent("drops.json"), atomically: true, encoding: .utf8)
+        let line = summary(ReviewOutput(text: "", isError: false, costUSD: 1.5, durationSeconds: 60, denied: []), dir: sum, minutes: 2)
+        expect(line.contains("gate NEEDS_LOOK; verdict REQUEST CHANGES; findings 1 nit; drops 1; files read 1/2; cost 1.50 USD; 2.0 min"), "replay: summary line: \(line)")
         let panel = ready.mergeGate.map { $0.filesLine ?? "" } ?? ""
         expect(panel == "Read all 4 files", "gate: files-read line: \(panel)")
     }

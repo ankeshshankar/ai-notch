@@ -86,7 +86,9 @@
   `AINotch --review-window-preview [--select N] [--overlay post|approve|changes|thread|resolveall|lessons] [--replies] [--gates] [--lessons] [--resolve-all (with --followup)] [--snapshot out.png] [--size WxH]`
   opens the review window on made-up pull requests; it refuses to run unless
   `CLAUDE_NOTCH_REVIEWS` and `CLAUDE_NOTCH_REVIEW_LEDGER` point at a scratch folder and
-  `AI_NOTCH_REVIEW_DRYRUN=1`. `AINotch --review-chat-live <ws/repo#id> <folder> <message> [--draft]`
+  `AI_NOTCH_REVIEW_DRYRUN=1`. `AINotch --review-full-live <workspace> <repo> <pr> <head> <folder> [--replay-blind]` runs one real full review
+  on that commit into `<folder>` only (not the reviews folder, ledger or notifications; costs real money) and prints a one-line summary.
+  `AINotch --review-chat-live <ws/repo#id> <folder> <message> [--draft]`
   runs one real chat turn (or the comment draft) on an existing review folder; posts are dry runs.
 - `AINotch --pr-selfcheck` — the pull-request data layer's pure parts (parsing, what needs you,
   events and the seen-state, merged, declined and ready-to-merge news and their dedup, the budget

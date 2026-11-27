@@ -132,6 +132,15 @@ public struct ReviewOutput: Equatable, Sendable {
     /// The session to resume for the chat (the id stays the same across `--resume`).
     public var sessionID: String? = nil
 
+    public init(text: String, isError: Bool, costUSD: Double?, durationSeconds: Double?, denied: [String], sessionID: String? = nil) {
+        self.text = text
+        self.isError = isError
+        self.costUSD = costUSD
+        self.durationSeconds = durationSeconds
+        self.denied = denied
+        self.sessionID = sessionID
+    }
+
     public static func parse(_ data: Data) -> ReviewOutput? {
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         let denials = (object["permission_denials"] as? [[String: Any]] ?? []).compactMap { $0["tool_name"] as? String }
@@ -411,7 +420,7 @@ public enum ReviewCommand {
     /// The prompt: the skill's own text (read from its file at run time), its input, and the
     /// limits of a headless run. The skill is passed as text, not by name, because the run loads
     /// no user settings (see `arguments`) and with them goes user-level skill discovery.
-    public static func prompt(prNumber: Int, scratch: String, skill: String, bbget: String? = nil, branch: BranchTarget? = nil) -> String {
+    public static func prompt(prNumber: Int, scratch: String, skill: String, bbget: String? = nil, branch: BranchTarget? = nil, extra: [String] = []) -> String {
         let input = branch.map { b in
             "INPUT: no pull request exists yet. Review the branch `\(b.branch)` at commit \(b.head) against `\(b.target)`: the changes are `git diff \(b.target)...\(b.head)` (use `git merge-base` and the commit log of that range). Skip every step that reads the pull request, its description, its comments, its tasks or its pipeline from Bitbucket; there is no CI line. The checkout is the commit above."
         } ?? "INPUT: PR number \(prNumber)."
@@ -420,7 +429,7 @@ public enum ReviewCommand {
 
         ---
         \(input)
-        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(bbget ?? scratch + "/bbget") <url> [file-name]`, which sends the token itself; with a plain file name (no folder) the response is saved in \(scratch) under that name, to Read. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the final report (`review.md`), ending in the GATE and VERDICT lines.
+        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(bbget ?? scratch + "/bbget") <url> [file-name]`, which sends the token itself; with a plain file name (no folder) the response is saved in \(scratch) under that name, to Read. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the final report (`review.md`), ending in the GATE and VERDICT lines.\(extra.isEmpty ? "" : "\n" + extra.joined(separator: "\n"))
 
         \(ReviewChat.commentsInstruction(scratch: scratch))
         """
@@ -451,9 +460,9 @@ public enum ReviewCommand {
     /// own allow rules (git commit, checkout, MCP writes, Edit on skill files) must not widen a
     /// review that reads other people's code. `--agents` supplies the lens and verifier
     /// subagents, which user-level discovery would otherwise have provided.
-    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory(), skillName: String = ReviewNames.defaultSkill, branch: BranchTarget? = nil) -> [String] {
+    public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory(), skillName: String = ReviewNames.defaultSkill, branch: BranchTarget? = nil, extra: [String] = []) -> [String] {
         let bbget = bbGetPath(home: home)
-        return ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill, bbget: bbget, branch: branch),
+        return ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill, bbget: bbget, branch: branch, extra: extra),
          "--model", ReviewModels.full,
          "--setting-sources", ""] + (hookCommand.map { ["--settings", observeHooksJSON(command: $0)] } ?? []) + [
          "--agents", agentsJSON,
@@ -462,6 +471,18 @@ public enum ReviewCommand {
          "--permission-mode", "dontAsk",
          "--allowedTools", allowedTools(scratch: scratch, bbget: bbget).joined(separator: ","),
          "--disallowedTools", deniedTools.joined(separator: ",")]
+    }
+}
+
+/// A replay of a past review, to measure it (dev only): the commit is pinned and, when blind, the pull
+/// request's comments and tasks and any later commit stay unread, so other people's findings are not in the run.
+public enum ReplayPrompt {
+    public static func lines(head: String, blind: Bool) -> [String] {
+        var out = ["REPLAY: the worktree in the scratch folder (`wt`) is already checked out at commit \(head), the head to review; use it, do not check out another commit."]
+        if blind {
+            out.append("This is a replay to measure the review, so do not fetch or read the pull request's comments or tasks, write `others.json` as `[]`, and do not look at commits after \(head).")
+        }
+        return out
     }
 }
 

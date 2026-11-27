@@ -25,6 +25,8 @@ final class PRReviewRunner: @unchecked Sendable {
         var branch: BranchTarget? = nil
         /// A read of the author's replies (one fresh read-only pass in the review's folder, output kept apart from the review's).
         var replyRead: ReplyReadJob? = nil
+        /// Dev replay: extra prompt lines, and the worktree made at `head` before the run.
+        var replayLines: [String] = []
     }
 
     struct ReplyReadJob: Sendable {
@@ -137,7 +139,8 @@ final class PRReviewRunner: @unchecked Sendable {
             let agents = [names.lens, names.verifier].compactMap { try? String(contentsOfFile: home + "/.claude/agents/\($0).md", encoding: .utf8) }
             guard agents.count == 2 else { return .failed("the \(names.lens) or \(names.verifier) agent is missing (Setup, Pull requests)") }
             if job.branch != nil { _ = PRChatRunner.ensureWorktree(repo: job.repoPath, dir: job.dir, head: job.branch!.head) }
-            process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents), hookCommand: Self.hookCommand(), skillName: names.skill, branch: job.branch)
+            if !job.replayLines.isEmpty { _ = PRChatRunner.ensureWorktree(repo: job.repoPath, dir: job.dir, head: job.head) }
+            process.arguments = ReviewCommand.arguments(prNumber: job.ref.id, scratch: job.dir.path, skill: skill, agentsJSON: ReviewAgents.json(files: agents), hookCommand: Self.hookCommand(), skillName: names.skill, branch: job.branch, extra: job.replayLines)
         }
         process.currentDirectoryURL = URL(fileURLWithPath: job.repoPath, isDirectory: true)
         process.environment = Self.environment(token: job.token, dir: job.dir.path, title: "PR review #\(job.ref.id) · \(job.ref.repo)")
