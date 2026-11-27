@@ -19,6 +19,10 @@ Click the preview to play the full video.
 - **Builds and pipelines.** EAS builds and Bitbucket Pipelines runs as they queue, run and finish.
   [Details](docs/GUIDE.md#builds-and-pipelines)
 - **Pull requests.** Your open pull requests and the ones waiting for your review.
+  - *Merge gate.* A review ends in Ready, Not ready or Needs your look (`gate.json`, from the review skill). The app recomputes it from the facts and takes the stricter one; Approve stays off unless it is Ready.
+  - *Follow-up.* Reads the author's new commits (merges of the target are skipped, big diffs are split), other people's open threads and the earlier gate; a fix counts only when confirmed.
+  - *Runs.* Each run of a head is kept in `runs/<n>/`; cards are rebuilt from the latest full run and keep your on/off choices.
+  - *Lessons.* A card you switch off, a reply you agree with, or a comment from someone else we missed becomes a proposal; only one you approve is added to the skill's `lessons.md`.
   [Details](docs/GUIDE.md#pull-requests)
 - **Board.** One view of every session and pull request of yours, in four groups.
   [Details](docs/GUIDE.md#board)

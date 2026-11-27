@@ -696,6 +696,7 @@ enum PRReviewDev {
         var ledger = ReviewLedger()
         for fixture in fixtures {
             guard var record = fixture.record else { continue }
+            if args.contains("--gates") { record.mergeGate = gateFixture(fixture.ref.id) }
             if followup, fixture.ref.id == 214 { record.baseHead = "9f8e7d6c5b4a"; record.commitCount = 2; record.commentsPosted = 2 }
             ledger.set(record)
             writeFolder(PRReviewStore.folder(fixture.ref, head: record.head), fixture: fixture.ref.id, record: record, followup: followup, suggestion: suggestion)
@@ -708,6 +709,7 @@ enum PRReviewDev {
             ExistingComment(id: 12, author: "Jane Doe", text: "Thanks for taking a look."),
         ]
 
+        if args.contains("--lessons") { lessonFixtures(ref: web(214)) }
         let store = PRReviewStore()
         if args.contains("--replies") { replyFixtures(store: store, ref: web(214), head: heads[0]) }
         if args.contains("--resolve-all") { resolveAllFixtures(store: store, ref: web(214), head: heads[0]) }
@@ -742,6 +744,7 @@ enum PRReviewDev {
         case "combined": model.overlay = .combined(.postAndRequestChanges)
         case "thread": model.overlay = .thread(.replyAndResolve, 302)
         case "override": model.overlay = .override
+        case "lessons": model.overlay = .lessons
         case "resolveall": model.overlay = .resolveAll
         case "keys": model.showKeys = true
         default: break
@@ -762,6 +765,29 @@ enum PRReviewDev {
             }
             FileHandle.standardError.write(Data("review-window \(info.number) \(Int(info.frame.minX)) \(Int(info.frame.minY)) \(Int(info.frame.width)) \(Int(info.frame.height))\n".utf8))
         }
+    }
+
+    /// `--gates`: 207 READY, 214 NOT_READY, 199 NEEDS_LOOK, each with the facts behind it.
+    private static func gateFixture(_ id: Int) -> GateFile? {
+        let json: String
+        switch id {
+        case 207: json = #"{"gate":"READY","pack":"expo","reasons":[],"ci":{"state":"green","head":"b2c3d4e5f6a7","covers":"typecheck and unit tests"},"coverage":{"files":12,"read":12,"unread":[]},"othersOpen":[],"cannotVerify":[{"path":"README.md","what":"link targets","risky":false}],"nitsNotShown":0,"risk":[],"deepCheck":false}"#
+        case 214: json = #"{"gate":"NOT_READY","pack":"expo","reasons":[{"code":"open-blocking","text":"1 blocking finding open","refs":["F1"]},{"code":"open-should-fix","text":"1 should-fix finding open","refs":["F2"]},{"code":"others-open","text":"A major comment from John Roe is unresolved"}],"ci":{"state":"green","head":"a1b2c3d4e5f6","covers":"unit tests; no device run"},"coverage":{"files":31,"read":31,"unread":[]},"othersOpen":[{"id":11,"author":"John Roe","asks":true,"severity":"major"}],"cannotVerify":[],"nitsNotShown":4,"risk":["pii"],"deepCheck":true}"#
+        case 199: json = #"{"gate":"NEEDS_LOOK","pack":"generic","reasons":[{"code":"unread-files","text":"2 files were not read"},{"code":"ci-running","text":"The pipeline is still running"},{"code":"generic-pack","text":"No checklist for this repo"}],"ci":{"state":"running","head":"d4e5f6a7b8c9","covers":"build only"},"coverage":{"files":40,"read":38,"unread":["src/layout/legacy.ts","src/layout/grid.generated.ts"]},"othersOpen":[],"cannotVerify":[{"path":"src/layout/native.ts","what":"native build","risky":true}],"nitsNotShown":0,"risk":["native"],"deepCheck":false}"#
+        default: return nil
+        }
+        return GateFile.parse(Data(json.utf8))
+    }
+
+    /// `--lessons`: three proposals waiting, one of each kind.
+    @MainActor private static func lessonFixtures(ref: PullRequestRef) {
+        try? FileManager.default.removeItem(at: LessonsStore.proposedURL)
+        LessonsStore.shared.reload()
+        LessonsStore.shared.propose([
+            LessonProposal(id: "p1", repo: ref.repo, kind: .noise, text: "Do not raise: naming of the photo helper (src/profile/photo.ts:14). Why: ", source: "card", prKey: ref.key, createdAt: 1),
+            LessonProposal(id: "p2", repo: ref.repo, kind: .missed, text: "Must raise: This misses a null check when the list is empty (src/profile/photo.ts:9)", source: "others", prKey: ref.key, createdAt: 2),
+            LessonProposal(id: "p3", repo: ref.repo, kind: .wrong, text: "We were wrong about: Use the helper. The helper does not exist in this release.", source: "reply", prKey: ref.key, createdAt: 3),
+        ])
     }
 
     /// `--resolve-all`: three of my threads that count as fixed (a follow-up Fixed card, a reply read Fixed on a card, a comment I wrote by hand),
