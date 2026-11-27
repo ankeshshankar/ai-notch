@@ -64,9 +64,10 @@ public enum ReviewProgressFixture {
         if finished { put("{}", "followup.json", folder) }
     }
 
-    public static func sessionJSON(title: String, startedAt: Double, updatedAt: Double, tool: String?, agentsRunning: Int) -> Data {
+    public static func sessionJSON(title: String, startedAt: Double, updatedAt: Double, tool: String?, agentsRunning: Int, transcript: String? = nil) -> Data {
         var object: [String: Any] = ["sessionTitle": title, "startedAt": startedAt, "updatedAt": updatedAt, "toolCount": 12,
                                      "agents": (0..<agentsRunning).map { ["id": "a\($0)", "type": "lens", "startedAt": startedAt] as [String: Any] }]
+        if let transcript { object["transcriptPath"] = transcript }
         if let tool { object["current"] = ["id": "t", "name": tool, "since": updatedAt] as [String: Any] }
         return (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
     }

@@ -24,6 +24,8 @@ public struct ReviewStepRow: Sendable, Equatable {
 
 public enum DispatchState: String, Sendable, Equatable {
     case waiting, running, done
+    /// The reviewer's session ended and wrote no report (a later pass may be on its way).
+    case failed
 }
 
 /// What one reviewer reported, by the words it used (BLOCKING, SHOULD-FIX, NIT, PRE-EXISTING).
@@ -57,10 +59,23 @@ public struct ReviewerRowInfo: Sendable, Equatable {
     public var filesGiven: Int
     public var filesReported: Int?
     public var findings: ReportedFindings?
+    /// 1 for the first pass; 2 when the reviewer was run again (report `lens-<area>-<k>b.md`).
+    public var pass = 1
+    /// What its session is doing now ("reading cron.service.ts"); nil without a session file.
+    public var doing: String?
+    /// Files of the ledger its session has opened.
+    public var filesRead = 0
+    public var lastAt: Double = 0
 
     public var title: String {
         let name = area.prefix(1).uppercased() + area.dropFirst()
         return chunks > 1 ? "\(name) \(chunk) of \(chunks)" : name
+    }
+
+    /// "Security 2", "Tests": for a tile.
+    public var shortTitle: String {
+        let name = area.prefix(1).uppercased() + area.dropFirst()
+        return chunks > 1 ? "\(name) \(chunk)" : name
     }
 }
 
@@ -71,9 +86,11 @@ public struct ReviewActivity: Sendable, Equatable {
     public var agentsRunning: Int
     public var toolCount: Int
     public var updatedAt: Double
+    /// The run's transcript, where its reviewers' own files are found beside it.
+    public var transcript: String?
 
-    public init(tool: String? = nil, agentTool: String? = nil, agentsRunning: Int = 0, toolCount: Int = 0, updatedAt: Double = 0) {
-        self.tool = tool; self.agentTool = agentTool; self.agentsRunning = agentsRunning; self.toolCount = toolCount; self.updatedAt = updatedAt
+    public init(tool: String? = nil, agentTool: String? = nil, agentsRunning: Int = 0, toolCount: Int = 0, updatedAt: Double = 0, transcript: String? = nil) {
+        self.tool = tool; self.agentTool = agentTool; self.agentsRunning = agentsRunning; self.toolCount = toolCount; self.updatedAt = updatedAt; self.transcript = transcript
     }
 
     /// A tool's name in plain words.
@@ -103,7 +120,8 @@ public struct ReviewActivity: Sendable, Equatable {
                 ?? ((object["lastTool"] as? [String: Any])?["name"] as? String)
             let found = ReviewActivity(tool: name, agentTool: running.compactMap { ($0["current"] as? [String: Any])?["name"] as? String }.first,
                                        agentsRunning: running.count, toolCount: object["toolCount"] as? Int ?? 0,
-                                       updatedAt: object["updatedAt"] as? Double ?? 0)
+                                       updatedAt: object["updatedAt"] as? Double ?? 0,
+                                       transcript: object["transcriptPath"] as? String)
             if best == nil || found.updatedAt > best!.updatedAt { best = found }
         }
         return best
@@ -121,6 +139,12 @@ public struct ReviewProgress: Sendable, Equatable {
     /// The final check wrote `comments.json`.
     public var checked: Bool
     public var activity: ReviewActivity?
+    /// One cell per changed file, in the ledger's order.
+    public var fileMap: [ReviewFileCell] = []
+    /// The session files, when they could be read.
+    public var live: ReviewLive?
+    /// `gate.json` is in the folder.
+    public var gateWritten = false
 
     public var reviewersDone: Int { reviewers.filter { $0.state == .done }.count }
     public var reviewersTotal: Int { reviewers.count }
@@ -145,11 +169,11 @@ public struct ReviewProgress: Sendable, Equatable {
 
     // MARK: Reading the folder
 
-    public static func read(folder: URL, kind: ReviewRunKind, activity: ReviewActivity? = nil) -> ReviewProgress {
+    public static func read(folder: URL, kind: ReviewRunKind, activity: ReviewActivity? = nil, live: ReviewLive? = nil, now: Double = Date().timeIntervalSince1970) -> ReviewProgress {
         switch kind {
-        case .full: return readFull(folder, activity)
-        case .followUp: return readFollowUp(folder, activity)
-        case .replies: return readReplies(folder, activity)
+        case .full: return readFull(folder, activity, live, now)
+        case .followUp: var p = readFollowUp(folder, activity); p.live = live; return p
+        case .replies: var p = readReplies(folder, activity); p.live = live; return p
         }
     }
 
@@ -196,6 +220,7 @@ public struct ReviewProgress: Sendable, Equatable {
 
     struct LedgerFile {
         var paths: Set<String> = []
+        var ordered: [String] = []
         var chunks = 1
         var tags: [String] = []
         /// Distinct (area, chunk) dispatches, in the ledger's order of first mention.
@@ -212,7 +237,7 @@ public struct ReviewProgress: Sendable, Equatable {
         var chunkSet = Set<Int>()
         for file in files {
             guard let path = file["path"] as? String else { continue }
-            out.paths.insert(path)
+            if out.paths.insert(path).inserted { out.ordered.append(path) }
             let chunk = file["chunk"] as? Int ?? 1
             chunkSet.insert(chunk)
             for tag in file["tags"] as? [String] ?? [] { tagCount[tag, default: 0] += 1 }
@@ -230,6 +255,8 @@ public struct ReviewProgress: Sendable, Equatable {
     struct LensReport {
         var paths: [String] = []
         var findings = ReportedFindings()
+        /// The file each finding sits on, with its severity.
+        var found: [(path: String, severity: FindingSeverity)] = []
     }
 
     /// A reviewer's report: the paths on its `FILES:` lines and the severity words on its `FINDINGS:` lines.
@@ -247,10 +274,17 @@ public struct ReviewProgress: Sendable, Equatable {
                 let path = body.components(separatedBy: " — ").first ?? body
                 report.paths.append(path.trimmingCharacters(in: .whitespaces))
             } else if section == "findings" {
-                if raw.contains("[BLOCKING]") { report.findings.blocking += 1 }
-                else if raw.contains("[SHOULD-FIX]") { report.findings.shouldFix += 1 }
-                else if raw.contains("[PRE-EXISTING]") { report.findings.preExisting += 1 }
-                else if raw.contains("[NIT]") { report.findings.nits += 1 }
+                var severity: FindingSeverity?
+                if raw.contains("[BLOCKING]") { report.findings.blocking += 1; severity = .blocking }
+                else if raw.contains("[SHOULD-FIX]") { report.findings.shouldFix += 1; severity = .shouldFix }
+                else if raw.contains("[PRE-EXISTING]") { report.findings.preExisting += 1; severity = .preExisting }
+                else if raw.contains("[NIT]") { report.findings.nits += 1; severity = .nit }
+                if let severity, let close = raw.firstIndex(of: "]") {
+                    let rest = raw[raw.index(after: close)...].trimmingCharacters(in: .whitespaces)
+                    let spot = rest.components(separatedBy: " ").first ?? ""
+                    let path = spot.range(of: #":\d+.*$"#, options: .regularExpression).map { String(spot[..<$0.lowerBound]) } ?? spot
+                    if !path.isEmpty { report.found.append((path, severity)) }
+                }
             }
         }
         return report
@@ -260,33 +294,72 @@ public struct ReviewProgress: Sendable, Equatable {
         String(area.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || "-_".unicodeScalars.contains($0) })
     }
 
-    private static func readFull(_ folder: URL, _ activity: ReviewActivity?) -> ReviewProgress {
+    /// The ledger path a full path from a session file stands for: the longest tail of it the ledger lists.
+    static func ledgerPath(_ full: String, in paths: Set<String>) -> String? {
+        let parts = full.split(separator: "/", omittingEmptySubsequences: true)
+        for i in parts.indices {
+            let candidate = parts[i...].joined(separator: "/")
+            if paths.contains(candidate) { return candidate }
+        }
+        return nil
+    }
+
+    private static func readFull(_ folder: URL, _ activity: ReviewActivity?, _ live: ReviewLive?, _ now: Double) -> ReviewProgress {
         let ledger = ledger(folder)
         var reviewers: [ReviewerRowInfo] = []
         var reported = Set<String>()
-        var live = ReportedFindings()
+        var liveFindings = ReportedFindings()
+        var cells: [String: ReviewFileCell] = [:]
+        if let ledger { for path in ledger.ordered { cells[path] = ReviewFileCell(path: path) } }
+        let names = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        let sessionsKnown = live.map { $0.found && !$0.agents.isEmpty } ?? false
         if let ledger {
             var runningLeft = activity.map { $0.agentsRunning } ?? Int.max
             for dispatch in ledger.dispatches {
-                let name = "lens-\(safe(dispatch.area))-\(dispatch.chunk).md"
+                let area = safe(dispatch.area)
                 let given = ledger.given["\(dispatch.area)-\(dispatch.chunk)"] ?? 0
-                if let text = try? String(contentsOf: folder.appendingPathComponent(name), encoding: .utf8) {
+                // Every pass of this dispatch: the newest report, and the newest session.
+                let reportPass = (1...6).reversed().first { names.contains(LensReportName(area: area, chunk: dispatch.chunk, pass: $0).file) } ?? 0
+                let livePasses = (live?.agents ?? [:]).filter { $0.key.area == area && $0.key.chunk == dispatch.chunk }
+                let pass = max(reportPass, livePasses.keys.map(\.pass).max() ?? 1, 1)
+                let agent = livePasses.first { $0.key.pass == pass }?.value
+                var row = ReviewerRowInfo(area: dispatch.area, chunk: dispatch.chunk, chunks: ledger.chunks, state: .waiting, filesGiven: given,
+                                          filesReported: nil, findings: nil, pass: pass)
+                // Files this reviewer's sessions opened, over all its passes.
+                var opened = Set<String>()
+                for (_, other) in livePasses { for full in other.reads { if let p = ledgerPath(full, in: ledger.paths) { opened.insert(p) } } }
+                for p in opened { cells[p]?.readers.append(row.shortTitle) }
+                row.filesRead = agent.map { Set($0.reads.compactMap { ledgerPath($0, in: ledger.paths) }).count } ?? 0
+                row.doing = agent?.doing
+                row.lastAt = agent?.lastAt ?? 0
+                if reportPass == pass, let text = try? String(contentsOf: folder.appendingPathComponent(LensReportName(area: area, chunk: dispatch.chunk, pass: pass).file), encoding: .utf8) {
                     let report = lens(text)
-                    reported.formUnion(report.paths.filter { ledger.paths.contains($0) })
-                    live = live + report.findings
-                    reviewers.append(ReviewerRowInfo(area: dispatch.area, chunk: dispatch.chunk, chunks: ledger.chunks, state: .done, filesGiven: given,
-                                                     filesReported: report.paths.count, findings: report.findings))
+                    let listed = report.paths.filter { ledger.paths.contains($0) }
+                    reported.formUnion(listed)
+                    liveFindings = liveFindings + report.findings
+                    for p in listed { cells[p]?.reportedBy.append(row.shortTitle) }
+                    for item in report.found where cells[item.path] != nil { cells[item.path]!.severity = max(cells[item.path]!.severity ?? .nit, item.severity) }
+                    row.state = .done
+                    row.filesReported = report.paths.count
+                    row.findings = report.findings
+                    row.doing = nil
+                } else if sessionsKnown {
+                    if let agent { row.state = agent.ended && now - agent.lastAt > 5 ? .failed : .running }
+                    else { row.state = .waiting }
                 } else {
-                    let state: DispatchState = runningLeft > 0 ? .running : .waiting
+                    row.state = runningLeft > 0 ? .running : .waiting
                     if runningLeft > 0 { runningLeft -= 1 }
-                    reviewers.append(ReviewerRowInfo(area: dispatch.area, chunk: dispatch.chunk, chunks: ledger.chunks, state: state, filesGiven: given,
-                                                     filesReported: nil, findings: nil))
                 }
+                reviewers.append(row)
             }
         }
+        for (path, cell) in cells where cell.state == .unread {
+            if !cell.reportedBy.isEmpty { cells[path]!.state = .reported }
+            else if !cell.readers.isEmpty { cells[path]!.state = .reading }
+        }
         let allDone = !reviewers.isEmpty && reviewers.allSatisfy { $0.state == .done }
-        let finalDone = exists(folder, "gate.json") || exists(folder, "comments.json")
-        let gather = exists(folder, "brief.md") || ledger != nil
+        let finalDone = names.contains("gate.json") || names.contains("comments.json")
+        let gather = names.contains("brief.md") || ledger != nil
         var listed: String?
         if let ledger {
             listed = "\(ledger.count) file\(ledger.count == 1 ? "" : "s")" + (ledger.chunks > 1 ? ", \(ledger.chunks) chunks" : "")
@@ -296,13 +369,17 @@ public struct ReviewProgress: Sendable, Equatable {
         let steps = ordered([
             ("reading", "Reading the PR", gather, gatherFact(folder)),
             ("listing", "Listing files", ledger != nil, listed),
-            ("reviewers", "Reviewers", allDone || finalDone || (exists(folder, "review.md") && ledger != nil),
+            ("reviewers", "Reviewers", allDone || finalDone || (names.contains("review.md") && ledger != nil),
              reviewers.isEmpty ? nil : "\(doneCount) of \(reviewers.count) done, \(reported.count) of \(ledger?.count ?? 0) files"),
             ("final", "Final check", finalDone, finalDone ? finalFact(folder) : nil),
             ("result", "Result", false, nil),
         ])
-        return ReviewProgress(kind: .full, steps: steps, reviewers: reviewers, filesTotal: ledger?.count ?? 0, filesReported: reported.count,
-                              liveFindings: live, checked: exists(folder, "comments.json"), activity: activity)
+        var progress = ReviewProgress(kind: .full, steps: steps, reviewers: reviewers, filesTotal: ledger?.count ?? 0, filesReported: reported.count,
+                                      liveFindings: liveFindings, checked: names.contains("comments.json"), activity: activity)
+        progress.fileMap = (ledger?.ordered ?? []).compactMap { cells[$0] }
+        progress.live = live
+        progress.gateWritten = names.contains("gate.json")
+        return progress
     }
 
     private static func finalFact(_ folder: URL) -> String? {
@@ -338,15 +415,41 @@ public struct ReviewProgress: Sendable, Equatable {
 
     // MARK: The "now" line
 
+    /// What the run is doing now, naming the file when a session file says which: "Reading brief.md",
+    /// "Security 2: reading definitions.ts". The newer of the main session and the busiest reviewer wins.
+    public var doingNow: String? {
+        guard let live, live.found else { return nil }
+        let busy = reviewers.filter { $0.state == .running && $0.doing != nil }.max { $0.lastAt < $1.lastAt }
+        if let busy, busy.lastAt >= (live.mainLastAt ?? 0), let doing = busy.doing { return "\(busy.shortTitle): \(doing)" }
+        if let doing = live.mainDoing, !live.mainEnded { return doing.prefix(1).uppercased() + doing.dropFirst() }
+        return nil
+    }
+
     /// "Reading a file · 4m 12s"; the step's own words when the hook has said nothing yet.
     public func nowLine(elapsed: Double?) -> String {
         var what: String
-        if let tool = activity?.tool { what = ReviewActivity.words(tool) }
+        if let doing = doingNow { what = doing }
+        else if let tool = activity?.tool { what = ReviewActivity.words(tool) }
         else if let step = current { what = step.title }
         else { what = "Working" }
         if let running = activity?.agentsRunning, running > 0, current?.id == "reviewers" { what += " · \(running) reviewer\(running == 1 ? "" : "s") at work" }
         if let elapsed { what += " · " + ReviewProgress.clock(elapsed) }
         return what
+    }
+
+    /// Tool calls per five seconds over the last five minutes, across the main session and every reviewer; nil without session files.
+    public func heartbeat(now: Double) -> ReviewHeartbeat? {
+        guard let live, live.found else { return nil }
+        return ReviewHeartbeat.make(steps: live.stepTimes, now: now)
+    }
+
+    /// "No activity for 2m" or "Finished, closing"; nil while work is moving or when no source says either way.
+    public func notice(now: Double, since: Double?) -> ReviewNotice? {
+        let sources = live?.found == true || activity != nil
+        let last = [live?.lastStepAt, activity.map(\.updatedAt).flatMap { $0 > 0 ? $0 : nil }].compactMap { $0 }.max()
+        let closing = gateWritten && live?.mainEnded == true
+        if !sources && !closing { return nil }
+        return ReviewNotice.decide(now: now, lastStep: last, since: since, gateWritten: gateWritten, mainEnded: live?.mainEnded == true)
     }
 
     public static func clock(_ seconds: Double) -> String {
