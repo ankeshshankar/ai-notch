@@ -406,7 +406,7 @@ struct PRReviewTimeline: View {
             footer
         }
         .background(shortcutButtons)
-        .onAppear { DispatchQueue.main.async { listFocused = true }; if !own { session.loadExisting(maxAge: 30) } }
+        .onAppear { DispatchQueue.main.async { if !model.sidebarFocused { listFocused = true } }; if !own { session.loadExisting(maxAge: 30) } }
         .onChange(of: model.focusChat) { inputFocused = true }
     }
 
@@ -706,9 +706,9 @@ struct PRReviewTimeline: View {
     private var shortcutsHelp: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Keyboard").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2)
-            ForEach(ReviewKeys.help, id: \.keys) { item in
+            ForEach(ReviewKeys.help, id: \.what) { item in
                 HStack(spacing: 10) {
-                    Text(item.keys).font(Typo.label(.semibold, mono: true)).foregroundStyle(Palette.ink).frame(width: 36, alignment: .leading)
+                    Text(item.keys).font(Typo.label(.semibold, mono: true)).foregroundStyle(Palette.ink).frame(width: 40, alignment: .leading)
                     Text(item.what).font(Typo.label()).foregroundStyle(Palette.ink2)
                 }
             }

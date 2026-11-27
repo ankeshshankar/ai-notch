@@ -51,9 +51,23 @@ final class PRReviewWindowModel: ObservableObject {
     var refreshAction: ((String?) -> Void)?
     private var sessions: [String: PRChatSession] = [:]
 
-    init(store: PRReviewStore, list: PRListSource) {
+    // The sidebar: what is typed, what is pinned, recent and folded (kept in the app's settings), and where the focus is.
+    /// The search box's text. Kept here, not in the view, so a list refresh or a window rebuild never clears it.
+    @Published var query = ""
+    @Published private(set) var memory: SidebarMemory
+    /// Bumped by ⌘F: the search box takes the focus.
+    @Published var focusSearch = 0
+    /// The sidebar (search box or list) has the keyboard: the open pull request's card list must not take it back.
+    var sidebarFocused = false
+    /// Bumped to scroll the selected row into view (after a search is cleared).
+    @Published var scrollToSelected = 0
+    private let defaults: UserDefaults
+
+    init(store: PRReviewStore, list: PRListSource, defaults: UserDefaults = .standard) {
         self.store = store
         self.list = list
+        self.defaults = defaults
+        self.memory = SidebarMemory.load(from: defaults)
     }
 
     var prs: [PullRequest] { list.all }
@@ -64,6 +78,75 @@ final class PRReviewWindowModel: ObservableObject {
         markCurrentSeen()
         selected = id
         overlay = nil
+        // Opened in the window: Recent. A folded group it sits in opens, so the row is there to see.
+        if list.prs.contains(where: { $0.id == id }) || list.mine.contains(where: { $0.id == id }) {
+            var next = memory
+            next.noteOpened(id)
+            if !next.isPinned(id), query.isEmpty, let folded = layout(memory: next).foldedSection(containing: id) { next.setCollapsed(folded, false) }
+            commit(next)
+        }
+    }
+
+    // MARK: Sidebar
+
+    private func commit(_ next: SidebarMemory) {
+        guard next != memory else { return }
+        memory = next
+        next.save(to: defaults)
+    }
+
+    /// The rows by state group, as the sidebar draws them now.
+    func layout(memory override: SidebarMemory? = nil) -> SidebarLayout {
+        SidebarBuilder.build(toReview: list.prs.map(sidebarItem), mine: list.mine.map(sidebarItem), memory: override ?? memory, query: query)
+    }
+
+    private func sidebarItem(_ pr: PullRequest) -> SidebarItem {
+        // The same stage the notch's list uses; a pull request without one goes to "Needs you".
+        let stage = PRStage.of(key: pr.ref.key, head: pr.head, decision: pr.decision, isDraft: pr.isDraft, ledger: store.ledger)
+        return SidebarItem(key: pr.id, group: .of(stage: stage, unseenReplies: store.unseenReplies[pr.ref.key] ?? 0),
+                           fields: SidebarFields(number: pr.ref.id > 0 ? pr.ref.id : nil, title: pr.title, author: pr.author.name, source: pr.source ?? "", repo: pr.ref.repo))
+    }
+
+    func togglePin(_ id: String) {
+        var next = memory
+        next.togglePin(id)
+        commit(next)
+    }
+
+    func toggleSection(_ id: String, folded: Bool) {
+        var next = memory
+        next.setCollapsed(id, !folded)
+        commit(next)
+    }
+
+    /// A pull request merged or declined, or no longer asked of me, leaves the lists: its pin and its place in Recent go.
+    /// Not while the lists are empty (a read that failed or has not come yet must not drop the pins).
+    func pruneMemory() {
+        let live = Set((list.prs + list.mine).map(\.id))
+        guard !live.isEmpty else { return }
+        var next = memory
+        next.prune(keeping: live)
+        commit(next)
+    }
+
+    /// Esc: the search is cleared and the keyboard goes to the list; the open pull request is scrolled back into view.
+    func clearSearch() {
+        query = ""
+        scrollToSelected += 1
+    }
+
+    /// Enter in the search box: the first match opens.
+    @discardableResult
+    func openFirstMatch() -> Bool {
+        guard let first = layout().navigable.first else { return false }
+        select(first)
+        return true
+    }
+
+    /// ↑ ↓ in the list: the next or previous row.
+    func moveSelection(by delta: Int) {
+        let keys = layout().navigable
+        if let next = SidebarBuilder.move(from: current?.id, in: keys, by: delta) { select(next) }
     }
 
     /// The replies on the open pull request were on screen: they count as seen (when leaving it or closing the window).
@@ -223,6 +306,9 @@ struct PRReviewWindowView: View {
     /// Below this width the list of pull requests becomes a menu above the pane.
     static let compactWidth: CGFloat = 700
 
+    private enum SidebarFocus: Hashable { case search, list }
+    @FocusState private var focus: SidebarFocus?
+
     var body: some View {
         GeometryReader { geo in
             let compact = geo.size.width < Self.compactWidth
@@ -256,7 +342,17 @@ struct PRReviewWindowView: View {
         }
         .frame(minWidth: 480, minHeight: 420)
         .background(refreshShortcut)
-        .onAppear { if model.selected == nil { model.selected = model.prs.first?.id }; model.refreshReplies() }
+        .background(searchShortcut)
+        .onAppear { if model.selected == nil { model.selected = model.prs.first?.id }; model.refreshReplies(); model.pruneMemory() }
+        .onChange(of: list.prs.map(\.id) + list.mine.map(\.id)) { model.pruneMemory() }
+        .onChange(of: focus) { model.sidebarFocused = focus != nil }
+    }
+
+    /// ⌘F puts the cursor in the search box.
+    private var searchShortcut: some View {
+        Button("Search pull requests") { focus = .search; model.focusSearch += 1 }
+            .keyboardShortcut("f", modifiers: .command)
+            .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true)
     }
 
     /// ⌘⇧R refreshes the lists (⌘R stays Re-review).
@@ -291,33 +387,135 @@ struct PRReviewWindowView: View {
     // MARK: Sidebar
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 0) {
-                        sectionTitle("To review · \(list.prs.count)")
-                        Spacer(minLength: 4)
-                        if let state = model.refresh {
-                            PRRefreshButton(state: state, updatedAt: state.updatedAt, now: Date().timeIntervalSince1970) { model.refreshAction?(model.current?.ref.repoKey); model.refreshReplies() }
-                                .padding(.top, 6)
+        let layout = model.layout()
+        let byID = Dictionary(list.all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return VStack(alignment: .leading, spacing: 0) {
+            searchBar(layout)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if layout.searching {
+                            if layout.sections.isEmpty {
+                                Text("No pull request matches \u{201C}\(model.query.trimmingCharacters(in: .whitespaces))\u{201D}. Press Esc to see all \(layout.searched).")
+                                    .font(Typo.label()).foregroundStyle(Palette.ink3).fixedSize(horizontal: false, vertical: true)
+                                    .padding(.horizontal, 6).padding(.top, 10)
+                            }
+                            ForEach(layout.sections) { section in sectionBody(section, byID: byID) }
+                        } else {
+                            // "To review" heads the state groups (or sits where they would, when none shows).
+                            let titleAt = layout.sections.first { if case .group = $0.kind { return true } else { return false } }?.id ?? layout.sections.first { $0.kind == .mine }?.id
+                            if titleAt == nil { sectionTitle("To review · \(list.prs.count)") }
+                            ForEach(layout.sections) { section in
+                                if section.id == titleAt { sectionTitle("To review · \(list.prs.count)") }
+                                sectionBody(section, byID: byID)
+                            }
+                            if !list.branches.isEmpty { sectionTitle("Branches · \(list.branches.count)"); rows(list.branches.map(\.id), byID: byID, pinnable: false) }
+                            Button { model.overlay = .branch } label: {
+                                Label("Review a branch…", systemImage: "arrow.triangle.branch").font(Typo.label(.medium)).foregroundStyle(Palette.bitbucket)
+                                    .padding(.horizontal, 6).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .ax("Review a branch")
+                            PRReviewLessonsButton(model: model)
                         }
                     }
-                    rows(list.prs)
-                    sectionTitle("Mine · \(list.mine.count)", info: "Your own open pull requests. Review one by hand: the result is for you only, nothing is posted, approved or requested.")
-                    rows(list.mine)
-                    if !list.branches.isEmpty { sectionTitle("Branches · \(list.branches.count)"); rows(list.branches) }
-                    Button { model.overlay = .branch } label: {
-                        Label("Review a branch…", systemImage: "arrow.triangle.branch").font(Typo.label(.medium)).foregroundStyle(Palette.bitbucket)
-                            .padding(.horizontal, 6).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .ax("Review a branch")
-                    PRReviewLessonsButton(model: model)
+                    .padding(.horizontal, 8).padding(.bottom, 8).padding(.top, 4)
                 }
-                .padding(.horizontal, 8).padding(.bottom, 8).padding(.top, 8)
+                .focusable()
+                .focused($focus, equals: .list)
+                .focusEffectDisabled()
+                .onKeyPress(phases: .down) { press in listKey(press) }
+                .onChange(of: model.selected) {
+                    if let id = model.selected { withAnimation(Motion.ease(0.15)) { proxy.scrollTo("row-" + id) } }
+                }
+                .onChange(of: model.scrollToSelected) {
+                    // After the search is cleared the rows are back one beat later.
+                    DispatchQueue.main.async { if let id = model.selected { proxy.scrollTo("row-" + id, anchor: .center) } }
+                }
             }
         }
         .background(Palette.panel)
+    }
+
+    /// The search box, its count and the refresh button.
+    private func searchBar(_ layout: SidebarLayout) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                HStack(spacing: 5) {
+                    Image(systemName: "magnifyingglass").font(Typo.micro(.bold)).foregroundStyle(Palette.ink3).decorative()
+                    TextField("Search pull requests", text: $model.query)
+                        .textFieldStyle(.plain).font(Typo.label())
+                        .focused($focus, equals: .search)
+                        .onSubmit { if model.openFirstMatch() { focus = .list } }
+                        .onExitCommand { model.clearSearch(); focus = .list }
+                        .onKeyPress(.downArrow) { focus = .list; return .handled }
+                        .ax("Search pull requests", hint: "Number, title, author, branch, repository or ticket")
+                    if !model.query.isEmpty {
+                        Button { model.clearSearch(); focus = .list } label: {
+                            Image(systemName: "xmark.circle.fill").font(Typo.label()).foregroundStyle(Palette.ink3)
+                        }
+                        .buttonStyle(.plain).help("Clear the search (Esc)").ax("Clear the search")
+                    }
+                }
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Palette.inset))
+                if let state = model.refresh {
+                    PRRefreshButton(state: state, updatedAt: state.updatedAt, now: Date().timeIntervalSince1970) { model.refreshAction?(model.current?.ref.repoKey); model.refreshReplies() }
+                }
+            }
+            if layout.searching {
+                Text("\(layout.matches) of \(layout.searched)").font(Typo.caption(.medium)).foregroundStyle(Palette.ink3).padding(.horizontal, 4)
+                    .accessibilityLabel("\(layout.matches) of \(layout.searched) pull requests match")
+            }
+        }
+        .padding(.horizontal, 8).padding(.top, 8).padding(.bottom, 4)
+    }
+
+    @ViewBuilder private func sectionBody(_ section: SidebarSection, byID: [String: PullRequest]) -> some View {
+        switch section.kind {
+        case .pinned:
+            sectionTitle("Pinned · \(section.total)", info: "Kept at the top until it is merged or declined. Hover a row, or right-click it, to pin or unpin.")
+            rows(section.keys, byID: byID)
+        case .recent:
+            sectionTitle("Recent")
+            ForEach(section.keys, id: \.self) { key in
+                if let pr = byID[key] { PRReviewRecentRow(pr: pr, selected: pr.id == model.current?.id) { model.select(pr.id) } }
+            }
+        case .group, .mine:
+            collapsibleHeader(section)
+            if !section.collapsed {
+                if section.pinnedAbove > 0 {
+                    Text("\(section.pinnedAbove) pinned above").font(Typo.caption()).foregroundStyle(Palette.ink3).padding(.horizontal, 6).padding(.bottom, 2)
+                }
+                rows(section.keys, byID: byID)
+            }
+        case .results:
+            rows(section.keys, byID: byID)
+        }
+    }
+
+    private func collapsibleHeader(_ section: SidebarSection) -> some View {
+        let info: String? = {
+            switch section.kind {
+            case .group(let group): return group.info
+            case .mine: return "Your own open pull requests. Review one by hand: the result is for you only, nothing is posted, approved or requested."
+            default: return nil
+            }
+        }()
+        return HStack(spacing: 4) {
+            Button { model.toggleSection(section.id, folded: section.collapsed) } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: section.collapsed ? "chevron.right" : "chevron.down").font(Typo.micro(.bold)).foregroundStyle(Palette.ink3).frame(width: 10).decorative()
+                    Text("\(section.title) · \(section.total)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .ax("\(section.title), \(section.total)", value: section.collapsed ? "Folded" : "Open", hint: section.collapsed ? "Opens the group" : "Folds the group")
+            if let info { InfoMark(text: info) }
+        }
+        .padding(.horizontal, 4).padding(.top, 8)
     }
 
     private func sectionTitle(_ text: String, info: String? = nil) -> some View {
@@ -328,11 +526,28 @@ struct PRReviewWindowView: View {
         .padding(.horizontal, 4).padding(.top, 6)
     }
 
-    private func rows(_ prs: [PullRequest]) -> some View {
-        ForEach(prs) { pr in
-            Button { model.select(pr.id) } label: { PRReviewSidebarRow(pr: pr, store: store, selected: pr.id == model.current?.id) }
-                .buttonStyle(.plain)
-                .ax("\(pr.ref.repo) #\(pr.ref.id)", value: pr.title, selected: pr.id == model.current?.id)
+    private func rows(_ keys: [String], byID: [String: PullRequest], pinnable: Bool = true) -> some View {
+        ForEach(keys, id: \.self) { key in
+            if let pr = byID[key] {
+                PRReviewSidebarRowHost(pr: pr, store: store, selected: pr.id == model.current?.id, pinned: model.memory.isPinned(pr.id), pinnable: pinnable,
+                                       select: { model.select(pr.id) }, togglePin: { model.togglePin(pr.id) })
+                    .id("row-" + pr.id)
+            }
+        }
+    }
+
+    /// ↑ ↓ walk the rows, P pins or unpins the open one, Esc clears the search; only while the list has the keyboard.
+    private func listKey(_ press: KeyPress) -> KeyPress.Result {
+        guard !press.modifiers.contains(.command) else { return .ignored }
+        switch press.key {
+        case .upArrow: model.moveSelection(by: -1); return .handled
+        case .downArrow: model.moveSelection(by: 1); return .handled
+        case .escape: if !model.query.isEmpty { model.clearSearch(); return .handled }; return .ignored
+        default:
+            if press.characters.lowercased() == "p", let id = model.current?.id, list.prs.contains(where: { $0.id == id }) || list.mine.contains(where: { $0.id == id }) {
+                model.togglePin(id); return .handled
+            }
+            return .ignored
         }
     }
 
@@ -423,6 +638,71 @@ enum PRReviewBadge {
         case .canceled: return ("Pipeline stopped", Palette.ink3)
         case .queued, .running, .paused: return ("Pipeline running", Palette.waiting)
         }
+    }
+}
+
+/// A sidebar row with its pin: a hover button, a small pin when pinned, and the same in the right-click menu.
+private struct PRReviewSidebarRowHost: View {
+    var pr: PullRequest
+    @ObservedObject var store: PRReviewStore
+    var selected: Bool
+    var pinned: Bool
+    var pinnable: Bool
+    var select: () -> Void
+    var togglePin: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button(action: select) { PRReviewSidebarRow(pr: pr, store: store, selected: selected) }
+                .buttonStyle(.plain)
+                .ax("\(pr.ref.repo) #\(pr.ref.id)", value: pr.title + (pinned ? ", pinned" : ""), selected: selected)
+            if pinnable {
+                if hovering {
+                    Button(action: togglePin) {
+                        Image(systemName: pinned ? "pin.slash.fill" : "pin.fill").font(Typo.micro(.bold)).foregroundStyle(Palette.ink2)
+                            .frame(width: 20, height: 20).background(Circle().fill(Palette.chip)).contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(pinned ? "Unpin" : "Pin to the top")
+                    .ax(pinned ? "Unpin" : "Pin to the top")
+                    .padding(6)
+                } else if pinned {
+                    Image(systemName: "pin.fill").font(Typo.micro(.bold)).foregroundStyle(Palette.ink3).padding(10).decorative()
+                }
+            }
+        }
+        .onHover { hovering = $0 }
+        .onAppear { if PRReviewDev.hoverNumber == pr.ref.id { hovering = true } }
+        .contextMenu {
+            if pinnable { Button(pinned ? "Unpin" : "Pin to the top", action: togglePin) }
+            if let url = pr.url { Button("Copy link") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.absoluteString, forType: .string) } }
+        }
+    }
+}
+
+/// One line for a pull request opened lately: a shortcut, not a second card.
+private struct PRReviewRecentRow: View {
+    var pr: PullRequest
+    var selected: Bool
+    var select: () -> Void
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 5) {
+                Text(verbatim: "#\(pr.ref.id)").font(Typo.label(.semibold)).foregroundStyle(Palette.ink2).fixedSize()
+                Text(pr.title).font(Typo.label()).foregroundStyle(Palette.ink).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(selected ? Palette.card : Color.clear))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(selected ? Palette.bitbucket.opacity(0.6) : Color.clear, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("\(pr.ref.repo) #\(pr.ref.id) · \(pr.title)")
+        .ax("Recent: \(pr.ref.repo) #\(pr.ref.id)", value: pr.title, selected: selected)
     }
 }
 

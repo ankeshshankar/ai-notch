@@ -652,6 +652,13 @@ enum PRReviewDev {
 
     // MARK: Preview
 
+    /// A preview never reads or writes the app's real settings: its own, emptied at launch.
+    static func previewDefaults() -> UserDefaults {
+        let name = "com.asbl.ai-notch.review-preview"
+        UserDefaults().removePersistentDomain(forName: name)
+        return UserDefaults(suiteName: name) ?? .standard
+    }
+
     private struct Fixture {
         var ref: PullRequestRef
         var title: String
@@ -672,6 +679,7 @@ enum PRReviewDev {
             exit(2)
         }
         func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+        if args.contains("--long-list") { previewLongList(args); return }
         let heads = ["a1b2c3d4e5f6", "b2c3d4e5f6a7", "c3d4e5f6a7b8", "d4e5f6a7b8c9"]
 
         func record(_ ref: PullRequestRef, head: String, verdict: ReviewVerdict, findings: ReviewFindings, denied: [String]? = nil) -> ReviewRecord {
@@ -771,7 +779,7 @@ enum PRReviewDev {
         list.prs = fixtures.map { pr($0, role: .reviewing) }
         list.mine = [Fixture(ref: PullRequestRef(workspace: "acme", repo: "web-app", id: 221), title: "Cache the avatar thumbnails", author: "You", source: "feature/avatar-cache",
                              head: "e5f6a7b8c9d0", build: .succeeded, record: nil)].map { pr($0, role: .mine) }
-        let model = PRReviewWindowModel(store: store, list: list)
+        let model = PRReviewWindowModel(store: store, list: list, defaults: previewDefaults())
         let index = Int(value("--select") ?? "0") ?? 0
         model.selected = list.prs[min(max(index, 0), list.prs.count - 1)].id
         if value("--select") == "mine", let first = list.mine.first { model.selected = first.id }
@@ -787,6 +795,14 @@ enum PRReviewDev {
         case "keys": model.showKeys = true
         default: break
         }
+        presentPreview(model, args)
+    }
+
+    /// Opens the window on a preview's model and, with `--snapshot`, draws it into a PNG.
+    @MainActor
+    static func presentPreview(_ model: PRReviewWindowModel, _ args: [String]) {
+        func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+        if args.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) } else if args.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
         let controller = PRReviewWindowController.shared
         controller.quitsOnClose = true
         controller.show(model: model)
@@ -937,7 +953,7 @@ enum PRReviewDev {
         """
     }
 
-    private static func writeFolder(_ folder: URL, fixture id: Int, record: ReviewRecord, followup: Bool = false, suggestion: Bool = false) {
+    static func writeFolder(_ folder: URL, fixture id: Int, record: ReviewRecord, followup: Bool = false, suggestion: Bool = false) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         func write(_ name: String, _ text: String) { try? Data(text.utf8).write(to: folder.appendingPathComponent(name)) }
         write("out.json", #"{"session_id":"\#(record.sessionID ?? "")","result":"x","is_error":false}"#)
