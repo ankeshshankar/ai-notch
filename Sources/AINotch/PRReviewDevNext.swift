@@ -224,4 +224,50 @@ extension PRReviewDev {
         expect(files.count >= 2 && sizes.allSatisfy { $0 <= DiffSplit.limit } && sizes.reduce(0, +) > 800_000, "follow-up diff: split into \(files.count) parts, sizes \(sizes)")
         if case .success(let text) = big { expect(text.contains("followup-1.diff") && text.contains("none is cut"), "follow-up prompt: every part named") } else { expect(false, "big follow-up prepared") }
     }
+
+    /// Learning: proposals from the three sources, nothing written until an approval, the approval writes lessons.md.
+    @MainActor
+    static func selfCheckLessons(scratch: URL, expect: (Bool, String) -> Void) async {
+        let lessonsFile = scratch.appendingPathComponent("lessons-check.md")
+        try? FileManager.default.removeItem(at: lessonsFile)
+        try? FileManager.default.removeItem(at: LessonsStore.proposedURL)
+        setenv("CLAUDE_NOTCH_LESSONS", lessonsFile.path, 1)
+        defer { unsetenv("CLAUDE_NOTCH_LESSONS") }
+        let store = LessonsStore.shared
+        store.reload()
+        let ref = PullRequestRef(workspace: "acme", repo: "web-app", id: 36)
+        let head = "llllllllllll"
+        let folder = PRReviewStore.folder(ref, head: head)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        func put(_ text: String, _ name: String) { try? text.write(to: folder.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        put("F1 should-fix a.ts:3\nVERDICT: REQUEST CHANGES", "review.md")
+        put(#"[{"id":"c1","finding":"F1","severity":"should-fix","path":"a.ts","line":3,"title":"Rename the flag","body":"Rename it."}]"#, "comments.json")
+        put(#"[{"id":10,"author":"sam","bot":false,"path":"a.ts","line":4,"body":"covered by our card","resolved":false,"asks":true},{"id":11,"author":"sam","bot":false,"path":"z.ts","line":9,"body":"This misses a null check.","resolved":false,"asks":true},{"id":12,"author":"ci","bot":true,"body":"summary","resolved":false,"asks":false}]"#, "others.json")
+        let session = PRChatSession(ref: ref, head: head, folder: folder)
+        session.setInclude("c1", true)
+        expect(store.pending.isEmpty, "lessons: switching a card on proposes nothing")
+        session.setInclude("c1", false)
+        expect(store.pending.count == 1 && store.pending[0].kind == .noise && store.pending[0].repo == "web-app", "lessons: a card switched off by hand is a Noise proposal")
+        store.others(ref: ref, head: head)
+        expect(store.pending.map(\.kind) == [.noise, .missed], "lessons: a comment no card covers is a Missed proposal, a covered one and a bot's are not: \(store.pending.map(\.kind))")
+        var replies = RepliesFile()
+        replies.update(threads: [ReplyThread(id: 7, text: "Use the helper.", replies: [])], at: 1)
+        store.replies([ReplyAnalysis(commentID: 7, verdict: .explained, reason: "The helper does not exist.", disagrees: true, model: ReviewModels.full),
+                       ReplyAnalysis(commentID: 8, verdict: .fixed, reason: "done")], file: replies, ref: ref)
+        expect(store.pending.map(\.kind) == [.noise, .missed, .wrong], "lessons: a correct disagreement is a Wrong proposal, a plain fix is not")
+        session.setInclude("c1", false)
+        expect(store.pending.count == 3, "lessons: the same source does not propose twice")
+        expect(!FileManager.default.fileExists(atPath: lessonsFile.path), "lessons: nothing is appended before an approval")
+        let noise = store.pending[0], wrong = store.pending[2]
+        store.edit(noise.id, text: "Do not raise: flag names. Why: the team keeps them as they are.")
+        expect(store.approve(noise.id) == nil, "lessons: approve")
+        let written = (try? String(contentsOf: lessonsFile, encoding: .utf8)) ?? ""
+        expect(written.contains("## web-app") && written.contains("### Noise\n- Do not raise: flag names. Why: the team keeps them as they are."), "lessons: the approved entry is in lessons.md under its repo and kind: \(written)")
+        expect(!written.contains("null check") && !written.contains("helper"), "lessons: only the approved entry is written")
+        store.dismiss(wrong.id)
+        expect(store.pending.map(\.kind) == [.missed], "lessons: approved and dismissed leave the list")
+        let saved = LessonsFile.decode(try? Data(contentsOf: LessonsStore.proposedURL))
+        expect(saved.proposals.filter { $0.state == .approved }.count == 1 && saved.proposals.filter { $0.state == .dismissed }.count == 1, "lessons: states saved in lessons-proposed.json")
+        expect(store.approve(noise.id) != nil, "lessons: an entry is added once")
+    }
 }

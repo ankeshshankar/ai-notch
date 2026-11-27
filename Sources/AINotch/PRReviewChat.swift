@@ -329,6 +329,7 @@ final class PRChatSession: ObservableObject {
         replies.markTried(todo)
         ReplyFiles.save(replies, folder: folder)
         for a in result.analyses { replyDrafts[a.commentID] = nil }
+        LessonsStore.shared.replies(result.analyses, file: replies, ref: ref)
         if result.cancelled { notice = "Stopped"; return }
         let n = result.analyses.count - unknown.count
         let cost = result.cost > 0 ? String(format: " · $%.2f", result.cost) : ""
@@ -390,6 +391,7 @@ final class PRChatSession: ObservableObject {
         log.cards[index].include = on
         log.cards[index].includeTouched = true
         save()
+        if !on { LessonsStore.shared.cardSwitchedOff(log.cards[index], ref: ref) }
     }
 
     func setBody(_ id: String, _ text: String) {

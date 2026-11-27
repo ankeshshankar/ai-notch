@@ -378,7 +378,10 @@ final class PRReviewStore: ObservableObject {
         }
         if case .finished = outcome {
             // The run is kept as runs/<n>/; a full run's cards are rebuilt from it without losing what I did to the old ones.
-            if existing.baseHead == nil, record.phase == .done { Self.rebuildCards(ref, head: existing.head) }
+            if existing.baseHead == nil, record.phase == .done {
+                Self.rebuildCards(ref, head: existing.head)
+                LessonsStore.shared.others(ref: ref, head: existing.head)
+            }
             ReviewRuns.finish(Self.folder(ref, head: existing.head))
         }
         if record.phase == .done, record.notified != true, record.own != true {

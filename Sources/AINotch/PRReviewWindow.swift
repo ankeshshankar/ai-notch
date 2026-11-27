@@ -31,6 +31,7 @@ final class PRReviewWindowModel: ObservableObject {
         case thread(ThreadAction, Int)
         case override
         case branch
+        case lessons
     }
 
     let store: PRReviewStore
@@ -246,6 +247,8 @@ struct PRReviewWindowView: View {
                 }
                 if model.overlay == .branch {
                     PRReviewBranchPicker(model: model, store: store)
+                } else if model.overlay == .lessons {
+                    PRReviewLessons(model: model)
                 } else if let overlay = model.overlay, let pr = model.current {
                     PRReviewConfirm(model: model, store: store, pr: pr, overlay: overlay)
                 }
@@ -309,6 +312,7 @@ struct PRReviewWindowView: View {
                     }
                     .buttonStyle(.plain)
                     .ax("Review a branch")
+                    PRReviewLessonsButton(model: model)
                 }
                 .padding(.horizontal, 8).padding(.bottom, 8).padding(.top, 8)
             }
@@ -671,7 +675,7 @@ struct PRReviewConfirm: View {
                 case .resolveAll: resolveAllBody
                 case .thread(let action, let id): threadBody(action, id)
                 case .override: overrideBody
-                case .branch: EmptyView()
+                case .branch, .lessons: EmptyView()
                 }
             }
             .padding(16)
@@ -1052,5 +1056,105 @@ struct PRReviewGatePanel: View {
         .padding(8).frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(look.color.opacity(0.35), lineWidth: 1))
+    }
+}
+
+
+// MARK: Lessons
+
+/// "Lessons · 3": proposals waiting for the reviewer.
+struct PRReviewLessonsButton: View {
+    @ObservedObject var model: PRReviewWindowModel
+    @ObservedObject private var lessons = LessonsStore.shared
+
+    var body: some View {
+        if !lessons.pending.isEmpty {
+            Button { model.overlay = .lessons } label: {
+                Label("Lessons · \(lessons.pending.count)", systemImage: "lightbulb").font(Typo.label(.medium)).foregroundStyle(Palette.claude)
+                    .padding(.horizontal, 6).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("What the reviews could learn from what you did. Nothing is saved until you add it.")
+            .ax("Lessons waiting")
+        }
+    }
+}
+
+/// The proposals: edit the wording, then add it to the skill's lessons or dismiss it.
+struct PRReviewLessons: View {
+    @ObservedObject var model: PRReviewWindowModel
+    @ObservedObject private var lessons = LessonsStore.shared
+    @State private var message: String?
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4).ignoresSafeArea().onTapGesture { model.overlay = nil }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 4) {
+                    Text("Lessons").font(Typo.title(.semibold)).foregroundStyle(Palette.ink)
+                    InfoMark(text: "Proposed from a card you switched off, a reply you agreed with, or a comment someone else made that the review missed. An entry goes into the skill's lessons.md only when you press Add, as you have worded it.")
+                }
+                if lessons.pending.isEmpty {
+                    Text("Nothing waiting.").font(Typo.label()).foregroundStyle(Palette.ink3)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(lessons.pending) { proposal in
+                                PRReviewLessonRow(proposal: proposal) { message = $0 }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 340)
+                }
+                if let message { Text(message).font(Typo.label(.medium)).foregroundStyle(Palette.waiting).fixedSize(horizontal: false, vertical: true) }
+                HStack { Spacer(minLength: 0); PRReviewPill(title: "Close") { model.overlay = nil } }
+            }
+            .padding(16)
+            .frame(maxWidth: 520)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.surface))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.card))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.ink3.opacity(0.35), lineWidth: 1))
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
+            .padding(20)
+        }
+        .transition(.opacity)
+        .onAppear { lessons.reload() }
+    }
+}
+
+private struct PRReviewLessonRow: View {
+    var proposal: LessonProposal
+    var report: (String?) -> Void
+    @State private var text: String
+
+    init(proposal: LessonProposal, report: @escaping (String?) -> Void) {
+        self.proposal = proposal
+        self.report = report
+        _text = State(initialValue: proposal.text)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(proposal.kind.rawValue).font(Typo.label(.semibold)).foregroundStyle(proposal.kind == .wrong ? Palette.waiting : proposal.kind == .missed ? Palette.failed : Palette.ink2)
+                Text(proposal.repo).font(Typo.label(mono: true)).foregroundStyle(Palette.ink3)
+                Text("· " + proposal.sourceLabel).font(Typo.label()).foregroundStyle(Palette.ink3).lineLimit(1)
+                InfoMark(text: "\(proposal.kind.hint). From \(proposal.prKey).")
+            }
+            TextField("The lesson", text: $text, axis: .vertical)
+                .textFieldStyle(.plain).font(Typo.label()).foregroundStyle(Palette.ink).lineLimit(1...5)
+                .padding(6).background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Palette.surface))
+                .onSubmit { LessonsStore.shared.edit(proposal.id, text: text) }
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                PRReviewPill(title: "Dismiss") { LessonsStore.shared.dismiss(proposal.id) }
+                PRReviewPill(title: "Add to lessons", symbol: "plus", prominent: true) {
+                    LessonsStore.shared.edit(proposal.id, text: text)
+                    report(LessonsStore.shared.approve(proposal.id))
+                }
+            }
+        }
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.subcard))
     }
 }
