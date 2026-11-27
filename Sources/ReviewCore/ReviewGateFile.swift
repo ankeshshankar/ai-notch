@@ -193,7 +193,8 @@ public struct GateFile: Codable, Sendable, Equatable {
             return GateCoverage(files: files, read: int(d["read"]) ?? max(files - unread.count, 0), unread: unread)
         }
         let others = (object["othersOpen"] as? [Any] ?? []).compactMap { item -> GateOther? in
-            guard let d = item as? [String: Any] else { return nil }
+            // Only a comment that asks for something is an open thread; a bot's summary or status note is not.
+            guard let d = item as? [String: Any], (d["asks"] as? Bool) != false else { return nil }
             return GateOther(id: int(d["id"]) ?? 0, author: str(d["author"]) ?? "", severity: str(d["severity"])?.lowercased() ?? "unknown")
         }
         let cannot = (object["cannotVerify"] as? [Any] ?? []).compactMap { item -> GateCannot? in

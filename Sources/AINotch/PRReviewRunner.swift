@@ -175,24 +175,40 @@ final class PRReviewRunner: @unchecked Sendable {
     }
 
     /// The follow-up's files in the review folder (input, diff of the new commits, the checkout at the new head)
-    /// and its prompt. Reads git only; the diff is cut at 300 KB.
-    private static func prepareFollowUp(_ job: Job, _ followUp: FollowUpJob) -> Result<String, FailText> {
+    /// and its prompt. Reads git only; a diff over 200 KB is split into parts, none cut; merge commits that brought the target in are left out.
+    static func prepareFollowUp(_ job: Job, _ followUp: FollowUpJob) -> Result<String, FailText> {
         let repo = job.repoPath
         func git(_ args: [String], timeout: Double = 60) -> ProcessResult? { runProcess("/usr/bin/git", ["-C", repo] + args, timeout: timeout) }
         func has(_ sha: String) -> Bool { git(["cat-file", "-e", sha + "^{commit}"])?.status == 0 }
         if !has(followUp.baseHead) || !has(job.head) { _ = git(["fetch", "--quiet", "origin"], timeout: 180) }
         guard has(job.head) else { return .failure(FailText("the new commit is not in the local clone")) }
         let range = has(followUp.baseHead) ? "\(followUp.baseHead)..\(job.head)" : "\(job.head)~1..\(job.head)"
-        var diff = git(["diff", "--no-color", "--stat", "-p", range], timeout: 120)?.output ?? Data()
-        let cut = diff.count > 300_000
-        if cut { diff = diff.prefix(300_000) }
-        try? FileManager.default.removeItem(at: job.dir.appendingPathComponent("followup.json"))
+        // Merge commits that brought the target branch in are not the author's work: only the commits on the
+        // branch's own line count, so the pass is not shown (or blamed for) what came in from the target.
+        let merges = Int(String(data: git(["rev-list", "--merges", "--count", range])?.output ?? Data(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+        var diff: Data
+        if merges > 0 {
+            let own = String(data: git(["rev-list", "--reverse", "--no-merges", "--first-parent", range])?.output ?? Data(), encoding: .utf8)?
+                .split(separator: "\n").map(String.init) ?? []
+            diff = Data()
+            for sha in own { diff.append(git(["show", "--no-color", "--stat", "-p", "--format=commit %h %s", sha], timeout: 60)?.output ?? Data()) }
+        } else {
+            diff = git(["diff", "--no-color", "--stat", "-p", range], timeout: 120)?.output ?? Data()
+        }
+        // Over the size limit: split into parts, each read; never cut.
+        let parts = DiffSplit.parts(diff)
+        let names = DiffSplit.names(count: parts.count)
+        let fm = FileManager.default
+        for old in (try? fm.contentsOfDirectory(atPath: job.dir.path)) ?? [] where old.hasPrefix("followup") && old.hasSuffix(".diff") {
+            try? fm.removeItem(at: job.dir.appendingPathComponent(old))
+        }
+        try? fm.removeItem(at: job.dir.appendingPathComponent("followup.json"))
         do {
-            try diff.write(to: job.dir.appendingPathComponent("followup.diff"))
+            for (name, part) in zip(names, parts) { try part.write(to: job.dir.appendingPathComponent(name)) }
             try followUp.inputJSON.write(to: job.dir.appendingPathComponent("followup-input.json"))
         } catch { return .failure(FailText("cannot write in \(job.dir.path)")) }
         _ = PRChatRunner.ensureWorktree(repo: repo, dir: job.dir, head: job.head)
-        return .success(FollowUp.prompt(scratch: job.dir.path, previousHead: followUp.baseHead, newHead: job.head, diffCut: cut, readReplies: followUp.readReplies))
+        return .success(FollowUp.prompt(scratch: job.dir.path, previousHead: followUp.baseHead, newHead: job.head, diffParts: names, mergesSkipped: merges, readReplies: followUp.readReplies))
     }
 
     struct FailText: Error { var message: String; init(_ message: String) { self.message = message } }

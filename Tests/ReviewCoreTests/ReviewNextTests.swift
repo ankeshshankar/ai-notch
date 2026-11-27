@@ -79,10 +79,10 @@ final class FollowUpTests: XCTestCase {
         XCTAssertEqual(log.cards[0].status, .fixed)
         XCTAssertFalse(log.cards[0].include)
         XCTAssertEqual(log.cards[1].status, .stillOpen)
-        XCTAssertEqual(log.cards[2].status, .unclear)
+        XCTAssertNil(log.cards[2].status, "a nit on Skip the pass was not asked about is not unclear")
         XCTAssertEqual(log.cards.count, 4)
         XCTAssertEqual(note.title, "Follow-up on 2 new commits")
-        XCTAssertEqual(note.counts, "1 fixed · 1 still open · 1 unclear · 1 new")
+        XCTAssertEqual(note.counts, "1 fixed · 1 still open · 1 new")
         XCTAssertEqual(log.followUps.count, 1)
         // open findings: still-open blocking, unclear nit, new blocking.
         XCTAssertEqual(log.openFindings.blocking, 2)

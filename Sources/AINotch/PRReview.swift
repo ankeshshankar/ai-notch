@@ -336,13 +336,16 @@ final class PRReviewStore: ObservableObject {
             var existing: [ExistingComment] = raw?.map(\.existing) ?? []
             if raw == nil { existing = await PRReviewAPI.comments(job.ref) ?? [] }
             var threads: [ReplyThread] = []
+            var others: [ExistingComment] = []
             if let raw {
                 let file = ReplyFiles.update(raw: raw, ref: job.ref, folder: folder, me: self.meUUID(), posted: ReplyFiles.postedIDs(log))
                 self.setUnseenReplies(job.ref.key, file.unseen(ReplyFiles.seen(job.ref)))
                 threads = file.threads.filter { file.needsAttention($0) }
+                others = OtherThreads.open(raw, mine: Set(file.myRoots ?? []), me: self.meUUID())
             }
             if var current = self.ledger.record(job.ref.key, head: job.head) { current.commitCount = commits; self.ledger.set(current); self.save() }
-            let input = FollowUp.inputJSON(previousHead: base.head, newHead: job.head, previous: base, log: log, existing: existing, replyThreads: threads)
+            let input = FollowUp.inputJSON(previousHead: base.head, newHead: job.head, previous: base, log: log, existing: existing, replyThreads: threads,
+                                          othersOpen: others, previousGate: base.mergeGate)
             spec.followUp = .init(baseHead: base.head, inputJSON: input, readReplies: !threads.isEmpty)
             runner.start(spec, done: done)
         }
@@ -370,7 +373,9 @@ final class PRReviewStore: ObservableObject {
         defer { pump() }
         guard let existing = ledger.record(ref.key, head: head) else { return }
         var record = Self.settle(existing, ref: ref, outcome: outcome)
-        if existing.baseHead != nil { record = Self.settleFollowUp(record, existing: existing, ref: ref, outcome: outcome) }
+        if let baseHead = existing.baseHead {
+            record = Self.settleFollowUp(record, existing: existing, ref: ref, outcome: outcome, previous: ledger.record(ref.key, head: baseHead))
+        }
         if case .finished = outcome {
             // The run is kept as runs/<n>/; a full run's cards are rebuilt from it without losing what I did to the old ones.
             if existing.baseHead == nil, record.phase == .done { Self.rebuildCards(ref, head: existing.head) }
@@ -393,7 +398,8 @@ final class PRReviewStore: ObservableObject {
 
     /// A follow-up's result: its `followup.json` folded into the cards of the review it follows, the
     /// open findings counted from them, and the full review's session kept for the chat.
-    nonisolated static func settleFollowUp(_ settled: ReviewRecord, existing: ReviewRecord, ref: PullRequestRef, outcome: PRReviewRunner.Outcome) -> ReviewRecord {
+    nonisolated static func settleFollowUp(_ settled: ReviewRecord, existing: ReviewRecord, ref: PullRequestRef, outcome: PRReviewRunner.Outcome,
+                                        previous: ReviewRecord? = nil) -> ReviewRecord {
         guard case .finished = outcome, let baseHead = existing.baseHead else { return settled }
         var record = settled
         record.sessionID = existing.sessionID
@@ -414,7 +420,12 @@ final class PRReviewStore: ObservableObject {
         let baseFolder = Self.cardsFolder(ref, base: baseHead, head: existing.head)
         var log = FollowUp.baseLog(chatJSON: try? Data(contentsOf: baseFolder.appendingPathComponent("chat.json")),
                                    commentsJSON: try? Data(contentsOf: baseFolder.appendingPathComponent("comments.json")), sessionID: existing.sessionID)
+        let missing = FollowUp.missingCards(previous: previous, log: log)
         let note = log.applyFollowUp(result, from: baseHead, to: existing.head, commits: existing.commitCount, at: Date().timeIntervalSince1970)
+        // The gate the follow-up leaves: its own, plus the open findings and any card it could not check. APPROVE only over READY.
+        record.mergeGate = FollowUp.finalGate(reported: result.gate, previous: previous?.mergeGate, open: log.openFindings, missingCards: missing)
+        let standing = FollowUp.standingVerdict(note.verdict, findings: log.openFindings, gate: record.mergeGate)
+        log.restateVerdict(standing, note: note.id)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         if let encoded = try? encoder.encode(log) { try? encoded.write(to: folder.appendingPathComponent("chat.json"), options: .atomic) }
@@ -422,7 +433,7 @@ final class PRReviewStore: ObservableObject {
         record.phase = .done
         record.error = nil
         // The note, the record, the window and the gate all read this one verdict.
-        record.verdict = note.verdict
+        record.verdict = standing
         return record
     }
 

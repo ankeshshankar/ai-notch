@@ -144,6 +144,7 @@ enum PRReviewDev {
             await selfCheckModels(scratch: scratch, expect: expect)
             await selfCheckRuns(expect: expect)
             await selfCheckGate(expect: expect)
+            await selfCheckFollowGate(scratch: scratch, expect: expect)
             done = true
         }
         let limit = Date().addingTimeInterval(20)

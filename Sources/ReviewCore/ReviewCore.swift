@@ -420,7 +420,7 @@ public enum ReviewCommand {
 
         ---
         \(input)
-        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(bbget ?? scratch + "/bbget") <url> [file-name]`, which sends the token itself; with a plain file name (no folder) the response is saved in \(scratch) under that name, to Read. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the report from step 4, ending in the VERDICT line.
+        Headless run started by AI Notch. Bitbucket: `curl` and `$BB_API_TOKEN` are not available here; read the Bitbucket API (GET only) with `\(bbget ?? scratch + "/bbget") <url> [file-name]`, which sends the token itself; with a plain file name (no folder) the response is saved in \(scratch) under that name, to Read. Run every shell command with literal paths and values: no shell variables (`$X`), assignments, command substitution, loops or `&&` chains, because the run refuses them; take a value (a sha, a branch name) from a command's output and write it into the next command. Read several files with one Read call each, not a loop. Give each subagent the same instructions. Stay inside the worktree and \(scratch): do not `ls`, `cat` or search any other folder (no parent folders, no sibling repositories). Put any path that has special characters, such as ( ) [ ] { } spaces or `*`, in single quotes, for example `git -C <worktree> diff <a> <b> -- 'apps/app/(tabs)/index.tsx'`. Use \(scratch) as the scratch folder. Review only: do not post, comment, approve, request changes, commit, push or edit anything in the repository, and do not ask questions. Finish with the final report (`review.md`), ending in the GATE and VERDICT lines.
 
         \(ReviewChat.commentsInstruction(scratch: scratch))
         """
@@ -482,7 +482,7 @@ public enum ReviewAgents {
 
     public static func body(of file: String) -> String { parts(of: file).body }
 
-    /// `--agents` JSON from agent files: {name: {description, prompt, tools, model}}.
+    /// `--agents` JSON from agent files: {name: {description, prompt, tools, model, effort}}.
     public static func json(files: [String]) -> String {
         var agents: [String: [String: Any]] = [:]
         for file in files {
@@ -497,6 +497,8 @@ public enum ReviewAgents {
                 agent["tools"] = list
             }
             if let model = meta["model"] { agent["model"] = model }
+            // `claude --agents` accepts `effort` per agent (a value it does not know is refused at startup).
+            if let effort = meta["effort"], ["low", "medium", "high", "xhigh", "max"].contains(effort) { agent["effort"] = effort }
             agents[name] = agent
         }
         let data = (try? JSONSerialization.data(withJSONObject: agents, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)

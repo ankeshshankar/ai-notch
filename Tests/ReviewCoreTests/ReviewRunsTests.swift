@@ -86,8 +86,9 @@ final class ReviewRunsTests: XCTestCase {
         for needed in ["/s/r1/comments.json", "/s/r1/review.md", "/s/r1/gate.json", "/s/r1/drops.json", "\"finding\"", "GATE: READY | NOT_READY | NEEDS_LOOK", "nitsNotShown"] {
             XCTAssertTrue(text.contains(needed), needed)
         }
+        XCTAssertTrue(text.contains("do not rewrite or replace the file"))
         XCTAssertFalse(text.contains("Besides the report"), "no card is drafted on the orchestrator's own")
         XCTAssertTrue(ReviewChat.draftPrompt(scratch: "/s/r1").contains("review.md"))
-        XCTAssertTrue(ReviewCommand.prompt(prNumber: 3, scratch: "/s/r1", skill: "body").contains("Nobody drafts cards before that check"))
+        XCTAssertTrue(ReviewCommand.prompt(prNumber: 3, scratch: "/s/r1", skill: "body").contains("do not draft cards yourself"))
     }
 }
