@@ -189,6 +189,8 @@ final class ReviewToolsTests: XCTestCase {
         }
         XCTAssertFalse(tools.contains("Bash(git branch:*)"), "bare branch (creates) is not allowed")
         let args = ReviewCommand.arguments(prNumber: 1, scratch: scratch, skill: "x", agentsJSON: "{}")
+        XCTAssertTrue(ReviewCommand.deniedTools.contains("ScheduleWakeup"))
+        XCTAssertTrue(ReviewCommand.deniedTools.contains("CronCreate"))
         XCTAssertEqual(args[args.firstIndex(of: "--disallowedTools")! + 1], ReviewCommand.deniedTools.joined(separator: ","))
     }
 

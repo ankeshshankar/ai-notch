@@ -401,7 +401,10 @@ public enum ReviewCommand {
     public static let deniedTools: [String] = {
         let flags = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to*", "--unset-upstream*",
                      "--edit-description*", "--track*", "--no-track*"]
-        return flags.flatMap { ["Bash(git branch \($0):*)", "Bash(git branch * \($0) *)", "Bash(git branch * \($0))",
+        // A scheduled wake-up keeps the process alive after the review has ended, so the result
+        // would wait for it. Reviewers report back on their own; nothing needs a timer.
+        let timers = ["ScheduleWakeup", "CronCreate"]
+        return timers + flags.flatMap { ["Bash(git branch \($0):*)", "Bash(git branch * \($0) *)", "Bash(git branch * \($0))",
                                          "Bash(git -C * branch \($0) *)", "Bash(git -C * branch \($0))", "Bash(git -C * branch * \($0) *)", "Bash(git -C * branch * \($0))"] }
     }()
 
