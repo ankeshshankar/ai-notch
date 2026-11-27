@@ -186,6 +186,29 @@ final class PRReviewStore: ObservableObject {
         guard FileManager.default.fileExists(atPath: folder.path) else { return }
         let file = ReplyFiles.update(raw: raw, ref: ref, folder: folder, me: meUUID(), posted: [])
         setUnseenReplies(ref.key, file.unseen(ReplyFiles.seen(ref)))
+        await autoReadReplies(ref, head: head, file: file)
+    }
+
+    private var autoReading: Set<String> = []
+
+    /// The replies nobody has read yet are read once per newest reply (Haiku, a disagreement again on Opus) and the
+    /// classification saved in `replies.json`. Never in a dev run; a failed read is not repeated for the same reply.
+    func autoReadReplies(_ ref: PullRequestRef, head: String, file: RepliesFile) async {
+        let todo = file.unreadToTry()
+        guard !todo.isEmpty, !Self.isDevRun, let repo = Self.repoPath(ref), autoReading.insert(ref.key).inserted else { return }
+        defer { autoReading.remove(ref.key) }
+        guard let token = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else { return }
+        let folder = Self.folder(ref, head: head)
+        let runner = PRReviewRunner()
+        let result = await ReplyReading.read(threads: todo, head: head) { input, model in
+            await withCheckedContinuation { continuation in
+                runner.start(PRReviewRunner.Job(ref: ref, head: head, repoPath: repo, dir: folder, token: token, replyRead: .init(inputJSON: input, model: model))) { continuation.resume(returning: $0) }
+            }
+        }
+        var fresh = ReplyFiles.load(folder)
+        fresh.apply(result.analyses)
+        fresh.markTried(todo)
+        ReplyFiles.save(fresh, folder: folder)
     }
 
     // MARK: Queueing
@@ -375,7 +398,7 @@ final class PRReviewStore: ObservableObject {
             let parsed = ReplyBlocks.parse(output.text)
             if !parsed.analyses.isEmpty {
                 var file = ReplyFiles.load(folder)
-                file.apply(parsed.analyses)
+                file.apply(parsed.analyses, model: ReviewModels.full)
                 ReplyFiles.save(file, folder: folder)
             }
         }

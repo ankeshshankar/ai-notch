@@ -58,3 +58,52 @@ enum ReplyFiles {
         return file
     }
 }
+
+/// The read of the author's replies: a first pass on Haiku, then a second on Opus for every thread the first
+/// called a disagreement; only the Opus read of those is kept. `pass` runs one headless pass (injected in checks).
+enum ReplyReading {
+    struct Result {
+        var analyses: [ReplyAnalysis] = []
+        var cost: Double = 0
+        /// Disagreements read again on Opus.
+        var reread = 0
+        /// Comment ids the model answered for that are not threads of the file (kept out, counted).
+        var skipped = 0
+        var failure: String?
+        var cancelled = false
+    }
+
+    typealias Pass = (_ input: Data, _ model: String) async -> PRReviewRunner.Outcome
+
+    static func read(threads: [ReplyThread], head: String, pass: Pass) async -> Result {
+        var result = Result()
+        func run(_ list: [ReplyThread], model: String) async -> [ReplyAnalysis]? {
+            switch await pass(ReplyRead.inputJSON(head: head, threads: list), model) {
+            case .finished(let out):
+                result.cost += out.costUSD ?? 0
+                let parsed = ReplyBlocks.parse(out.text)
+                result.skipped += parsed.skipped
+                var items = parsed.analyses.filter { a in list.contains { $0.id == a.commentID } }
+                for index in items.indices { items[index].model = model }
+                return items
+            case .failed(let why): result.failure = why
+            case .cancelled: result.cancelled = true
+            case .timedOut: result.failure = "timed out"
+            }
+            return nil
+        }
+        guard let first = await run(threads, model: ReviewModels.replies) else { return result }
+        let disagreements = first.filter(\.isDisagreement)
+        var kept = first.filter { !$0.isDisagreement }
+        if !disagreements.isEmpty {
+            let again = threads.filter { t in disagreements.contains { $0.commentID == t.id } }
+            if let second = await run(again, model: ReviewModels.reread) {
+                kept += second
+                result.reread = again.count
+            } else if result.failure == nil && !result.cancelled { result.failure = "re-read failed" }
+            // A disagreement the second read did not give stays unread: it is never shown on the first read alone.
+        }
+        result.analyses = kept
+        return result
+    }
+}

@@ -307,31 +307,34 @@ final class PRChatSession: ObservableObject {
         guard let secret = KeychainItem.read(service: BitbucketConfig.tokenService)?.secret else { notice = "No Bitbucket read token"; return }
         readingReplies = true
         notice = nil
-        let job = PRReviewRunner.Job(ref: ref, head: head, repoPath: repo, dir: folder, token: secret,
-                                     replyRead: .init(inputJSON: ReplyRead.inputJSON(head: head, threads: todo)))
+        let (ref, head, folder) = (self.ref, self.head, self.folder)
         let runner = PRReviewRunner()
         readRunner = runner
-        runner.start(job) { [weak self] outcome in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.finishRead(outcome) } }
+        Task { @MainActor [weak self] in
+            let result = await ReplyReading.read(threads: todo, head: head) { input, model in
+                await withCheckedContinuation { continuation in
+                    let job = PRReviewRunner.Job(ref: ref, head: head, repoPath: repo, dir: folder, token: secret, replyRead: .init(inputJSON: input, model: model))
+                    runner.start(job) { continuation.resume(returning: $0) }
+                }
+            }
+            self?.finishRead(result, todo: todo)
         }
     }
 
-    private func finishRead(_ outcome: PRReviewRunner.Outcome) {
+    private func finishRead(_ result: ReplyReading.Result, todo: [ReplyThread]) {
         readingReplies = false
         readRunner = nil
-        switch outcome {
-        case .finished(let out):
-            let parsed = ReplyBlocks.parse(out.text)
-            replies = ReplyFiles.load(folder)
-            replies.apply(parsed.analyses)
-            ReplyFiles.save(replies, folder: folder)
-            for a in parsed.analyses { replyDrafts[a.commentID] = nil }
-            notice = parsed.analyses.isEmpty ? "The read gave no result" : "Read \(parsed.analyses.count) thread\(parsed.analyses.count == 1 ? "" : "s")"
-                + (out.costUSD.map { String(format: " · $%.2f", $0) } ?? "")
-        case .failed(let why): notice = "Reading replies failed: \(why)"
-        case .cancelled: notice = "Stopped"
-        case .timedOut: notice = "Reading replies timed out"
-        }
+        replies = ReplyFiles.load(folder)
+        let unknown = replies.apply(result.analyses)
+        replies.markTried(todo)
+        ReplyFiles.save(replies, folder: folder)
+        for a in result.analyses { replyDrafts[a.commentID] = nil }
+        if result.cancelled { notice = "Stopped"; return }
+        let n = result.analyses.count - unknown.count
+        let cost = result.cost > 0 ? String(format: " · $%.2f", result.cost) : ""
+        if let why = result.failure, n == 0 { notice = "Reading replies failed: \(why)"; return }
+        notice = (n == 0 ? "The read gave no result" : "Read \(n) thread\(n == 1 ? "" : "s")") + (result.reread > 0 ? " · \(result.reread) re-read" : "") + cost
+        if result.skipped > 0 { notice = (notice ?? "") + " · \(result.skipped) unreadable" }
     }
 
     /// A click on one of a thread's four buttons, after the confirm. Reply sends the draft as a reply under my comment.

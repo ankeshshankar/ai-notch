@@ -245,9 +245,9 @@ public enum FollowUp {
     }
 
     /// The same read-only tool set and settings as a full review, without the skill's folders or subagents.
-    public static func arguments(scratch: String, hookCommand: String?, home: String = NSHomeDirectory(), prompt: String, resume: String? = nil) -> [String] {
+    public static func arguments(scratch: String, hookCommand: String?, home: String = NSHomeDirectory(), prompt: String, resume: String? = nil, model: String = ReviewModels.full) -> [String] {
         let bbget = ReviewCommand.bbGetPath(home: home)
-        var args = ["-p", prompt]
+        var args = ["-p", prompt, "--model", model]
         if let resume { args += ["--resume", resume] }
         args += ["--setting-sources", ""]
         if let hookCommand { args += ["--settings", ReviewCommand.observeHooksJSON(command: hookCommand)] }

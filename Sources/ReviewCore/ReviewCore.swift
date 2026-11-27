@@ -330,6 +330,14 @@ public enum ReviewGate: Equatable, Sendable {
 
 // MARK: The headless command
 
+/// The model ids of the review cycle (the contract names them): Opus for the review, the follow-up and the re-read
+/// of a disagreement, Haiku for the first read of the author's replies.
+public enum ReviewModels {
+    public static let full = "claude-opus-5-5"
+    public static let replies = "claude-haiku-5-5"
+    public static let reread = full
+}
+
 public enum ReviewCommand {
     /// Everything the review may do, and nothing else (`--permission-mode dontAsk` refuses the
     /// rest without asking). Reads: files, search, read-only git, the Bitbucket API with GET
@@ -443,6 +451,7 @@ public enum ReviewCommand {
     public static func arguments(prNumber: Int, scratch: String, skill: String, agentsJSON: String, hookCommand: String? = nil, home: String = NSHomeDirectory(), skillName: String = ReviewNames.defaultSkill, branch: BranchTarget? = nil) -> [String] {
         let bbget = bbGetPath(home: home)
         return ["-p", prompt(prNumber: prNumber, scratch: scratch, skill: skill, bbget: bbget, branch: branch),
+         "--model", ReviewModels.full,
          "--setting-sources", ""] + (hookCommand.map { ["--settings", observeHooksJSON(command: $0)] } ?? []) + [
          "--agents", agentsJSON,
          "--add-dir"] + extraDirectories(scratch: scratch, home: home, skill: skillName) + [

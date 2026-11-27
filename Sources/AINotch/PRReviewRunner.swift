@@ -29,6 +29,8 @@ final class PRReviewRunner: @unchecked Sendable {
 
     struct ReplyReadJob: Sendable {
         var inputJSON: Data
+        /// Haiku reads first; a disagreement is read again on Opus (ReplyReading).
+        var model: String = ReviewModels.replies
     }
 
     /// What a follow-up pass is given: the commit the last review covered and the input file's content.
@@ -118,7 +120,7 @@ final class PRReviewRunner: @unchecked Sendable {
         if let read = job.replyRead {
             do { try read.inputJSON.write(to: job.dir.appendingPathComponent("reply-input.json")) } catch { return .failed("cannot write in \(job.dir.path)") }
             madeWorktree = PRChatRunner.ensureWorktree(repo: job.repoPath, dir: job.dir, head: job.head)
-            process.arguments = FollowUp.arguments(scratch: job.dir.path, hookCommand: Self.hookCommand(), prompt: ReplyRead.prompt(scratch: job.dir.path, head: job.head))
+            process.arguments = FollowUp.arguments(scratch: job.dir.path, hookCommand: Self.hookCommand(), prompt: ReplyRead.prompt(scratch: job.dir.path, head: job.head), model: read.model)
         } else if let followUp = job.followUp {
             switch Self.prepareFollowUp(job, followUp) {
             case .success(let prompt):
